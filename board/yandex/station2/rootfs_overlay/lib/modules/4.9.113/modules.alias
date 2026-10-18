@@ -82,7 +82,6 @@ alias i2c:sn3218 leds_is31fl32xx
 alias i2c:is31fl3218 leds_is31fl32xx
 alias i2c:is31fl3235 leds_is31fl32xx
 alias i2c:is31fl3236 leds_is31fl32xx
-alias net-pf-16-proto-16-family-nl80211 cfg80211
 alias of:N*T*Csilergy,sy6045sC* snd_soc_sy6045s
 alias of:N*T*Csilergy,sy6045s snd_soc_sy6045s
 alias i2c:sy6045s snd_soc_sy6045s

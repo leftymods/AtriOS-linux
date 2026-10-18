@@ -1,14 +1,15 @@
 #!/bin/sh
 # AtriOS Unified Audio & Amplifier Management Utility (atrios-audio)
 # Controls:
-#   - AMLAUGESOUND hardware sound card (DAC / ADC)
+#   - AMLAUGESOUND hardware sound card (TDM-B Lane 0 -> SY6045S & ES8156)
 #   - Silergy SY6045S Woofer (2-002b) and Tweeters (2-002a) amplifiers
-#   - Everest ES8156 Headphone DAC (3.5mm jack)
-#   - 8-channel Everest ES7210 microphone array
-#   - System volume and software mic mute
+#   - Everest ES8156 Headphone DAC (3.5mm jack, 2-0008)
+#   - 8-channel Everest ES7210 microphone array (2-0040, 2-0043)
 
 ACTION="${1:-test}"
 CARD="AMLAUGESOUND"
+export XDG_RUNTIME_DIR="/var/run/pipewire"
+export DBUS_SESSION_BUS_ADDRESS="unix:path=/var/run/dbus/system_bus_socket"
 
 case "$ACTION" in
   test)
@@ -31,26 +32,44 @@ case "$ACTION" in
       echo "  * SY6045S driver not loaded"
     fi
     echo ""
-    echo "[Amplifier Re-Init]: Applying hardware booster & un-mute..."
+    echo "[Amplifier Re-Init]: Applying 0dB hardware unmute..."
     /etc/init.d/S03amplifiers start >/dev/null 2>&1 || true
     echo ""
     echo "[Playback Test]: Playing test chime on speakers / headphone jack..."
-    if command -v speaker-test >/dev/null 2>&1; then
-      speaker-test -D default -c 2 -r 48000 -t sine -f 440 -l 1 2>/dev/null || \
-      speaker-test -D playback_plug -c 2 -r 48000 -t sine -f 440 -l 1 2>/dev/null || \
-      speaker-test -D "hw:$CARD,0" -c 2 -r 48000 -t sine -f 440 -l 1 2>/dev/null || true
-    elif command -v aplay >/dev/null 2>&1; then
-      aplay -D default /usr/share/sounds/alsa/Front_Center.wav 2>/dev/null || \
-      aplay -D "hw:$CARD,0" /usr/share/sounds/alsa/Front_Center.wav 2>/dev/null || true
+    WAV="/usr/share/sounds/alsa/Front_Center.wav"
+    PLAY_OK=0
+    if command -v pw-play >/dev/null 2>&1 && pidof pipewire >/dev/null 2>&1 && [ -f "$WAV" ]; then
+      pw-play "$WAV" 2>/dev/null && PLAY_OK=1
+    fi
+    if [ "$PLAY_OK" -eq 0 ]; then
+      # Temporarily stop PipeWire if it holds hw:AMLAUGESOUND,0 exclusively
+      PW_WAS_RUNNING=0
+      if pidof pipewire >/dev/null 2>&1; then
+        PW_WAS_RUNNING=1
+        /etc/init.d/S50pipewire stop >/dev/null 2>&1 || killall wireplumber pipewire 2>/dev/null || true
+        usleep 200000 2>/dev/null || sleep 1
+      fi
+      /etc/init.d/S03amplifiers start >/dev/null 2>&1 || true
+      if command -v speaker-test >/dev/null 2>&1; then
+        speaker-test -D default -c 2 -r 48000 -F S32_LE -t sine -f 440 -l 1 2>/dev/null || \
+        speaker-test -D "plughw:$CARD,0" -c 2 -r 48000 -F S32_LE -t sine -f 440 -l 1 2>/dev/null || \
+        speaker-test -D "hw:$CARD,0" -c 2 -r 48000 -F S32_LE -t sine -f 440 -l 1 2>/dev/null || true
+      elif command -v aplay >/dev/null 2>&1 && [ -f "$WAV" ]; then
+        aplay -D default "$WAV" 2>/dev/null || \
+        aplay -D "plughw:$CARD,0" "$WAV" 2>/dev/null || true
+      fi
+      if [ "$PW_WAS_RUNNING" -eq 1 ]; then
+        /etc/init.d/S50pipewire start >/dev/null 2>&1 || true
+      fi
     fi
     echo ""
     echo "[Microphone Test]: Recording 3 seconds from 8-ch mic array..."
     REC_FILE="/tmp/atrios_mic_test.wav"
     rm -f "$REC_FILE"
     if command -v arecord >/dev/null 2>&1; then
+      arecord -D "hw:$CARD,1" -c 8 -r 48000 -f S32_LE -d 3 "$REC_FILE" 2>/dev/null || \
       arecord -D capture_plug -c 8 -r 48000 -f S32_LE -d 3 "$REC_FILE" 2>/dev/null || \
-      arecord -D default -c 2 -r 48000 -f S16_LE -d 3 "$REC_FILE" 2>/dev/null || \
-      arecord -D "hw:$CARD,1" -c 8 -r 48000 -f S32_LE -d 3 "$REC_FILE" 2>/dev/null || true
+      arecord -D default -c 2 -r 48000 -f S16_LE -d 3 "$REC_FILE" 2>/dev/null || true
       if [ -f "$REC_FILE" ]; then
         SIZE=$(ls -l "$REC_FILE" | awk '{print $5}')
         echo "[OK] Mic capture successful: $REC_FILE ($SIZE bytes)."
@@ -67,8 +86,12 @@ case "$ACTION" in
       echo "File not found: $WAV"
       exit 1
     fi
+    /etc/init.d/S03amplifiers start >/dev/null 2>&1 || true
     echo "Playing $WAV..."
-    aplay -D default "$WAV" 2>/dev/null || aplay -D "hw:$CARD,0" "$WAV"
+    if command -v pw-play >/dev/null 2>&1 && pidof pipewire >/dev/null 2>&1; then
+      pw-play "$WAV" 2>/dev/null && exit 0
+    fi
+    aplay -D default "$WAV" 2>/dev/null || aplay -D "plughw:$CARD,0" "$WAV" 2>/dev/null || aplay -D "hw:$CARD,0" "$WAV"
     ;;
 
   record)
@@ -83,13 +106,13 @@ case "$ACTION" in
   volume)
     VAL="$2"
     if [ -z "$VAL" ]; then
-      amixer -c "$CARD" sget 'Woofer Master' 2>/dev/null || amixer -c "$CARD" sget 'Master' 2>/dev/null || true
+      amixer -c "$CARD" cget name='Woofer Master Playback Volume' 2>/dev/null || \
+      amixer -c "$CARD" sget 'Woofer Master' 2>/dev/null || true
     else
       echo "Setting volume to $VAL..."
       amixer -c "$CARD" sset 'Woofer Master' "$VAL" 2>/dev/null || true
       amixer -c "$CARD" sset 'Tweeters Master' "$VAL" 2>/dev/null || true
       amixer -c "$CARD" sset 'Headphone DAC' "$VAL" 2>/dev/null || true
-      amixer -c "$CARD" sset 'Master' "$VAL" 2>/dev/null || true
       if command -v wpctl >/dev/null 2>&1; then
         wpctl set-volume @DEFAULT_AUDIO_SINK@ "$VAL" 2>/dev/null || true
       fi
@@ -104,24 +127,18 @@ case "$ACTION" in
     STATE="$2"
     if [ "$STATE" = "off" ] || [ "$STATE" = "0" ] || [ "$STATE" = "unmute" ]; then
       echo "Unmuting playback and microphone array..."
-      amixer -c "$CARD" sset 'Woofer Master' unmute 2>/dev/null || true
-      amixer -c "$CARD" sset 'Tweeters Master' unmute 2>/dev/null || true
-      amixer -c "$CARD" sset 'Headphone Headphone' unmute 2>/dev/null || true
-      amixer -c "$CARD" sset 'Capture' unmute 2>/dev/null || true
-      amixer -c "$CARD" sset 'Capture' 100% 2>/dev/null || true
+      amixer -c "$CARD" cset name='Woofer Master Playback Switch' 1 2>/dev/null || true
+      amixer -c "$CARD" cset name='Tweeters Master Playback Switch' 1 2>/dev/null || true
+      amixer -c "$CARD" cset name='Headphone Headphone Switch' 1 2>/dev/null || true
       wpctl set-mute @DEFAULT_AUDIO_SOURCE@ 0 2>/dev/null || true
       wpctl set-mute @DEFAULT_AUDIO_SINK@ 0 2>/dev/null || true
-      [ -f /usr/lib/atrios/light ] && python3 /usr/lib/atrios/light ring off 2>/dev/null || true
     else
-      echo "Muting playback and microphone array (Ring -> RED)..."
-      amixer -c "$CARD" sset 'Woofer Master' mute 2>/dev/null || true
-      amixer -c "$CARD" sset 'Tweeters Master' mute 2>/dev/null || true
-      amixer -c "$CARD" sset 'Headphone Headphone' mute 2>/dev/null || true
-      amixer -c "$CARD" sset 'Capture' mute 2>/dev/null || true
-      amixer -c "$CARD" sset 'Capture' 0% 2>/dev/null || true
+      echo "Muting playback and microphone array..."
+      amixer -c "$CARD" cset name='Woofer Master Playback Switch' 0 2>/dev/null || true
+      amixer -c "$CARD" cset name='Tweeters Master Playback Switch' 0 2>/dev/null || true
+      amixer -c "$CARD" cset name='Headphone Headphone Switch' 0 2>/dev/null || true
       wpctl set-mute @DEFAULT_AUDIO_SOURCE@ 1 2>/dev/null || true
       wpctl set-mute @DEFAULT_AUDIO_SINK@ 1 2>/dev/null || true
-      [ -f /usr/lib/atrios/light ] && python3 /usr/lib/atrios/light ring red 2>/dev/null || true
     fi
     ;;
 

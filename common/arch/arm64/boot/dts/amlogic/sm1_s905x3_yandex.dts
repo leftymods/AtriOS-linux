@@ -1613,9 +1613,9 @@
 					max-brightness-scale = < 0xc8 >;
 					phandle = <0xda>;
 
-					led1_b {
+					led1_r {
 						reg_offset = < 0x01 >;
-						label = "station2:blue:ring1";
+						label = "station2:red:ring1";
 						linux,default-trigger = "led_ring_fb";
 					};
 
@@ -1625,15 +1625,15 @@
 						linux,default-trigger = "led_ring_fb";
 					};
 
-					led1_r {
+					led1_b {
 						reg_offset = < 0x03 >;
-						label = "station2:red:ring1";
+						label = "station2:blue:ring1";
 						linux,default-trigger = "led_ring_fb";
 					};
 
-					led2_b {
+					led2_r {
 						reg_offset = < 0x04 >;
-						label = "station2:blue:ring2";
+						label = "station2:red:ring2";
 						linux,default-trigger = "led_ring_fb";
 					};
 
@@ -1643,15 +1643,15 @@
 						linux,default-trigger = "led_ring_fb";
 					};
 
-					led2_r {
+					led2_b {
 						reg_offset = < 0x06 >;
-						label = "station2:red:ring2";
+						label = "station2:blue:ring2";
 						linux,default-trigger = "led_ring_fb";
 					};
 
-					led3_b {
+					led3_r {
 						reg_offset = < 0x07 >;
-						label = "station2:blue:ring3";
+						label = "station2:red:ring3";
 						linux,default-trigger = "led_ring_fb";
 					};
 
@@ -1661,15 +1661,15 @@
 						linux,default-trigger = "led_ring_fb";
 					};
 
-					led3_r {
+					led3_b {
 						reg_offset = < 0x09 >;
-						label = "station2:red:ring3";
+						label = "station2:blue:ring3";
 						linux,default-trigger = "led_ring_fb";
 					};
 
-					led4_b {
+					led4_r {
 						reg_offset = < 0x0a >;
-						label = "station2:blue:ring4";
+						label = "station2:red:ring4";
 						linux,default-trigger = "led_ring_fb";
 					};
 
@@ -1679,15 +1679,15 @@
 						linux,default-trigger = "led_ring_fb";
 					};
 
-					led4_r {
+					led4_b {
 						reg_offset = < 0x0c >;
-						label = "station2:red:ring4";
+						label = "station2:blue:ring4";
 						linux,default-trigger = "led_ring_fb";
 					};
 
-					led5_b {
+					led5_r {
 						reg_offset = < 0x0d >;
-						label = "station2:blue:ring5";
+						label = "station2:red:ring5";
 						linux,default-trigger = "led_ring_fb";
 					};
 
@@ -1697,15 +1697,15 @@
 						linux,default-trigger = "led_ring_fb";
 					};
 
-					led5_r {
+					led5_b {
 						reg_offset = < 0x0f >;
-						label = "station2:red:ring5";
+						label = "station2:blue:ring5";
 						linux,default-trigger = "led_ring_fb";
 					};
 
-					led6_b {
+					led6_r {
 						reg_offset = < 0x10 >;
-						label = "station2:blue:ring6";
+						label = "station2:red:ring6";
 						linux,default-trigger = "led_ring_fb";
 					};
 
@@ -1715,15 +1715,15 @@
 						linux,default-trigger = "led_ring_fb";
 					};
 
-					led6_r {
+					led6_b {
 						reg_offset = < 0x12 >;
-						label = "station2:red:ring6";
+						label = "station2:blue:ring6";
 						linux,default-trigger = "led_ring_fb";
 					};
 
-					led7_b {
+					led7_r {
 						reg_offset = < 0x13 >;
-						label = "station2:blue:ring7";
+						label = "station2:red:ring7";
 						linux,default-trigger = "led_ring_fb";
 					};
 
@@ -1733,15 +1733,15 @@
 						linux,default-trigger = "led_ring_fb";
 					};
 
-					led7_r {
+					led7_b {
 						reg_offset = < 0x15 >;
-						label = "station2:red:ring7";
+						label = "station2:blue:ring7";
 						linux,default-trigger = "led_ring_fb";
 					};
 
-					led8_b {
+					led8_r {
 						reg_offset = < 0x16 >;
-						label = "station2:blue:ring8";
+						label = "station2:red:ring8";
 						linux,default-trigger = "led_ring_fb";
 					};
 
@@ -1751,15 +1751,15 @@
 						linux,default-trigger = "led_ring_fb";
 					};
 
-					led8_r {
+					led8_b {
 						reg_offset = < 0x18 >;
-						label = "station2:red:ring8";
+						label = "station2:blue:ring8";
 						linux,default-trigger = "led_ring_fb";
 					};
 
-					led9_b {
+					led9_r {
 						reg_offset = < 0x19 >;
-						label = "station2:blue:ring9";
+						label = "station2:red:ring9";
 						linux,default-trigger = "led_ring_fb";
 					};
 
@@ -1769,15 +1769,15 @@
 						linux,default-trigger = "led_ring_fb";
 					};
 
-					led9_r {
+					led9_b {
 						reg_offset = < 0x1b >;
-						label = "station2:red:ring9";
+						label = "station2:blue:ring9";
 						linux,default-trigger = "led_ring_fb";
 					};
 
-					led10_b {
+					led10_r {
 						reg_offset = < 0x1c >;
-						label = "station2:blue:ring10";
+						label = "station2:red:ring10";
 						linux,default-trigger = "led_ring_fb";
 					};
 
@@ -1787,15 +1787,15 @@
 						linux,default-trigger = "led_ring_fb";
 					};
 
-					led10_r {
+					led10_b {
 						reg_offset = < 0x1e >;
-						label = "station2:red:ring10";
+						label = "station2:blue:ring10";
 						linux,default-trigger = "led_ring_fb";
 					};
 
-					led11_b {
+					led11_r {
 						reg_offset = < 0x1f >;
-						label = "station2:blue:ring11";
+						label = "station2:red:ring11";
 						linux,default-trigger = "led_ring_fb";
 					};
 
@@ -1805,15 +1805,15 @@
 						linux,default-trigger = "led_ring_fb";
 					};
 
-					led11_r {
+					led11_b {
 						reg_offset = < 0x21 >;
-						label = "station2:red:ring11";
+						label = "station2:blue:ring11";
 						linux,default-trigger = "led_ring_fb";
 					};
 
-					led12_b {
+					led12_r {
 						reg_offset = < 0x22 >;
-						label = "station2:blue:ring12";
+						label = "station2:red:ring12";
 						linux,default-trigger = "led_ring_fb";
 					};
 
@@ -1823,9 +1823,9 @@
 						linux,default-trigger = "led_ring_fb";
 					};
 
-					led12_r {
+					led12_b {
 						reg_offset = < 0x24 >;
-						label = "station2:red:ring12";
+						label = "station2:blue:ring12";
 						linux,default-trigger = "led_ring_fb";
 					};
 				};
@@ -1839,9 +1839,9 @@
 					max-brightness-scale = < 0xc8 >;
 					phandle = <0xdb>;
 
-					led13_b {
+					led13_r {
 						reg_offset = < 0x01 >;
-						label = "station2:blue:ring13";
+						label = "station2:red:ring13";
 						linux,default-trigger = "led_ring_fb";
 					};
 
@@ -1851,15 +1851,15 @@
 						linux,default-trigger = "led_ring_fb";
 					};
 
-					led13_r {
+					led13_b {
 						reg_offset = < 0x03 >;
-						label = "station2:red:ring13";
+						label = "station2:blue:ring13";
 						linux,default-trigger = "led_ring_fb";
 					};
 
-					led14_b {
+					led14_r {
 						reg_offset = < 0x04 >;
-						label = "station2:blue:ring14";
+						label = "station2:red:ring14";
 						linux,default-trigger = "led_ring_fb";
 					};
 
@@ -1869,15 +1869,15 @@
 						linux,default-trigger = "led_ring_fb";
 					};
 
-					led14_r {
+					led14_b {
 						reg_offset = < 0x06 >;
-						label = "station2:red:ring14";
+						label = "station2:blue:ring14";
 						linux,default-trigger = "led_ring_fb";
 					};
 
-					led15_b {
+					led15_r {
 						reg_offset = < 0x07 >;
-						label = "station2:blue:ring15";
+						label = "station2:red:ring15";
 						linux,default-trigger = "led_ring_fb";
 					};
 
@@ -1887,15 +1887,15 @@
 						linux,default-trigger = "led_ring_fb";
 					};
 
-					led15_r {
+					led15_b {
 						reg_offset = < 0x09 >;
-						label = "station2:red:ring15";
+						label = "station2:blue:ring15";
 						linux,default-trigger = "led_ring_fb";
 					};
 
-					led16_b {
+					led16_r {
 						reg_offset = < 0x0a >;
-						label = "station2:blue:ring16";
+						label = "station2:red:ring16";
 						linux,default-trigger = "led_ring_fb";
 					};
 
@@ -1905,15 +1905,15 @@
 						linux,default-trigger = "led_ring_fb";
 					};
 
-					led16_r {
+					led16_b {
 						reg_offset = < 0x0c >;
-						label = "station2:red:ring16";
+						label = "station2:blue:ring16";
 						linux,default-trigger = "led_ring_fb";
 					};
 
-					led17_b {
+					led17_r {
 						reg_offset = < 0x0d >;
-						label = "station2:blue:ring17";
+						label = "station2:red:ring17";
 						linux,default-trigger = "led_ring_fb";
 					};
 
@@ -1923,15 +1923,15 @@
 						linux,default-trigger = "led_ring_fb";
 					};
 
-					led17_r {
+					led17_b {
 						reg_offset = < 0x0f >;
-						label = "station2:red:ring17";
+						label = "station2:blue:ring17";
 						linux,default-trigger = "led_ring_fb";
 					};
 
-					led18_b {
+					led18_r {
 						reg_offset = < 0x10 >;
-						label = "station2:blue:ring18";
+						label = "station2:red:ring18";
 						linux,default-trigger = "led_ring_fb";
 					};
 
@@ -1941,15 +1941,15 @@
 						linux,default-trigger = "led_ring_fb";
 					};
 
-					led18_r {
+					led18_b {
 						reg_offset = < 0x12 >;
-						label = "station2:red:ring18";
+						label = "station2:blue:ring18";
 						linux,default-trigger = "led_ring_fb";
 					};
 
-					led19_b {
+					led19_r {
 						reg_offset = < 0x13 >;
-						label = "station2:blue:ring19";
+						label = "station2:red:ring19";
 						linux,default-trigger = "led_ring_fb";
 					};
 
@@ -1959,15 +1959,15 @@
 						linux,default-trigger = "led_ring_fb";
 					};
 
-					led19_r {
+					led19_b {
 						reg_offset = < 0x15 >;
-						label = "station2:red:ring19";
+						label = "station2:blue:ring19";
 						linux,default-trigger = "led_ring_fb";
 					};
 
-					led20_b {
+					led20_r {
 						reg_offset = < 0x16 >;
-						label = "station2:blue:ring20";
+						label = "station2:red:ring20";
 						linux,default-trigger = "led_ring_fb";
 					};
 
@@ -1977,15 +1977,15 @@
 						linux,default-trigger = "led_ring_fb";
 					};
 
-					led20_r {
+					led20_b {
 						reg_offset = < 0x18 >;
-						label = "station2:red:ring20";
+						label = "station2:blue:ring20";
 						linux,default-trigger = "led_ring_fb";
 					};
 
-					led21_b {
+					led21_r {
 						reg_offset = < 0x19 >;
-						label = "station2:blue:ring21";
+						label = "station2:red:ring21";
 						linux,default-trigger = "led_ring_fb";
 					};
 
@@ -1995,15 +1995,15 @@
 						linux,default-trigger = "led_ring_fb";
 					};
 
-					led21_r {
+					led21_b {
 						reg_offset = < 0x1b >;
-						label = "station2:red:ring21";
+						label = "station2:blue:ring21";
 						linux,default-trigger = "led_ring_fb";
 					};
 
-					led22_b {
+					led22_r {
 						reg_offset = < 0x1c >;
-						label = "station2:blue:ring22";
+						label = "station2:red:ring22";
 						linux,default-trigger = "led_ring_fb";
 					};
 
@@ -2013,15 +2013,15 @@
 						linux,default-trigger = "led_ring_fb";
 					};
 
-					led22_r {
+					led22_b {
 						reg_offset = < 0x1e >;
-						label = "station2:red:ring22";
+						label = "station2:blue:ring22";
 						linux,default-trigger = "led_ring_fb";
 					};
 
-					led23_b {
+					led23_r {
 						reg_offset = < 0x1f >;
-						label = "station2:blue:ring23";
+						label = "station2:red:ring23";
 						linux,default-trigger = "led_ring_fb";
 					};
 
@@ -2031,15 +2031,15 @@
 						linux,default-trigger = "led_ring_fb";
 					};
 
-					led23_r {
+					led23_b {
 						reg_offset = < 0x21 >;
-						label = "station2:red:ring23";
+						label = "station2:blue:ring23";
 						linux,default-trigger = "led_ring_fb";
 					};
 
-					led24_b {
+					led24_r {
 						reg_offset = < 0x22 >;
-						label = "station2:blue:ring24";
+						label = "station2:red:ring24";
 						linux,default-trigger = "led_ring_fb";
 					};
 
@@ -2049,9 +2049,9 @@
 						linux,default-trigger = "led_ring_fb";
 					};
 
-					led24_r {
+					led24_b {
 						reg_offset = < 0x24 >;
-						label = "station2:red:ring24";
+						label = "station2:blue:ring24";
 						linux,default-trigger = "led_ring_fb";
 					};
 				};
@@ -2109,7 +2109,7 @@
 					vddio-supply = <&fixedregulator_3v3d>;
 					pvdd-supply = <&fixedregulator_20v_amp>;
 					firmware = "sy6045s-tweeters-settings.txt";
-					restore-regs = <0x07 0x01 0xff 0x06 0x01 0x08>;
+					restore-regs = <0x07 0x01 0xff 0x06 0x01 0x00>;
 					status = "okay";
 					phandle = <0x8f>;
 				};
@@ -2122,7 +2122,7 @@
 					pvdd-supply = <&fixedregulator_20v_amp>;
 					pbtl-mode;
 					firmware = "sy6045s-woofer-settings.txt";
-					restore-regs = <0x07 0x01 0xff 0x06 0x01 0x08>;
+					restore-regs = <0x07 0x01 0xff 0x06 0x01 0x00>;
 					status = "okay";
 					phandle = <0x8e>;
 				};
@@ -2309,7 +2309,7 @@
 				compatible = "amlogic, meson-uart";
 				reg = <0x00 0x4000 0x00 0x18>;
 				interrupts = <0x00 0xc5 0x01>;
-				status = "disabled";
+				status = "okay";
 				clocks = <0x14>;
 				clock-names = "clk_uart";
 				fifosize = <0x40>;
@@ -2397,14 +2397,15 @@
 			tdm@1 {
 				compatible = "amlogic, sm1-snd-tdmb";
 				#sound-dai-cells = <0x00>;
-				dai-tdm-lane-slot-mask-in = <0x01 0x00 0x00 0x00>;
-				dai-tdm-lane-slot-mask-out = <0x00 0x00 0x01 0x00>;
+				dai-tdm-lane-slot-mask-in = <0x00 0x01 0x00 0x00>;
+				dai-tdm-lane-slot-mask-out = <0x01 0x00 0x00 0x00>;
 				dai-tdm-clk-sel = <0x01>;
 				clocks = <0x1e 0x25 0x02 0x0d>;
 				clock-names = "mclk\0clk_srcpll";
 				pinctrl-names = "tdm_pins";
 				pinctrl-0 = <0x21 0x22 0x23>;
 				mclk_pad = <0x00>;
+				start_clk_enable = <0x01>;
 				status = "okay";
 				phandle = <0x8d>;
 			};
@@ -2413,9 +2414,7 @@
 				compatible = "amlogic, sm1-snd-tdmc";
 				#sound-dai-cells = <0x00>;
 				dai-tdm-lane-slot-mask-in = <0x01 0x00 0x00 0x00>;
-				#dai-tdm-lane-slot-mask-out = <0x01 0x00 0x01 0x01>;
-				#dai-tdm-lane-oe-slot-mask-in = <0x00 0x00 0x00 0x00>;
-				#dai-tdm-lane-oe-slot-mask-out = <0x01 0x00 0x00 0x00>;
+				dai-tdm-lane-slot-mask-out = <0x01 0x00 0x00 0x00>;
 				dai-tdm-clk-sel = <0x02>;
 				clocks = <0x1e 0x26 0x02 0x0e>;
 				clock-names = "mclk\0clk_srcpll";
@@ -2535,9 +2534,9 @@
 				clocks = <0x1e 0x16 0x02 0x05 0x1e 0x34>;
 				clock-names = "gate\0srcpll\0eqdrc";
 				eqdrc_module = <0x01>;
-				lane_mask = <0x01>;
+				lane_mask = <0x04>;
 				channel_mask = <0x03>;
-				status = "okay";
+				status = "disabled";
 				phandle = <0xf3>;
 			};
 		};
@@ -3783,8 +3782,10 @@
 		compatible = "amlogic, bt-dev";
 		dev_name = "bt-dev";
 		status = "okay";
-		// // // gpio_reset = <0x18 0x53 0x00>;
+		gpio_reset = <0x18 0x53 0x00>;
+		gpio_btwakeup = <0x18 0x54 0x00>;
 		gpio_hostwake = <0x18 0x55 0x00>;
+		power_down_disable = <0x01>;
 	};
 
 	wifi {
@@ -3961,7 +3962,7 @@
 		key_name = "function", "micmute";
 		key_code = <0x246 0xf8>;
 		key-gpios = <0x18 0x41 0x01 0x18 0x40 0x01>;
-		detect_mode = <0x01>;
+		detect_mode = <0x00>;
 	};
 
 	unifykey {
@@ -4210,16 +4211,16 @@
 	};
 
 	auge_sound {
-		compatible = "amlogic, g12a-sound-card";
+		compatible = "amlogic, tl1-sound-card";
 		aml-audio-card,name = "AML-AUGESOUND";
 		// // // aml-audio-card,hp-det-gpio = <0x18 0x4d 0x00>;
 		aml-audio-card,widgets = "Headphone\0Headphones";
-		aml-audio-card,effect = <0x118>;
 		aml-audio-card,routing = "Headphones\0Headphone LOUT\0Headphones\0Headphone ROUT";
 
 		aml-audio-card,dai-link@0 {
 			format = "i2s";
 			mclk-fs = <0x100>;
+			continuous-clock;
 			bitclock-master = <0x8d>;
 			frame-master = <0x8d>;
 			suffix-name = "alsaPORT-i2s";
@@ -4328,7 +4329,7 @@
 
 		opp04 {
 			opp-hz = <0x00 0x3b9aca00>;
-			opp-microvolt = "\0\f5";
+			opp-microvolt = <0xc3500>;
 		};
 
 		opp05 {
@@ -4399,6 +4400,8 @@
 		regulator-max-microvolt = <0x1312d00>;
 		gpio = <0x18 0x4b 0x00>;
 		enable-active-high;
+		regulator-boot-on;
+		regulator-always-on;
 		phandle = <0x11a>;
 	};
 

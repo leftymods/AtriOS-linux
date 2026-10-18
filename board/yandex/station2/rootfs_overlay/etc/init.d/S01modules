@@ -4,40 +4,50 @@
 case "$1" in
   start)
     echo "[AtriOS] Loading hardware drivers..."
+    # Remove duplicate cfg80211.ko if present since cfg80211 is already built into vmlinux
+    rm -f /lib/modules/4.9.113/cfg80211.ko 2>/dev/null || true
     depmod -a 2>/dev/null || true
 
     # 1. Audio drivers & codecs
-    modprobe snd-soc-pcm1774 2>/dev/null || insmod /lib/modules/4.9.113/snd-soc-pcm1774.ko 2>/dev/null
-    modprobe snd-soc-pcm1774-i2c 2>/dev/null || insmod /lib/modules/4.9.113/snd-soc-pcm1774-i2c.ko 2>/dev/null
-    modprobe snd-soc-es7210 2>/dev/null || insmod /lib/modules/4.9.113/snd-soc-es7210.ko 2>/dev/null
-    modprobe snd-soc-es8156 2>/dev/null || insmod /lib/modules/4.9.113/snd-soc-es8156.ko 2>/dev/null
-    modprobe snd-soc-sy6045s 2>/dev/null || insmod /lib/modules/4.9.113/snd-soc-sy6045s.ko 2>/dev/null
-    modprobe snd-soc-tas5825m 2>/dev/null || insmod /lib/modules/4.9.113/snd-soc-tas5825m.ko 2>/dev/null
+    insmod /lib/modules/4.9.113/snd-soc-pcm1774.ko 2>/dev/null || modprobe snd-soc-pcm1774 2>/dev/null
+    insmod /lib/modules/4.9.113/snd-soc-pcm1774-i2c.ko 2>/dev/null || modprobe snd-soc-pcm1774-i2c 2>/dev/null
+    insmod /lib/modules/4.9.113/snd-soc-es7210.ko 2>/dev/null || modprobe snd-soc-es7210 2>/dev/null
+    insmod /lib/modules/4.9.113/snd-soc-es8156.ko 2>/dev/null || modprobe snd-soc-es8156 2>/dev/null
+    insmod /lib/modules/4.9.113/snd-soc-sy6045s.ko 2>/dev/null || modprobe snd-soc-sy6045s 2>/dev/null
+    insmod /lib/modules/4.9.113/snd-soc-tas5825m.ko 2>/dev/null || modprobe snd-soc-tas5825m 2>/dev/null
 
     # 2. Rotary knob & sensors
-    modprobe rotary-volume 2>/dev/null || insmod /lib/modules/4.9.113/rotary-volume.ko 2>/dev/null
-    modprobe ltr308als01 2>/dev/null || insmod /lib/modules/4.9.113/ltr308als01.ko 2>/dev/null
+    insmod /lib/modules/4.9.113/rotary-volume.ko 2>/dev/null || modprobe rotary-volume 2>/dev/null
+    insmod /lib/modules/4.9.113/ltr308als01.ko 2>/dev/null || modprobe ltr308als01 2>/dev/null
 
     # 3. Displays: Gowin 25x16 screen & IS31FL32xx LED ring
-    modprobe gowin_led_device 2>/dev/null || insmod /lib/modules/4.9.113/gowin_led_device.ko 2>/dev/null
-    modprobe quasar_led_screen 2>/dev/null || insmod /lib/modules/4.9.113/quasar_led_screen.ko 2>/dev/null
-    modprobe leds-is31fl32xx 2>/dev/null || insmod /lib/modules/4.9.113/leds-is31fl32xx.ko 2>/dev/null
-    modprobe quasar_led_ring 2>/dev/null || insmod /lib/modules/4.9.113/quasar_led_ring.ko 2>/dev/null
+    insmod /lib/modules/4.9.113/gowin_led_device.ko 2>/dev/null || modprobe gowin_led_device 2>/dev/null
+    insmod /lib/modules/4.9.113/quasar_led_screen.ko 2>/dev/null || modprobe quasar_led_screen 2>/dev/null
+    insmod /lib/modules/4.9.113/leds-is31fl32xx.ko 2>/dev/null || modprobe leds-is31fl32xx 2>/dev/null
+    insmod /lib/modules/4.9.113/quasar_led_ring.ko 2>/dev/null || modprobe quasar_led_ring 2>/dev/null
 
-    # 4. Wireless (Realtek RTL8822CS/ES) - Power up SDIO bus before driver attachment
+    # 4. Wireless (Realtek RTL8822CS/ES) - Power up SDIO & BT reset GPIO before driver attachment
     if [ -x /usr/lib/atrios/wifi-power ]; then
       /usr/lib/atrios/wifi-power 1 2>/dev/null || true
     elif [ -c /dev/wifi_power ]; then
       python3 -c "import fcntl; f = open('/dev/wifi_power', 'wb'); fcntl.ioctl(f.fileno(), 0x6d03); f.close()" 2>/dev/null || true
     fi
+    for rfk in /sys/class/rfkill/rfkill*; do
+      if [ -f "$rfk/state" ]; then
+        echo 0 > "$rfk/state" 2>/dev/null || true
+        usleep 100000 2>/dev/null || true
+        echo 1 > "$rfk/state" 2>/dev/null || true
+      fi
+    done
     usleep 200000 2>/dev/null || sleep 1
 
-    modprobe 88x2es 2>/dev/null || insmod /lib/modules/4.9.113/88x2es.ko 2>/dev/null
-    modprobe zigbee_control 2>/dev/null || insmod /lib/modules/4.9.113/zigbee_control.ko 2>/dev/null
+    # Load 88x2es directly via insmod to avoid modprobe attempting duplicate cfg80211.ko load
+    insmod /lib/modules/4.9.113/88x2es.ko 2>/dev/null || modprobe 88x2es 2>/dev/null
+    insmod /lib/modules/4.9.113/zigbee-control.ko 2>/dev/null || modprobe zigbee-control 2>/dev/null
 
     # 5. VPU & Video decoders
-    for m in vpu encoder amvdec_h265 amvdec_h264 amvdec_vp9; do
-      modprobe $m 2>/dev/null || insmod /lib/modules/4.9.113/${m}.ko 2>/dev/null
+    for m in media_clock firmware decoder_common stream_input vpu encoder amvdec_h265 amvdec_h264 amvdec_vp9; do
+      insmod /lib/modules/4.9.113/${m}.ko 2>/dev/null || modprobe $m 2>/dev/null
     done
 
     echo "[AtriOS] Drivers loaded."

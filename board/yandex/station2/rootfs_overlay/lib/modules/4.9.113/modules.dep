@@ -9,7 +9,7 @@ snd-soc-pcm1774-i2c.ko: snd-soc-pcm1774.ko
 amvdec_mpeg12.ko: stream_input.ko decoder_common.ko firmware.ko media_clock.ko
 gowin_led_device.ko:
 rotary-volume.ko:
-iwlmvm.ko: iwlwifi.ko mac80211.ko cfg80211.ko
+iwlmvm.ko: iwlwifi.ko mac80211.ko
 snd-soc-es7210.ko:
 quasar_led_screen.ko:
 quasar_led_ring.ko:
@@ -30,7 +30,6 @@ leds-is31fl32xx.ko:
 aml_hardware_dmx.ko: stream_input.ko decoder_common.ko firmware.ko media_clock.ko
 amvdec_mh264.ko: stream_input.ko decoder_common.ko firmware.ko media_clock.ko
 amvdec_mpeg4.ko: decoder_common.ko firmware.ko media_clock.ko
-cfg80211.ko:
 stream_input.ko: decoder_common.ko firmware.ko media_clock.ko
 vpu.ko: media_clock.ko
 amvdec_vp9.ko: stream_input.ko decoder_common.ko firmware.ko media_clock.ko
@@ -41,12 +40,12 @@ amvdec_mjpeg.ko: decoder_common.ko firmware.ko media_clock.ko
 amvdec_mmjpeg.ko: decoder_common.ko firmware.ko media_clock.ko
 btintel.ko:
 ltr308als01.ko:
-88x2es.ko: cfg80211.ko
-sprdwl_ng.ko: uwe5621_bsp_sdio.ko cfg80211.ko
+88x2es.ko:
+sprdwl_ng.ko: uwe5621_bsp_sdio.ko
 decoder_common.ko: firmware.ko media_clock.ko
 tb_detect.ko:
 snd-soc-es8156.ko:
-iwlwifi.ko: cfg80211.ko
+iwlwifi.ko:
 amvdec_vc1.ko: decoder_common.ko firmware.ko media_clock.ko
 amvdec_avs.ko: stream_input.ko decoder_common.ko firmware.ko media_clock.ko
-mac80211.ko: cfg80211.ko
+mac80211.ko:

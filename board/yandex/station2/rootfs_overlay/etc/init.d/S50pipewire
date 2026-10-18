@@ -11,13 +11,14 @@ case "$1" in
     chmod 0700 /var/run/pipewire
 
     if command -v pipewire >/dev/null 2>&1; then
-      pipewire &
+      pipewire >/dev/null 2>&1 &
       sleep 1
       if command -v wireplumber >/dev/null 2>&1; then
-        wireplumber &
+        wireplumber >/dev/null 2>&1 &
       elif command -v pipewire-media-session >/dev/null 2>&1; then
-        pipewire-media-session &
+        pipewire-media-session >/dev/null 2>&1 &
       fi
+      (sleep 2 && /etc/init.d/S03amplifiers start >/dev/null 2>&1) &
     fi
     ;;
   stop)

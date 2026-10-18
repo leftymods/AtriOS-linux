@@ -29,14 +29,16 @@ case "$CMD" in
 
     # Bluetooth Status
     echo ""
-    echo "[2. Bluetooth (Realtek RTL8822CS UART)]:"
+    echo "[2. Bluetooth (Realtek RTL8822ES UART)]:"
     if command -v hciconfig >/dev/null 2>&1 && hciconfig hci0 >/dev/null 2>&1; then
       BT_STATE=$(hciconfig hci0 | grep -o 'UP RUNNING\|DOWN')
       echo "  * HCI Device: hci0 ($BT_STATE)"
     elif [ -e /sys/class/bluetooth/hci0 ]; then
       echo "  * HCI Device: hci0 registered in sysfs"
+    elif [ -f /tmp/atrios_bt_state ]; then
+      echo "  * UART Controller (/dev/ttyS1): UP ($(cat /tmp/atrios_bt_state))"
     else
-      echo "  * HCI Device: Not attached. Available UART: /dev/ttyS1"
+      echo "  * HCI Device: Not attached. Available UART: /dev/ttyS1 (run 'atrios bt init')"
     fi
 
     # Zigbee Status
@@ -112,32 +114,65 @@ case "$CMD" in
 
   bt|bluetooth)
     SUBCMD="${2:-status}"
-    if [ "$SUBCMD" = "init" ]; then
+    bt_do_init() {
       echo "Attaching Bluetooth controller on /dev/ttyS1..."
-      if command -v rtk_hciattach >/dev/null 2>&1; then
-        rtk_hciattach -n -s 115200 /dev/ttyS1 rtk_h5 &
-      elif command -v hciattach >/dev/null 2>&1; then
-        hciattach /dev/ttyS1 any 115200 flow &
-      elif command -v btattach >/dev/null 2>&1; then
-        btattach -B /dev/ttyS1 -S 115200 -P h4 &
+      killall hciattach btattach rtk_hciattach 2>/dev/null || true
+      usleep 200000 2>/dev/null || sleep 1
+      BT_RC=0
+      if [ -f /usr/lib/atrios/rtk-bt-init ]; then
+        python3 /usr/lib/atrios/rtk-bt-init init || BT_RC=$?
+      fi
+      # Only attach kernel H4 line discipline if controller is in H4 mode (BT_RC == 0)
+      if [ "$BT_RC" -eq 0 ]; then
+        if command -v hciattach >/dev/null 2>&1; then
+          hciattach /dev/ttyS1 any 115200 flow 2>/dev/null || hciattach /dev/ttyS1 any 115200 noflow 2>/dev/null || true
+        elif command -v btattach >/dev/null 2>&1; then
+          btattach -B /dev/ttyS1 -S 115200 -P h4 >/dev/null 2>&1 &
+        fi
+        sleep 1
+        if command -v hciconfig >/dev/null 2>&1; then
+          hciconfig hci0 up 2>/dev/null || true
+        fi
+      fi
+    }
+    if [ "$SUBCMD" = "init" ]; then
+      bt_do_init
+      if [ -e /sys/class/bluetooth/hci0 ] && command -v hciconfig >/dev/null 2>&1; then
+        hciconfig hci0 2>/dev/null || true
+      elif [ -f /tmp/atrios_bt_state ]; then
+        echo "Bluetooth controller ready ($(cat /tmp/atrios_bt_state))"
       fi
     elif [ "$SUBCMD" = "scan" ]; then
-      echo "Scanning for nearby Bluetooth devices..."
-      if command -v hciconfig >/dev/null 2>&1; then
-        hciconfig hci0 up 2>/dev/null || true
+      if [ ! -e /sys/class/bluetooth/hci0 ] && [ ! -f /tmp/atrios_bt_state ]; then
+        bt_do_init
       fi
-      if command -v bluetoothctl >/dev/null 2>&1; then
-        timeout 5 bluetoothctl scan on 2>/dev/null || true
-      elif command -v hcitool >/dev/null 2>&1; then
-        hcitool scan 2>/dev/null
+      echo "Scanning for nearby Bluetooth devices..."
+      if [ -f /tmp/atrios_bt_state ] && grep -q "^h5" /tmp/atrios_bt_state 2>/dev/null; then
+        python3 /usr/lib/atrios/rtk-bt-init scan
+      elif [ -e /sys/class/bluetooth/hci0 ]; then
+        if command -v hciconfig >/dev/null 2>&1; then
+          hciconfig hci0 up 2>/dev/null || true
+        fi
+        if command -v hcitool >/dev/null 2>&1; then
+          hcitool -i hci0 scan 2>/dev/null || {
+            hcitool -i hci0 lescan --duplicates 2>/dev/null &
+            SCAN_PID=$!
+            sleep 5
+            kill -INT $SCAN_PID 2>/dev/null || true
+          }
+        elif command -v bluetoothctl >/dev/null 2>&1; then
+          bluetoothctl --timeout 5 scan on 2>/dev/null || true
+        fi
       else
-        echo "BlueZ tools not found."
+        python3 /usr/lib/atrios/rtk-bt-init scan 2>/dev/null || echo "Bluetooth controller not responding."
       fi
     else
-      if command -v hciconfig >/dev/null 2>&1; then
+      if [ -e /sys/class/bluetooth/hci0 ] && command -v hciconfig >/dev/null 2>&1; then
         hciconfig -a
+      elif [ -f /tmp/atrios_bt_state ]; then
+        echo "Bluetooth UART Controller (/dev/ttyS1): $(cat /tmp/atrios_bt_state)"
       else
-        ls -la /sys/class/bluetooth/ 2>/dev/null || echo "No Bluetooth adapters"
+        ls -la /sys/class/bluetooth/ 2>/dev/null || echo "No Bluetooth adapters attached (run 'atrios bt init')"
       fi
     fi
     ;;

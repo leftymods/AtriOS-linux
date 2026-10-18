@@ -46,7 +46,7 @@ case "$c" in
   wifi|bt|bluetooth|zigbee) exec /bin/sh $L/wireless "$c" "$@" ;;
   wireless)           exec /bin/sh $L/wireless "$@" ;;
   status)             exec /bin/sh $L/wireless status ;;
-  input|buttons)      exec python3 $L/input "$@" ;;
+  input|buttons)      exec /bin/sh $L/input "$@" ;;
   ""|help|-h|--help)  usage ;;
   *) echo "atrios: unknown command '$c'"; echo; usage; exit 1 ;;
 esac

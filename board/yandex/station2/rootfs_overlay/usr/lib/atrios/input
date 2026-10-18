@@ -1,245 +1,135 @@
-#!/usr/bin/env python3
-"""
-AtriOS Physical Controls & Software Mic Mute Diagnostic Utility
-Tests:
-  - Top Button 1: Assistant / Alice (KEY_VOICECOMMAND [582] / KEY_POWER [116])
-  - Top Button 2: Microphone Mute (KEY_MICMUTE [248]) -> Toggles Software Mute
-  - Rotary Knob: Volume up / down (KEY_PAGEUP [104] / KEY_PAGEDOWN [109])
-  - Ambient Light Sensor (LTR-308ALS live lux check)
-  - Remote control keys (Bluetooth / IR)
-"""
+#!/bin/sh
+# AtriOS Physical Controls, Rotary Knob, Ambient Light Sensor & Mic Mute Monitor
+echo "=========================================================="
+echo "      AtriOS Buttons, Knob, Sensor & Mic Mute Monitor     "
+echo "=========================================================="
 
-import sys
-import os
-import glob
-import struct
-import select
-import time
-import subprocess
+# 1. Check Ambient Light Sensor (LTR-308ALS)
+LUX_PATH="/sys/bus/iio/devices/iio:device0/in_intensity_input"
+if [ -f "$LUX_PATH" ]; then
+  RAW_LUX=$(cat "$LUX_PATH" 2>/dev/null || echo "0")
+  echo "Ambient Light Sensor (LTR-308ALS): raw=${RAW_LUX}"
+else
+  echo "Ambient Light Sensor (LTR-308ALS): Not detected on sysfs"
+fi
+
+# 2. Ensure /dev/input/event* nodes exist from /sys/class/input/event*
+mkdir -p /dev/input 2>/dev/null || true
+for sys_ev in /sys/class/input/event*; do
+  if [ -e "$sys_ev/dev" ]; then
+    ev_name=$(basename "$sys_ev")
+    if [ ! -c "/dev/input/$ev_name" ]; then
+      maj_min=$(cat "$sys_ev/dev" 2>/dev/null)
+      maj=$(echo "$maj_min" | cut -d: -f1)
+      min=$(echo "$maj_min" | cut -d: -f2)
+      [ -n "$maj" ] && [ -n "$min" ] && mknod "/dev/input/$ev_name" c "$maj" "$min" 2>/dev/null || true
+    fi
+  fi
+done
+
+echo ""
+echo "Discovered input devices:"
+FOUND_EV=0
+for sys_ev in /sys/class/input/event*; do
+  if [ -e "$sys_ev" ]; then
+    ev_name=$(basename "$sys_ev")
+    dev_label=$(cat "$sys_ev/device/name" 2>/dev/null || echo "Unknown")
+    echo "  * /dev/input/$ev_name -> $dev_label"
+    FOUND_EV=1
+  fi
+done
+
+if [ "$FOUND_EV" -eq 0 ]; then
+  echo "  [!] No /sys/class/input/event* devices found."
+  if [ -f /proc/bus/input/devices ]; then
+    echo "  System /proc/bus/input/devices:"
+    grep -E "^[NH]: " /proc/bus/input/devices 2>/dev/null | sed 's/^/    /'
+  fi
+  exit 1
+fi
+
+echo ""
+echo "Physical Button Map:"
+echo "  * Top Button 1: Assistant / Alice (KEY_VOICECOMMAND [582] / KEY_POWER [116])"
+echo "  * Top Button 2: Microphone Mute   (KEY_MICMUTE      [248])"
+echo "  * Rotary Knob : Volume Wheel      (KEY_PAGEUP [104] / KEY_PAGEDOWN [109])"
+echo ""
+echo "Listening for live hardware events... Press Ctrl+C to exit."
+echo "----------------------------------------------------------"
+
+if command -v python3 >/dev/null 2>&1; then
+  exec python3 -u -c '
+import os, sys, glob, struct, select, time, subprocess
 
 EVENT_FORMAT = "QQHHi"
 EVENT_SIZE = struct.calcsize(EVENT_FORMAT)
-FB_RING = "/dev/fb5"
-NUM_LEDS = 24
-SENSOR_LUX_PATH = "/sys/bus/iio/devices/iio:device0/in_intensity_input"
-
 KEY_NAMES = {
-    582: "KEY_VOICECOMMAND (Top Button #1: Alice / Assistant Call)",
+    582: "KEY_VOICECOMMAND (Top Button #1: Alice / Assistant)",
     116: "KEY_POWER (Top Button #1 Alt: Assistant / Power)",
-    248: "KEY_MICMUTE (Top Button #2: Physical Microphone Mute)",
+    248: "KEY_MICMUTE (Top Button #2: Physical Mic Mute)",
     104: "KEY_PAGEUP (Rotary Knob Clockwise -> Volume Up)",
     109: "KEY_PAGEDOWN (Rotary Knob Counter-Clockwise -> Volume Down)",
     256: "BTN_MISC / BTN_0 (Hardware VAD Trigger)",
     115: "KEY_VOLUMEUP (Remote Vol+)",
     114: "KEY_VOLUMEDOWN (Remote Vol-)",
-    103: "KEY_UP (Remote D-Pad Up)",
-    108: "KEY_DOWN (Remote D-Pad Down)",
-    105: "KEY_LEFT (Remote D-Pad Left)",
-    106: "KEY_RIGHT (Remote D-Pad Right)",
-    28:  "KEY_ENTER (Remote OK)",
-    158: "KEY_BACK (Remote Back)",
-    172: "KEY_HOMEPAGE (Remote Home)",
 }
 
-def read_ambient_lux():
-    if os.path.exists(SENSOR_LUX_PATH):
-        try:
-            with open(SENSOR_LUX_PATH, "r") as f:
-                val = float(f.read().strip())
-                return val * 0.2
-        except Exception:
-            pass
-    return None
-
-def set_ring_red(active=True):
-    if not os.path.exists(FB_RING):
-        return
+fds = {}
+for p in sorted(glob.glob("/dev/input/event*")):
     try:
-        with open(FB_RING, "wb") as f:
-            if active:
-                f.write(b"\x00" * (NUM_LEDS * 3))
-            else:
-                f.write(b"\x00" * (NUM_LEDS * 3))
-            f.flush()
-    except Exception:
-        pass
+        fd = os.open(p, os.O_RDONLY | os.O_NONBLOCK)
+        name_p = f"/sys/class/input/{os.path.basename(p)}/device/name"
+        name = open(name_p).read().strip() if os.path.exists(name_p) else os.path.basename(p)
+        fds[fd] = (p, name)
+    except Exception as e:
+        print(f"  [!] Cannot open {p}: {e}", flush=True)
 
-def toggle_software_mic_mute(is_muted):
-    """
-    Applies software microphone mute:
-    When is_muted is True:
-      - PipeWire default audio source muted (val=1)
-      - ALSA AMLAUGESOUND capture channels muted & zeroed
-      - no LED ring indication
-    When is_muted is False:
-      - PipeWire unmuted (val=0)
-      - ALSA AMLAUGESOUND unmuted (100%)
-      - LED ring turned OFF
-    """
-    pw_val = "1" if is_muted else "0"
-    alsa_cmd = "mute" if is_muted else "unmute"
-    alsa_vol = "0%" if is_muted else "100%"
-    sw_val = "0" if is_muted else "1"
+if not fds:
+    sys.exit(1)
 
-    # PipeWire mute
-    try:
-        subprocess.run(["wpctl", "set-mute", "@DEFAULT_AUDIO_SOURCE@", pw_val],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except Exception:
-        pass
+mic_muted = False
+press_t = 0.0
 
-    # ALSA AMLAUGESOUND hardware capture muting
-    for card in ["AMLAUGESOUND", "0", "1"]:
-        try:
-            subprocess.run(["amixer", "-c", card, "sset", "Capture", alsa_cmd],
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            subprocess.run(["amixer", "-c", card, "sset", "Capture", alsa_vol],
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            for ctrl in ["Capture Switch", "ADC Capture Switch", "Mic Capture Switch", "TDMIN_A Switch", "TDMIN_B Switch"]:
-                subprocess.run(["amixer", "-c", card, "cset", f"name={ctrl}", sw_val],
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except Exception:
-            pass
-
-    set_ring_red(is_muted)
-
-def discover_input_devices():
-    devices = {}
-    paths = sorted(glob.glob("/dev/input/event*"))
-
-    # Fallback: if /dev/input/event* nodes missing in devtmpfs, check sysfs and create nodes
-    if not paths:
-        for p in sorted(glob.glob("/sys/class/input/event*")):
-            dev_name = os.path.basename(p)
-            dev_path = f"/dev/input/{dev_name}"
-            dev_f = f"{p}/dev"
-            if os.path.exists(dev_f):
-                try:
-                    with open(dev_f, "r") as df:
-                        major, minor = df.read().strip().split(":")
-                        os.makedirs("/dev/input", exist_ok=True)
-                        os.system(f"mknod {dev_path} c {major} {minor} 2>/dev/null")
-                except Exception:
-                    pass
-            if os.path.exists(dev_path):
-                paths.append(dev_path)
-
-    for path in paths:
-        name = os.path.basename(path)
-        sys_name_path = f"/sys/class/input/{name}/device/name"
-        if os.path.exists(sys_name_path):
+try:
+    while True:
+        r, _, _ = select.select(list(fds.keys()), [], [], 0.2)
+        for fd in r:
+            p, name = fds[fd]
             try:
-                with open(sys_name_path, "r") as f:
-                    name = f.read().strip()
+                data = os.read(fd, EVENT_SIZE * 16)
             except Exception:
-                pass
-        devices[path] = name
-    return devices
-
-def main():
-    print("==========================================================", flush=True)
-    print("      AtriOS Buttons, Knob, Sensor & Mic Mute Monitor     ", flush=True)
-    print("==========================================================", flush=True)
-
-    devices = discover_input_devices()
-    if not devices:
-        print("[Buttons Test] No /dev/input/event* devices detected.", flush=True)
-        if os.path.exists("/proc/bus/input/devices"):
-            print("System input devices (/proc/bus/input/devices):", flush=True)
-            try:
-                with open("/proc/bus/input/devices", "r") as f:
-                    for line in f:
-                        if line.startswith("N: Name=") or line.startswith("H: Handlers="):
-                            print(f"  {line.strip()}", flush=True)
-            except Exception:
-                pass
-        sys.exit(1)
-
-    lux = read_ambient_lux()
-    if lux is not None:
-        print(f"Ambient Light Sensor (LTR-308ALS): \033[1;36m{lux:.1f} Lux\033[0m", flush=True)
-    else:
-        print("Ambient Light Sensor (LTR-308ALS): Not detected on sysfs", flush=True)
-
-    print("\nDiscovered input devices:", flush=True)
-    open_fds = {}
-    for path, name in devices.items():
-        try:
-            fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
-            open_fds[fd] = (path, name)
-            print(f"  * {path:18s} -> {name}", flush=True)
-        except Exception as e:
-            print(f"  * {path:18s} -> (Could not open: {e})", flush=True)
-
-    if not open_fds:
-        print("[Buttons Test] ERROR: Could not open any input event devices for reading!", flush=True)
-        sys.exit(1)
-
-    print("\nPhysical Button Map:", flush=True)
-    print("  * Top Button 1: Assistant / Alice (KEY_VOICECOMMAND [582])", flush=True)
-    print("  * Top Button 2: Microphone Mute   (KEY_MICMUTE      [248])", flush=True)
-    print("  * Rotary Knob : Volume Wheel      (KEY_PAGEUP / KEY_PAGEDOWN)", flush=True)
-    print("\nListening for live hardware events... Press Ctrl+C to exit.", flush=True)
-    print("----------------------------------------------------------", flush=True)
-
-    mic_muted = False
-    assistant_press_time = 0
-
-    try:
-        while True:
-            rlist, _, _ = select.select(list(open_fds.keys()), [], [], 0.1)
-            for fd in rlist:
-                dev_path, dev_name = open_fds[fd]
-                try:
-                    data = os.read(fd, EVENT_SIZE * 16)
-                    for offset in range(0, len(data), EVENT_SIZE):
-                        chunk = data[offset:offset + EVENT_SIZE]
-                        if len(chunk) < EVENT_SIZE:
-                            continue
-                        sec, usec, ev_type, ev_code, ev_value = struct.unpack(EVENT_FORMAT, chunk)
-                        if ev_type == 1: # EV_KEY
-                            ts = time.strftime("%H:%M:%S")
-                            key_str = KEY_NAMES.get(ev_code, f"CODE_{ev_code}")
-
-                            # Top Button 2 (Mic Mute Button)
-                            if ev_code == 248:
-                                if ev_value == 1: # Down / Toggled
-                                    mic_muted = not mic_muted
-                                    toggle_software_mic_mute(mic_muted)
-                                    status = "\033[1;31m[MUTED - RED RING ACTIVATED]\033[0m" if mic_muted else "\033[1;32m[UNMUTED - RING OFF]\033[0m"
-                                    print(f"[{ts}] \033[1;33m>>> TOP BUTTON #2 (MIC MUTE) PRESSED <<<\033[0m -> {status}", flush=True)
-                                elif ev_value == 0: # Up / Released
-                                    print(f"[{ts}] Top Button #2 (Mic Mute) released", flush=True)
-
-                            # Top Button 1 (Assistant / Alice Button)
-                            elif ev_code in (582, 116):
-                                if ev_value == 1:
-                                    assistant_press_time = time.time()
-                                    print(f"[{ts}] \033[1;32m>>> TOP BUTTON #1 (ASSISTANT / ALICE) PRESSED <<<\033[0m", flush=True)
-                                elif ev_value == 0:
-                                    duration = time.time() - assistant_press_time
-                                    print(f"[{ts}] Top Button #1 released (Hold duration: {duration:.2f}s)", flush=True)
-
-                            # Rotary Knob
-                            elif ev_code in (104, 109):
-                                direction = "\033[1;34mClockwise (+Vol)\033[0m" if ev_code == 104 else "\033[1;35mCounter-Clockwise (-Vol)\033[0m"
-                                if ev_value == 1:
-                                    print(f"[{ts}] Rotary Knob Turned: {direction}", flush=True)
-
-                            # Other / Remote Keys
-                            else:
-                                state = "PRESSED " if ev_value == 1 else ("RELEASED" if ev_value == 0 else "REPEAT  ")
-                                color = "\033[1;32m" if ev_value == 1 else "\033[0;37m"
-                                reset = "\033[0m"
-                                print(f"[{ts}] {color}[{state}]{reset} {key_str:<50s} ({dev_name})", flush=True)
-                except Exception:
-                    pass
-    except KeyboardInterrupt:
-        print("\n[Buttons Test] Exited.", flush=True)
-    finally:
-        set_ring_red(False)
-        for fd in open_fds.keys():
-            os.close(fd)
-
-if __name__ == "__main__":
-    main()
+                continue
+            for off in range(0, len(data), EVENT_SIZE):
+                chunk = data[off:off + EVENT_SIZE]
+                if len(chunk) < EVENT_SIZE:
+                    continue
+                sec, usec, ev_type, ev_code, ev_val = struct.unpack(EVENT_FORMAT, chunk)
+                if ev_type == 1:
+                    ts = time.strftime("%H:%M:%S")
+                    kname = KEY_NAMES.get(ev_code, f"KEY_{ev_code}")
+                    if ev_code == 248 and ev_val == 1:
+                        mic_muted = not mic_muted
+                        cmd = "on" if mic_muted else "off"
+                        subprocess.Popen(["/bin/sh", "/usr/lib/atrios/audio", "mute", cmd],
+                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        st = "MUTED" if mic_muted else "UNMUTED"
+                        print(f"[{ts}] >>> TOP BUTTON #2 (MIC MUTE) PRESSED -> {st} <<<", flush=True)
+                    elif ev_code in (582, 116):
+                        if ev_val == 1:
+                            press_t = time.time()
+                            print(f"[{ts}] >>> TOP BUTTON #1 (ASSISTANT) PRESSED <<<", flush=True)
+                        elif ev_val == 0:
+                            dur = time.time() - press_t if press_t else 0.0
+                            print(f"[{ts}] Top Button #1 released ({dur:.2f}s)", flush=True)
+                    elif ev_code in (104, 109) and ev_val == 1:
+                        d = "Clockwise (+Vol)" if ev_code == 104 else "Counter-Clockwise (-Vol)"
+                        print(f"[{ts}] Rotary Knob Turned: {d}", flush=True)
+                    else:
+                        st = "PRESSED" if ev_val == 1 else ("RELEASED" if ev_val == 0 else "REPEAT")
+                        print(f"[{ts}] [{st}] {kname} ({name})", flush=True)
+except KeyboardInterrupt:
+    print("\n[Input Monitor] Exited.", flush=True)
+'
+elif command -v evtest >/dev/null 2>&1; then
+  exec evtest /dev/input/event0
+fi
