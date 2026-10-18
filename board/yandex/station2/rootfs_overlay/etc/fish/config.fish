@@ -9,6 +9,8 @@ function fish_update_completions; end
 
 set -gx PATH /usr/local/sbin /usr/local/bin /usr/sbin /usr/bin /sbin /bin
 set -gx HOME /root
+set -gx XDG_RUNTIME_DIR /var/run/pipewire
+set -gx DBUS_SESSION_BUS_ADDRESS "unix:path=/var/run/dbus/system_bus_socket"
 
 function fish_greeting
     echo "AtriOS Linux - Yandex Station Max"

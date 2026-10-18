@@ -118,9 +118,10 @@ case "$CMD" in
       echo "Attaching Bluetooth controller on /dev/ttyS1..."
       killall hciattach btattach rtk_hciattach 2>/dev/null || true
       usleep 200000 2>/dev/null || sleep 1
-      BT_RC=0
+      BT_RC=99
       if [ -f /usr/lib/atrios/rtk-bt-init ]; then
-        python3 /usr/lib/atrios/rtk-bt-init init || BT_RC=$?
+        python3 /usr/lib/atrios/rtk-bt-init init
+        BT_RC=$?
       fi
       # Only attach kernel H4 line discipline if controller is in H4 mode (BT_RC == 0)
       if [ "$BT_RC" -eq 0 ]; then

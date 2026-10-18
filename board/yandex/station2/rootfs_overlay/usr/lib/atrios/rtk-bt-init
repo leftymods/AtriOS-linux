@@ -41,7 +41,10 @@ def reset_bt_rfkill():
     return False
 
 def config_uart(fd, baud=termios.B115200, parity_even=False, rtscts=False):
-    attrs = termios.tcgetattr(fd)
+    try:
+        attrs = termios.tcgetattr(fd)
+    except Exception:
+        return False
     cflag = termios.CS8 | termios.CREAD | termios.CLOCAL
     if rtscts and hasattr(termios, "CRTSCTS"):
         cflag |= termios.CRTSCTS
@@ -55,8 +58,12 @@ def config_uart(fd, baud=termios.B115200, parity_even=False, rtscts=False):
     attrs[5] = baud
     attrs[6][termios.VMIN] = 0
     attrs[6][termios.VTIME] = 0
-    termios.tcsetattr(fd, termios.TCSANOW, attrs)
-    termios.tcflush(fd, termios.TCIOFLUSH)
+    try:
+        termios.tcsetattr(fd, termios.TCSANOW, attrs)
+        termios.tcflush(fd, termios.TCIOFLUSH)
+        return True
+    except Exception:
+        return False
 
 def build_firmware_blob():
     if not os.path.exists(FW_PATH):
