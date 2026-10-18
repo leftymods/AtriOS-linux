@@ -1257,7 +1257,7 @@
 			phandle = <0x22>;
 
 			mux {
-				groups = "tdmb_sclk\0tdmb_fs\0tdmb_dout0";
+				groups = "tdmb_sclk\0tdmb_fs\0tdmb_dout0\0tdmb_dout1\0tdmb_dout2";
 				function = "tdmb_out";
 				drive-strength = <0x02>;
 			};
@@ -2108,7 +2108,7 @@
 					vddio-supply = <&fixedregulator_3v3d>;
 					pvdd-supply = <&fixedregulator_20v_amp>;
 					firmware = "sy6045s-tweeters-settings.txt";
-					restore-regs = <0x07 0x01 0xff 0x06 0x01 0x00>;
+					restore-regs = <0x07 0x01 0xff 0x06 0x01 0xff>;
 					status = "okay";
 					phandle = <0x8f>;
 				};
@@ -2121,7 +2121,7 @@
 					pvdd-supply = <&fixedregulator_20v_amp>;
 					pbtl-mode;
 					firmware = "sy6045s-woofer-settings.txt";
-					restore-regs = <0x07 0x01 0xff 0x06 0x01 0x00>;
+					restore-regs = <0x07 0x01 0xff 0x06 0x01 0xff>;
 					status = "okay";
 					phandle = <0x8e>;
 				};
