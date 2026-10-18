@@ -4208,10 +4208,9 @@
 	};
 
 	auge_sound {
-		compatible = "amlogic, g12a-sound-card";
+		compatible = "amlogic, tl1-sound-card";
 		aml-audio-card,name = "AML-AUGESOUND";
 		aml-audio-card,widgets = "Headphone\0Headphones";
-		aml-audio-card,effect = <0x118>;
 		aml-audio-card,routing = "Headphones\0Headphone LOUT\0Headphones\0Headphone ROUT";
 
 		aml-audio-card,dai-link@0 {
