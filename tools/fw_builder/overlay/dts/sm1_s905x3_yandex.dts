@@ -2084,7 +2084,7 @@
 				clocks = <0x02 0x2a>;
 				clock-names = "clk_i2c";
 				pinctrl-names = "default";
-				pinctrl-0 = <0xb9>;
+				pinctrl-0 = <0xba>;
 				clock-frequency = <0x493e0>;
 				phandle = <0x76>;
 
@@ -3782,6 +3782,7 @@
 		compatible = "amlogic, bt-dev";
 		dev_name = "bt-dev";
 		status = "okay";
+		gpio_reset = <0x18 0x53 0x00>;
 		gpio_hostwake = <0x18 0x55 0x00>;
 	};
 
