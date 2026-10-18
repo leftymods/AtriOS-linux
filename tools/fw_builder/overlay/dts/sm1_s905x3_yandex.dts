@@ -377,8 +377,7 @@
 		clock-names = "ethclk81";
 		pll_val = <0x9c0040a 0x927e0000 0xac5f49e5>;
 		analog_val = <0x20200000 0xc000 0x23>;
-		pinctrl-names = "internal_eth_pins";
-		pinctrl-0 = <0x11>;
+/* pinctrl removed to prevent GPIOZ_14/15 collision with i2c2 */
 		mc_val = <0x4be04>;
 		internal_phy = <0x01>;
 		phandle = <0x9e>;
