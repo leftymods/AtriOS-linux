@@ -12,10 +12,30 @@ export XDG_RUNTIME_DIR="/var/run/pipewire"
 export DBUS_SESSION_BUS_ADDRESS="unix:path=/var/run/dbus/system_bus_socket"
 
 case "$ACTION" in
+  check|check-audio|audit|diag)
+    shift
+    CHECK_SCRIPT="/usr/lib/atrios/check_audio.sh"
+    if [ ! -f "$CHECK_SCRIPT" ]; then
+      CHECK_SCRIPT="$(cd "$(dirname "$0")" 2>/dev/null && pwd || true)/check_audio.sh"
+    fi
+    exec /bin/sh "$CHECK_SCRIPT" "$@"
+    ;;
+
   test)
     echo "=========================================================="
     echo "          AtriOS Unified Audio & Mic Diagnostic           "
     echo "=========================================================="
+    # Step 0: Run automated audio subsystem diagnostics suite
+    CHECK_SCRIPT="/usr/lib/atrios/check_audio.sh"
+    if [ ! -f "$CHECK_SCRIPT" ]; then
+      CHECK_SCRIPT="$(cd "$(dirname "$0")" 2>/dev/null && pwd || true)/check_audio.sh"
+    fi
+    if [ -x "$CHECK_SCRIPT" ]; then
+      echo "[Diagnostics]: Running automated hardware & ALSA check..."
+      "$CHECK_SCRIPT" --verbose || exit $?
+      echo ""
+    fi
+
     echo "[ALSA Sound Cards]:"
     cat /proc/asound/cards 2>/dev/null || echo "No cards found"
     echo ""
@@ -51,12 +71,9 @@ case "$ACTION" in
       fi
       /etc/init.d/S03amplifiers start >/dev/null 2>&1 || true
       if command -v speaker-test >/dev/null 2>&1; then
-        speaker-test -D default -c 2 -r 48000 -F S32_LE -t sine -f 440 -l 1 2>/dev/null || \
-        speaker-test -D "plughw:$CARD,0" -c 2 -r 48000 -F S32_LE -t sine -f 440 -l 1 2>/dev/null || \
-        speaker-test -D "hw:$CARD,0" -c 2 -r 48000 -F S32_LE -t sine -f 440 -l 1 2>/dev/null || true
+        speaker-test -D default -c 2 -r 48000 -F S32_LE -t sine -f 440 -l 1 2>/dev/null ||         speaker-test -D "plughw:$CARD,0" -c 2 -r 48000 -F S32_LE -t sine -f 440 -l 1 2>/dev/null ||         speaker-test -D "hw:$CARD,0" -c 2 -r 48000 -F S32_LE -t sine -f 440 -l 1 2>/dev/null || true
       elif command -v aplay >/dev/null 2>&1 && [ -f "$WAV" ]; then
-        aplay -D default "$WAV" 2>/dev/null || \
-        aplay -D "plughw:$CARD,0" "$WAV" 2>/dev/null || true
+        aplay -D default "$WAV" 2>/dev/null ||         aplay -D "plughw:$CARD,0" "$WAV" 2>/dev/null || true
       fi
       if [ "$PW_WAS_RUNNING" -eq 1 ]; then
         /etc/init.d/S50pipewire start >/dev/null 2>&1 || true
@@ -67,9 +84,7 @@ case "$ACTION" in
     REC_FILE="/tmp/atrios_mic_test.wav"
     rm -f "$REC_FILE"
     if command -v arecord >/dev/null 2>&1; then
-      arecord -D "hw:$CARD,1" -c 8 -r 48000 -f S32_LE -d 3 "$REC_FILE" 2>/dev/null || \
-      arecord -D capture_plug -c 8 -r 48000 -f S32_LE -d 3 "$REC_FILE" 2>/dev/null || \
-      arecord -D default -c 2 -r 48000 -f S16_LE -d 3 "$REC_FILE" 2>/dev/null || true
+      arecord -D "hw:$CARD,1" -c 8 -r 48000 -f S32_LE -d 3 "$REC_FILE" 2>/dev/null ||       arecord -D capture_plug -c 8 -r 48000 -f S32_LE -d 3 "$REC_FILE" 2>/dev/null ||       arecord -D default -c 2 -r 48000 -f S16_LE -d 3 "$REC_FILE" 2>/dev/null || true
       if [ -f "$REC_FILE" ]; then
         SIZE=$(ls -l "$REC_FILE" | awk '{print $5}')
         echo "[OK] Mic capture successful: $REC_FILE ($SIZE bytes)."
@@ -98,16 +113,14 @@ case "$ACTION" in
     DUR="${2:-3}"
     OUT="${3:-/tmp/recording_8ch.wav}"
     echo "Recording $DUR seconds to $OUT..."
-    arecord -D "hw:$CARD,1" -c 8 -r 48000 -f S32_LE -d "$DUR" "$OUT" 2>/dev/null || \
-    arecord -D capture_plug -c 8 -r 48000 -f S32_LE -d "$DUR" "$OUT"
+    arecord -D "hw:$CARD,1" -c 8 -r 48000 -f S32_LE -d "$DUR" "$OUT" 2>/dev/null ||     arecord -D capture_plug -c 8 -r 48000 -f S32_LE -d "$DUR" "$OUT"
     echo "Saved to $OUT ($(ls -l "$OUT" | awk '{print $5}') bytes)."
     ;;
 
   volume)
     VAL="$2"
     if [ -z "$VAL" ]; then
-      amixer -c "$CARD" cget name='Woofer Master Playback Volume' 2>/dev/null || \
-      amixer -c "$CARD" sget 'Woofer Master' 2>/dev/null || true
+      amixer -c "$CARD" cget name='Woofer Master Playback Volume' 2>/dev/null ||       amixer -c "$CARD" sget 'Woofer Master' 2>/dev/null || true
     else
       echo "Setting volume to $VAL..."
       amixer -c "$CARD" sset 'Woofer Master' "$VAL" 2>/dev/null || true
@@ -150,6 +163,7 @@ case "$ACTION" in
   *)
     echo "Usage: atrios audio <command> [args]"
     echo "Commands:"
+    echo "  atrios audio check                  - Automated audio subsystem diagnostics"
     echo "  atrios audio test                   - Full playback & 8-channel mic array test"
     echo "  atrios audio play [file.wav]        - Play audio through speakers"
     echo "  atrios audio record [sec] [out.wav] - Record 8-channel audio from mic array"

@@ -6,33 +6,54 @@ case "$1" in
     echo "[AtriOS] Initializing audio amplifiers and power booster..."
 
     # 1. 20V PVDD Amplifier Power Booster rail is powered by fixedregulator-20v-amp in DTS.
-    # Check dynamic GPIOs if available
+    # Ensure GPIO 485 (GPIOX_9) is exported, direction is out, and value is 1.
     for g in 485 410; do
+      if [ ! -d "/sys/class/gpio/gpio$g" ]; then
+        (echo "$g" > /sys/class/gpio/export) 2>/dev/null || true
+      fi
       if [ -d "/sys/class/gpio/gpio$g" ]; then
-        echo out > "/sys/class/gpio/gpio$g/direction" 2>/dev/null || true
-        echo 1 > "/sys/class/gpio/gpio$g/value" 2>/dev/null || true
+        (echo out > "/sys/class/gpio/gpio$g/direction") 2>/dev/null || true
+        (echo 1 > "/sys/class/gpio/gpio$g/value") 2>/dev/null || true
       fi
     done
 
-    # 2. Silergy SY6045S firmware and PBTL registers (0x1e, 0x20) are automatically
-    # loaded by the kernel driver during sy6045s_probe at boot. Do NOT write to
-    # settings_file or default_settings here, as default_settings resets the chip
-    # and wipes out the PBTL configuration!
+    # 2. Restore ALSA mixer controls from /var/lib/alsa/asound.state
+    # Restores all 23 hardware mixer controls at boot.
+    if [ -f "/var/lib/alsa/asound.state" ]; then
+      if command -v alsactl >/dev/null 2>&1; then
+        alsactl restore -f /var/lib/alsa/asound.state 2>/dev/null || true
+      elif [ -x /usr/sbin/alsactl ]; then
+        /usr/sbin/alsactl restore -f /var/lib/alsa/asound.state 2>/dev/null || true
+      fi
+    fi
 
-    # 3. Direct register verification via i2cset (ensuring unmute register 0x06=0x00 and 0x22=0x00)
+    # 3. Direct hardware register unmute via I2C bus 2
+    # Silergy SY6045S: reg 0x06=0x00 (master unmute), reg 0x22=0x00 (unmute channels)
+    # Tweeters (0x2a) and Woofer (0x2b)
     if command -v i2cset >/dev/null 2>&1; then
       i2cset -y -f 2 0x2a 0x06 0x00 2>/dev/null || true
       i2cset -y -f 2 0x2a 0x22 0x00 2>/dev/null || true
       i2cset -y -f 2 0x2b 0x06 0x00 2>/dev/null || true
       i2cset -y -f 2 0x2b 0x22 0x00 2>/dev/null || true
-      # ES8156 Headphone DAC (0x08 on I2C2):
+
+      # Everest ES8156 Headphone DAC (0x08 on I2C2):
       # reg 0x13=0x11 (unmute headphone), reg 0x14=0xbe (DAC volume 0dB), reg 0x08=0x3f (power on)
       i2cset -y -f 2 0x08 0x13 0x11 2>/dev/null || true
       i2cset -y -f 2 0x08 0x14 0xbe 2>/dev/null || true
       i2cset -y -f 2 0x08 0x08 0x3f 2>/dev/null || true
     fi
 
-    # 4. Configure ALSA hardware mixer controls for AMLAUGESOUND
+    # Confirm unmuted status via i2cget if available
+    if command -v i2cget >/dev/null 2>&1; then
+      for addr in 0x2a 0x2b; do
+        mute_val=$(i2cget -y -f 2 "$addr" 0x06 2>/dev/null || echo "N/A")
+        if [ "$mute_val" != "0x00" ] && [ "$mute_val" != "N/A" ]; then
+          i2cset -y -f 2 "$addr" 0x06 0x00 2>/dev/null || true
+        fi
+      done
+    fi
+
+    # 4. Configure ALSA hardware mixer controls for AMLAUGESOUND (safety net / explicit unmute)
     if command -v amixer >/dev/null 2>&1; then
       card="AMLAUGESOUND"
 
@@ -61,9 +82,14 @@ case "$1" in
       amixer -c "$card" cset name='Tweeters EQ Switch' 1 2>/dev/null || true
       amixer -c "$card" cset name='Tweeters DRC Switch' 1 2>/dev/null || true
 
-      # Everest ES8156 Headphone DAC controls
+      # Everest ES8156 Headphone DAC controls (nominal volume 193 per stock mixer_paths_3.xml)
       amixer -c "$card" cset name='Headphone Headphone Switch' 1 2>/dev/null || true
-      amixer -c "$card" cset name='Headphone DAC Playback Volume' 191 2>/dev/null || true
+      amixer -c "$card" cset name='Headphone DAC Playback Volume' 193 2>/dev/null || true
+
+      # Loopback ADC gains and PDM shift
+      amixer -c "$card" cset name='Loopback ADC1_MAX_GAIN' 188 2>/dev/null || true
+      amixer -c "$card" cset name='Loopback ADC2_MAX_GAIN' 203 2>/dev/null || true
+      amixer -c "$card" cset name='PDM HCIC shift gain (~ 6dB * value)' 2 2>/dev/null || true
 
       # ALSA Simple Mixer sset fallbacks
       amixer -c "$card" sset 'Woofer Master' 255 unmute 2>/dev/null || true
@@ -73,10 +99,74 @@ case "$1" in
 
     echo "[AtriOS] Audio amplifiers initialized."
     ;;
+
   stop)
+    echo "[AtriOS] Stopping audio amplifiers and muting channels..."
+
+    # 1. Mute ALSA mixer controls
+    if command -v amixer >/dev/null 2>&1; then
+      card="AMLAUGESOUND"
+      amixer -c "$card" cset name='SPK mute' 1 2>/dev/null || true
+      amixer -c "$card" cset name='Woofer Master Playback Switch' 0 2>/dev/null || true
+      amixer -c "$card" cset name='Tweeters Master Playback Switch' 0 2>/dev/null || true
+      amixer -c "$card" cset name='Headphone Headphone Switch' 0 2>/dev/null || true
+    fi
+
+    # 2. Hardware mute SY6045S and ES8156 via I2C bus 2
+    if command -v i2cset >/dev/null 2>&1; then
+      # SY6045S master mute: reg 0x06=0x08
+      i2cset -y -f 2 0x2a 0x06 0x08 2>/dev/null || true
+      i2cset -y -f 2 0x2b 0x06 0x08 2>/dev/null || true
+      # ES8156 headphone mute: reg 0x13=0x00
+      i2cset -y -f 2 0x08 0x13 0x00 2>/dev/null || true
+    fi
+
+    # 3. Disable 20V booster rail
+    for g in 485 410; do
+      if [ -d "/sys/class/gpio/gpio$g" ]; then
+        (echo 0 > "/sys/class/gpio/gpio$g/value") 2>/dev/null || true
+      fi
+    done
+
+    echo "[AtriOS] Audio amplifiers stopped."
     ;;
+
+  restart|reload)
+    "$0" stop
+    sleep 1
+    "$0" start
+    ;;
+
+  status)
+    echo "[AtriOS] Audio Amplifiers Status:"
+    pwr="OFF"
+    for g in 485 410; do
+      if [ -f "/sys/class/gpio/gpio$g/value" ]; then
+        val=$(cat "/sys/class/gpio/gpio$g/value" 2>/dev/null)
+        if [ "$val" = "1" ]; then
+          pwr="ON (GPIO $g = 1)"
+          break
+        fi
+      fi
+    done
+    echo "  * 20V Booster Power: $pwr"
+
+    if command -v i2cget >/dev/null 2>&1; then
+      twt=$(i2cget -y -f 2 0x2a 0x06 2>/dev/null || echo "N/A")
+      wfr=$(i2cget -y -f 2 0x2b 0x06 2>/dev/null || echo "N/A")
+      echo "  * Tweeters (0x2a) Reg 0x06 Mute: $twt"
+      echo "  * Woofer   (0x2b) Reg 0x06 Mute: $wfr"
+    fi
+
+    if [ -f "/proc/asound/cards" ]; then
+      echo "  * ALSA Cards:"
+      cat /proc/asound/cards | sed 's/^/    /'
+    fi
+    ;;
+
   *)
-    echo "Usage: $0 {start|stop}"
+    echo "Usage: $0 {start|stop|restart|reload|status}"
     exit 1
+    ;;
 esac
 exit 0

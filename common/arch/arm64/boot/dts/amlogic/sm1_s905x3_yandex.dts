@@ -2108,7 +2108,7 @@
 					vddio-supply = <&fixedregulator_3v3d>;
 					pvdd-supply = <&fixedregulator_20v_amp>;
 					firmware = "sy6045s-tweeters-settings.txt";
-					restore-regs = <0x07 0x01 0xff 0x06 0x01 0xff>;
+					restore-regs = <0x07 0x01 0xff 0x06 0x01 0x08>;
 					status = "okay";
 					phandle = <0x8f>;
 				};
@@ -2121,7 +2121,7 @@
 					pvdd-supply = <&fixedregulator_20v_amp>;
 					pbtl-mode;
 					firmware = "sy6045s-woofer-settings.txt";
-					restore-regs = <0x07 0x01 0xff 0x06 0x01 0xff>;
+					restore-regs = <0x07 0x01 0xff 0x06 0x01 0x08>;
 					status = "okay";
 					phandle = <0x8e>;
 				};
@@ -4210,6 +4210,7 @@
 	auge_sound {
 		compatible = "amlogic, tl1-sound-card";
 		aml-audio-card,name = "AML-AUGESOUND";
+		aml-audio-card,hp-det-gpio = <0x18 0x4d 0x00>;
 		aml-audio-card,widgets = "Headphone\0Headphones";
 		aml-audio-card,routing = "Headphones\0Headphone LOUT\0Headphones\0Headphone ROUT";
 
