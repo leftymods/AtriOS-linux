@@ -52,7 +52,7 @@ case "$1" in
     # MST_PAD_CTRL1 is 0x24 (SCLK/LRCLK).  GUIDE.md used the G12A offsets
     # 0x1C/0x20, which are wrong for this SoC.
     if command -v python3 >/dev/null 2>&1; then
-      python3 -c '
+      if ! python3 -c '
 import mmap, os, struct
 fd = os.open("/dev/mem", os.O_RDWR | os.O_SYNC)
 m = mmap.mmap(fd, 0x1000, mmap.MAP_SHARED, mmap.PROT_READ | mmap.PROT_WRITE, offset=0xFF660000)
@@ -60,7 +60,16 @@ struct.pack_into("<I", m, 0x24, 0x01110111)  # SM1 MST_PAD_CTRL1: SCLK/LRCLK -> 
 struct.pack_into("<I", m, 0x20, 0x00000011)  # SM1 MST_PAD_CTRL0: MCLK -> mst_b
 m.flush()
 os.close(fd)
-' 2>/dev/null || echo "[AtriOS] WARN: TDM_B pad clock mux write failed"
+' 2>/dev/null; then
+        # /dev/mem may be restricted by CONFIG_STRICT_DEVMEM.  BusyBox
+        # devmem uses the same mapping, but try it before giving up.
+        if command -v devmem >/dev/null 2>&1; then
+          devmem 0xFF660024 32 0x01110111 2>/dev/null || true
+          devmem 0xFF660020 32 0x00000011 2>/dev/null || true
+        else
+          echo "[AtriOS] NOTE: TDM_B pad mux write skipped (kernel may already route it)"
+        fi
+      fi
     fi
 
     # 2. Restore ALSA mixer controls from /var/lib/alsa/asound.state
@@ -138,18 +147,21 @@ os.close(fd)
       amixer -c "$card" cset name='Headphone Headphone Switch' 1 2>/dev/null || true
       amixer -c "$card" cset name='Headphone DAC Playback Volume' 193 2>/dev/null || true
 
-      # Loopback ADC gains and PDM shift
+      # Everest ES7210 loopback/ADC mic path.  The vendor card exposes the
+      # microphone array as LOOPBACK_A -> TDMIN_B; all four ADC mutes are
+      # ON by default, which is why recordings contain only white noise.
+      amixer -c "$card" cset name='Audio In Source' 'LOOPBACK_A' 2>/dev/null || \
+        amixer -c "$card" cset name='Audio In Source' 7 2>/dev/null || true
+      amixer -c "$card" cset name='Audio Out Sink' 1 2>/dev/null || true
+      for i in 1 2 3 4; do
+        amixer -c "$card" cset name="Loopback ADC${i}_MUTE" 0 2>/dev/null || \
+          amixer -c "$card" cset name="Loopback ADC${i}_MUTE" off 2>/dev/null || true
+        amixer -c "$card" cset name="Loopback PGA${i}_setting" 0 2>/dev/null || true
+      done
       amixer -c "$card" cset name='Loopback ADC1_MAX_GAIN' 188 2>/dev/null || true
       amixer -c "$card" cset name='Loopback ADC2_MAX_GAIN' 203 2>/dev/null || true
-      amixer -c "$card" cset name='PDM HCIC shift gain (~ 6dB * value)' 2 2>/dev/null || true
-
-      # Capture path: open the ADC/PDM inputs and set a sane capture level.
-      for ctl in "TDMIN_A Capture Switch" "TDMIN_B Capture Switch" \
-                 "TDMIN_C Capture Switch" "ADC Capture Switch" \
-                 "Mic Capture Switch"; do
-        amixer -c "$card" cset name="$ctl" 1 2>/dev/null || true
-      done
-      amixer -c "$card" cset name='ADC Capture Volume' 192 2>/dev/null || true
+      amixer -c "$card" cset name='Loopback ADC3_MAX_GAIN' 191 2>/dev/null || true
+      amixer -c "$card" cset name='Loopback ADC4_MAX_GAIN' 191 2>/dev/null || true
 
       # ALSA Simple Mixer sset fallbacks
       amixer -c "$card" sset 'Woofer Master' 255 unmute 2>/dev/null || true
