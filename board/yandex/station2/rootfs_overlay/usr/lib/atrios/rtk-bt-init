@@ -4,7 +4,7 @@ AtriOS Realtek RTL8822ES/CS UART Bluetooth Driver & Scanner (/dev/ttyS1)
 Supports both H4 (4-wire) and H5 (Realtek 3-wire SLIP) UART protocols:
 1. Pulses bluetooth rfkill (GPIOX_17 BT_EN) so the controller resets cleanly.
 2. Auto-detects H4 (8N1) or H5 (8E1/8N1 SLIP) on /dev/ttyS1 at 115200 baud.
-3. Uploads /lib/firmware/rtl8822es_fw + /lib/firmware/rtl8822es_config with
+3. Uploads /lib/firmware/rtlbt/rtl8822cs_fw + /lib/firmware/rtlbt/rtl8822cs_config with
    baudrate patched to 115200 (0x0000C01D).
 4. Provides direct BLE + Classic inquiry scanning when the controller uses H5
    (since the prebuilt 4.9.113 kernel only includes CONFIG_BT_HCIUART_H4).
@@ -17,8 +17,8 @@ import select
 import termios
 
 UART_DEV = "/dev/ttyS1"
-FW_PATH = "/lib/firmware/rtl8822cs_fw"
-CFG_PATH = "/lib/firmware/rtl8822cs_config"
+FW_PATH = "/lib/firmware/rtlbt/rtl8822cs_fw"
+CFG_PATH = "/lib/firmware/rtlbt/rtl8822cs_config"
 STATE_FILE = "/tmp/atrios_bt_state"
 
 def reset_bt_rfkill():
@@ -108,7 +108,7 @@ def h4_cmd(fd, ogf_ocf, payload=b"", timeout=0.5):
 def h4_download_fw(fd, blob):
     frag_size = 252
     total_frags = (len(blob) + frag_size - 1) // frag_size
-    print(f"[BT] Uploading Realtek RTL8822ES firmware over H4 ({len(blob)} bytes, {total_frags} chunks)...", flush=True)
+    print(f"[BT] Uploading Realtek RTL8822CS firmware over H4 ({len(blob)} bytes, {total_frags} chunks)...", flush=True)
     for i in range(total_frags):
         chunk = blob[i * frag_size:(i + 1) * frag_size]
         idx = 0 if i == 0 else (((i - 1) % 0x7F) + 1)
