@@ -85,14 +85,18 @@ case "$ACTION" in
     rm -f "$REC_FILE"
     if command -v arecord >/dev/null 2>&1; then
       MIC_OK=0
-      # PDM capture is device 5 on AML-AUGESOUND; the TDM/ES7210 path is
-      # usually device 1.  Try both before falling back to plug/default.
-      for dev in 5 1 0; do
-        if arecord -D "hw:$CARD,$dev" -c 8 -r 48000 -f S32_LE -d 3 "$REC_FILE" 2>/dev/null; then
-          MIC_OK=1
-          echo "[OK] Mic capture device hw:$CARD,$dev"
-          break
-        fi
+      # On this ASoC card device 0 is the TDM-B multicodec DAI (the real
+      # ES7210 loopback/ADC), device 3 is TDM-C, device 5 is PDM and
+      # device 1 is the PDM dummy.  Prefer the non-dummy ADC paths and
+      # fall back through channel counts.
+      for dev in 0 3 5 1; do
+        for ch in 8 4 2; do
+          if arecord -D "hw:$CARD,$dev" -c "$ch" -r 48000 -f S32_LE -d 3 "$REC_FILE" 2>/dev/null; then
+            MIC_OK=1
+            echo "[OK] Mic capture device hw:$CARD,$dev (${ch}ch)"
+            break 2
+          fi
+        done
       done
       if [ "$MIC_OK" -eq 0 ]; then
         arecord -D capture_plug -c 8 -r 48000 -f S32_LE -d 3 "$REC_FILE" 2>/dev/null || \
@@ -127,12 +131,14 @@ case "$ACTION" in
     OUT="${3:-/tmp/recording_8ch.wav}"
     echo "Recording $DUR seconds to $OUT..."
     MIC_OK=0
-    for dev in 5 1 0; do
-      if arecord -D "hw:$CARD,$dev" -c 8 -r 48000 -f S32_LE -d "$DUR" "$OUT" 2>/dev/null; then
-        MIC_OK=1
-        echo "Captured from hw:$CARD,$dev"
-        break
-      fi
+    for dev in 0 3 5 1; do
+      for ch in 8 4 2; do
+        if arecord -D "hw:$CARD,$dev" -c "$ch" -r 48000 -f S32_LE -d "$DUR" "$OUT" 2>/dev/null; then
+          MIC_OK=1
+          echo "Captured from hw:$CARD,$dev (${ch}ch)"
+          break 2
+        fi
+      done
     done
     if [ "$MIC_OK" -eq 0 ]; then
       arecord -D capture_plug -c 8 -r 48000 -f S32_LE -d "$DUR" "$OUT" 2>/dev/null || true
@@ -163,7 +169,12 @@ case "$ACTION" in
         amixer -c "$CARD" cset name="$ctl" "$RAW" 2>/dev/null || true
       done
       if command -v wpctl >/dev/null 2>&1; then
-        wpctl set-volume @DEFAULT_AUDIO_SINK@ "${PCT}%" 2>/dev/null || true
+        if [ "$PCT" -ge 100 ]; then
+          WP_VOL="1.00"
+        else
+          WP_VOL=$(printf "0.%02d" "$PCT")
+        fi
+        wpctl set-volume @DEFAULT_AUDIO_SINK@ "$WP_VOL" 2>/dev/null || true
       fi
       if [ -f /usr/lib/atrios/light ]; then
         python3 /usr/lib/atrios/light ring volume "$PCT" 2>/dev/null || true
