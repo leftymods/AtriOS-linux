@@ -194,7 +194,8 @@ audit_gpio() {
     if [ -n "$rail_reg" ]; then
         rail_state=$(cat "$rail_reg/state" 2>/dev/null || true)
         rail_uv=$(cat "$rail_reg/microvolts" 2>/dev/null || true)
-        if [ "$rail_state" = "enabled" ] || [ "$rail_uv" = "20000000" ]; then
+        if [ "$rail_state" = "enabled" ] || \
+           { [ -z "$rail_state" ] && [ "$rail_uv" = "20000000" ]; }; then
             CHECK_GPIO_MSG="20V_AMPL regulator enabled (${rail_state:-state?}, ${rail_uv:-?} uV)"
             log_verbose "  [OK] 20V booster rail active (regulator ${rail_reg##*/}, ${rail_state:-?}, ${rail_uv:-?} uV)."
             return 0
@@ -330,7 +331,9 @@ audit_alsa() {
         card_found=1
     elif command -v aplay >/dev/null 2>&1 && aplay -l 2>/dev/null | grep -qi "AUGESOUND"; then
         card_found=1
-    else
+    elif [ ! -e "/proc/asound/cards" ]; then
+        # Offline/test environment only; never accept a stale asound.state
+        # when a live ALSA core exists but the card did not probe.
         st_file=$(find_alsa_state_file || true)
         if [ -n "$st_file" ] && grep -q "state.AMLAUGESOUND" "$st_file"; then
             card_found=1

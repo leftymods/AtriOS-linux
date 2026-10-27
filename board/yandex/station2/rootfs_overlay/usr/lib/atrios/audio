@@ -238,15 +238,27 @@ case "$ACTION" in
   mute)
     STATE="$2"
     if [ "$STATE" = "off" ] || [ "$STATE" = "0" ] || [ "$STATE" = "unmute" ]; then
-      echo "Unmuting playback and microphone array..."
-      amixer -c "$CARD" cset name='Woofer Master Playback Switch' 1 2>/dev/null || true
-      amixer -c "$CARD" cset name='Tweeters Master Playback Switch' 1 2>/dev/null || true
-      amixer -c "$CARD" cset name='Headphone Headphone Switch' 1 2>/dev/null || true
+      echo "Unmuting microphone array..."
+      amixer -c "$CARD" sset Capture unmute 2>/dev/null || true
+      amixer -c "$CARD" sset Capture 100% 2>/dev/null || true
+      for ctl in "Capture Switch" "ADC Capture Switch" "Mic Capture Switch" \
+                 "TDMIN_A Switch" "TDMIN_B Switch"; do
+        amixer -c "$CARD" cset name="$ctl" 1 2>/dev/null || true
+      done
+      for i in 1 2 3 4; do
+        amixer -c "$CARD" cset name="Loopback ADC${i}_MUTE" 0 2>/dev/null || true
+      done
     else
-      echo "Muting playback and microphone array..."
-      amixer -c "$CARD" cset name='Woofer Master Playback Switch' 0 2>/dev/null || true
-      amixer -c "$CARD" cset name='Tweeters Master Playback Switch' 0 2>/dev/null || true
-      amixer -c "$CARD" cset name='Headphone Headphone Switch' 0 2>/dev/null || true
+      echo "Muting microphone array (playback is not touched)..."
+      amixer -c "$CARD" sset Capture mute 2>/dev/null || true
+      amixer -c "$CARD" sset Capture 0% 2>/dev/null || true
+      for ctl in "Capture Switch" "ADC Capture Switch" "Mic Capture Switch" \
+                 "TDMIN_A Switch" "TDMIN_B Switch"; do
+        amixer -c "$CARD" cset name="$ctl" 0 2>/dev/null || true
+      done
+      for i in 1 2 3 4; do
+        amixer -c "$CARD" cset name="Loopback ADC${i}_MUTE" 1 2>/dev/null || true
+      done
     fi
     ;;
 

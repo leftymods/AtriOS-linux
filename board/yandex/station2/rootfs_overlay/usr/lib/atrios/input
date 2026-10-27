@@ -132,9 +132,8 @@ try:
                         active_edge = 0 if MIC_MUTE_ACTIVE_LOW else 1
                         if ev_val == active_edge:
                             mic_muted = not mic_muted
-                            cmd = "on" if mic_muted else "off"
-                            subprocess.Popen(["/bin/sh", "/usr/lib/atrios/audio", "mute", cmd],
-                                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                            # rotaryd owns the actual capture mute; this is
+                            # a passive monitor and must not touch playback.
                             st = "MUTED" if mic_muted else "UNMUTED"
                             print(f"[{ts}] >>> TOP BUTTON #2 (MIC MUTE) PRESSED -> {st} <<<", flush=True)
                         else:
