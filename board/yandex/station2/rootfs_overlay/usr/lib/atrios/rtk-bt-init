@@ -15,6 +15,7 @@ import time
 import struct
 import select
 import termios
+import glob
 
 UART_DEV = "/dev/ttyS1"
 FW_PATH = "/lib/firmware/rtlbt/rtl8822cs_fw"

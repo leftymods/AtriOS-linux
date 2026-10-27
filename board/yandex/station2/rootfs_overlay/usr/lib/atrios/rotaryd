@@ -136,7 +136,9 @@ def apply_saved_volume():
         value = DEFAULT_VOLUME
         save_state_volume(value)
     current_volume = value
-    show_volume_ring(current_volume)
+    # At boot the ring must stay dark; it is a feedback element for the
+    # knob, not a power indicator.
+    clear_ring()
     set_volume(current_volume)
 
 
