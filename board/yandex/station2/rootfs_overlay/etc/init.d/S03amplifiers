@@ -72,15 +72,9 @@ os.close(fd)
       fi
     fi
 
-    # 2. Restore ALSA mixer controls from /var/lib/alsa/asound.state
-    # Restores all 23 hardware mixer controls at boot.
-    if [ -f "/var/lib/alsa/asound.state" ]; then
-      if command -v alsactl >/dev/null 2>&1; then
-        alsactl restore -f /var/lib/alsa/asound.state 2>/dev/null || true
-      elif [ -x /usr/sbin/alsactl ]; then
-        /usr/sbin/alsactl restore -f /var/lib/alsa/asound.state 2>/dev/null || true
-      fi
-    fi
+    # 2. Do NOT restore /var/lib/alsa/asound.state here: it stores 255/193
+    # and would override the AtriOS user volume.  The mixer is configured
+    # explicitly below, then the saved volume is applied at the end.
 
     # 3. Direct hardware register unmute via I2C bus 2
     # Silergy SY6045S: reg 0x06=0x00 (master unmute), reg 0x22=0x00 (unmute channels)
@@ -112,20 +106,12 @@ os.close(fd)
     if command -v amixer >/dev/null 2>&1; then
       card="AMLAUGESOUND"
 
-      # Audio output routing: FRDDR_A -> TDMOUT_B, TODDR_A -> PDM Capture
-      amixer -c "$card" set 'FRDDR_A SINK 1 SEL' 'OUT 1' 2>/dev/null || true
-      amixer -c "$card" set 'FRDDR_A SINK 2 SEL' 'OUT 1' 2>/dev/null || true
-      amixer -c "$card" set 'FRDDR_A SINK 3 SEL' 'OUT 1' 2>/dev/null || true
-      amixer -c "$card" cset numid=31 4 2>/dev/null || true
-
-      # Audio output routing: route playback to TDMOUT_B
-      amixer -c "$card" cset name='Audio Out Sink' 'TDMOUT_B' 2>/dev/null || true
+      # Audio output routing (vendor card enum: 1 = TDMIN_B)
       amixer -c "$card" cset name='Audio Out Sink' 1 2>/dev/null || true
       amixer -c "$card" cset name='SPK mute' 0 2>/dev/null || true
 
       # Woofer controls (Master 255 = 0dB, Ch1/Ch2 159 [0x9F] = 0dB per sy6045s-woofer-settings.txt)
       amixer -c "$card" cset name='Woofer Master Playback Switch' 1 2>/dev/null || true
-      amixer -c "$card" cset name='Woofer Master Playback Volume' 255 2>/dev/null || true
       amixer -c "$card" cset name='Woofer Ch1 Playback Switch' 1 2>/dev/null || true
       amixer -c "$card" cset name='Woofer Ch1 Playback Volume' 159 2>/dev/null || true
       amixer -c "$card" cset name='Woofer Ch2 Playback Switch' 1 2>/dev/null || true
@@ -135,7 +121,6 @@ os.close(fd)
 
       # Tweeters controls (Master 255 = 0dB, Ch1/Ch2 159 [0x9F] = 0dB per sy6045s-tweeters-settings.txt)
       amixer -c "$card" cset name='Tweeters Master Playback Switch' 1 2>/dev/null || true
-      amixer -c "$card" cset name='Tweeters Master Playback Volume' 255 2>/dev/null || true
       amixer -c "$card" cset name='Tweeters Ch1 Playback Switch' 1 2>/dev/null || true
       amixer -c "$card" cset name='Tweeters Ch1 Playback Volume' 159 2>/dev/null || true
       amixer -c "$card" cset name='Tweeters Ch2 Playback Switch' 1 2>/dev/null || true
@@ -145,7 +130,6 @@ os.close(fd)
 
       # Everest ES8156 Headphone DAC controls (nominal volume 193 per stock mixer_paths_3.xml)
       amixer -c "$card" cset name='Headphone Headphone Switch' 1 2>/dev/null || true
-      amixer -c "$card" cset name='Headphone DAC Playback Volume' 193 2>/dev/null || true
 
       # Everest ES7210 loopback/ADC mic path.  The vendor card exposes the
       # microphone array as LOOPBACK_A -> TDMIN_B; all four ADC mutes are
@@ -163,11 +147,12 @@ os.close(fd)
       amixer -c "$card" cset name='Loopback ADC3_MAX_GAIN' 191 2>/dev/null || true
       amixer -c "$card" cset name='Loopback ADC4_MAX_GAIN' 191 2>/dev/null || true
 
-      # ALSA Simple Mixer sset fallbacks
-      amixer -c "$card" sset 'Woofer Master' 255 unmute 2>/dev/null || true
-      amixer -c "$card" sset 'Tweeters Master' 255 unmute 2>/dev/null || true
-      amixer -c "$card" sset 'Headphone Headphone' unmute 2>/dev/null || true
     fi
+
+    # Apply the persisted AtriOS user volume last.  S03 no longer writes
+    # 255/193 and no longer restores the distro asound.state, so this is
+    # the only volume source at boot and on every runtime S03 call.
+    /usr/lib/atrios/audio apply >/dev/null 2>&1 || true
 
     echo "[AtriOS] Audio amplifiers initialized."
     ;;

@@ -431,7 +431,7 @@ audit_playback() {
         # Prefer real music over a sine beep.  Put any WAV in /root/music
         # (for example /root/music/tsoi.wav) and the test will use it.
         TEST_AUDIO=""
-        for f in /root/music/*.wav /root/music/*.mp3 \
+        for f in /root/music/*.wav \
                  /usr/share/sounds/atrios/test-music.wav \
                  /usr/share/sounds/alsa/Front_Center.wav; do
             if [ -f "$f" ]; then

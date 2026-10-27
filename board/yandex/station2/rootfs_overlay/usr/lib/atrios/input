@@ -75,12 +75,20 @@ KEY_NAMES = {
 }
 
 def read_volume():
+    pct = None
+    try:
+        with open("/var/lib/atrios/volume") as f:
+            pct = max(0, min(100, int(f.read().strip())))
+    except Exception:
+        pass
     try:
         out = subprocess.check_output(["amixer", "-c", "AMLAUGESOUND", "cget", "name=Woofer Master Playback Volume"], stderr=subprocess.DEVNULL, text=True, timeout=0.5)
         m = re.search(r": values=(\d+)", out)
         if m:
             raw = int(m.group(1))
-            return raw, max(0, min(100, int(round(raw * 100.0 / 255.0))))
+            if pct is None:
+                pct = max(0, min(100, int(round(raw * 100.0 / 255.0))))
+            return raw, pct
     except Exception:
         pass
     return None

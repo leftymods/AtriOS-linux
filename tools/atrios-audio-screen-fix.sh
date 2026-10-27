@@ -70,23 +70,17 @@ while ! grep -qi AUGESOUND /proc/asound/cards 2>/dev/null && [ "$i" -lt 10 ]; do
     i=$((i+1))
 done
 if command -v amixer >/dev/null 2>&1; then
-    amixer -c "$CARD" set 'FRDDR_A SINK 1 SEL' 'OUT 1' 2>/dev/null || true
-    amixer -c "$CARD" set 'FRDDR_A SINK 2 SEL' 'OUT 1' 2>/dev/null || true
-    amixer -c "$CARD" set 'FRDDR_A SINK 3 SEL' 'OUT 1' 2>/dev/null || true
-    amixer -c "$CARD" cset numid=31 4 2>/dev/null || true
-    amixer -c "$CARD" cset name='Audio Out Sink' 'TDMOUT_B' 2>/dev/null || true
+    amixer -c "$CARD" cset name='Audio Out Sink' 1 2>/dev/null || true
     amixer -c "$CARD" cset name='SPK mute' 0 2>/dev/null || true
-    # Nominal gains expected by the diagnostic (stereo controls accept 255,255).
-    amixer -c "$CARD" cset name='Woofer Master Playback Switch' 1 2>/dev/null || true
-    amixer -c "$CARD" cset name='Woofer Master Playback Volume' 255 2>/dev/null || true
-    amixer -c "$CARD" cset name='Tweeters Master Playback Switch' 1 2>/dev/null || true
-    amixer -c "$CARD" cset name='Tweeters Master Playback Volume' 255 2>/dev/null || true
+    # Per-channel 0 dB trims only.  The master volume comes from the
+    # AtriOS state file, never from this helper.
     for ch in 'Woofer Ch1' 'Woofer Ch2' 'Tweeters Ch1' 'Tweeters Ch2'; do
         amixer -c "$CARD" cset name="${ch} Playback Switch" 1 2>/dev/null || true
         amixer -c "$CARD" cset name="${ch} Playback Volume" 159 2>/dev/null || true
     done
-    amixer -c "$CARD" cset name='Headphone Headphone Switch' 1 2>/dev/null || true
-    amixer -c "$CARD" cset name='Headphone DAC Playback Volume' 193 2>/dev/null || true
+fi
+if [ -x /usr/lib/atrios/audio ]; then
+    /bin/sh /usr/lib/atrios/audio apply 2>/dev/null || true
 fi
 /etc/init.d/S03amplifiers start 2>/dev/null || true
 
