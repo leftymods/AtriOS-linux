@@ -17,8 +17,8 @@ import select
 import termios
 
 UART_DEV = "/dev/ttyS1"
-FW_PATH = "/lib/firmware/rtl8822es_fw"
-CFG_PATH = "/lib/firmware/rtl8822es_config"
+FW_PATH = "/lib/firmware/rtl8822cs_fw"
+CFG_PATH = "/lib/firmware/rtl8822cs_config"
 STATE_FILE = "/tmp/atrios_bt_state"
 
 def reset_bt_rfkill():
@@ -30,10 +30,10 @@ def reset_bt_rfkill():
                 t = open(p_type).read().strip()
                 if t == "bluetooth":
                     with open(p_state, "w") as f:
-                        f.write("0\n")
+                        f.write("1\n")          # block: BT_EN off
                     time.sleep(0.25)
                     with open(p_state, "w") as f:
-                        f.write("1\n")
+                        f.write("0\n")          # unblock: BT_EN on
                     time.sleep(0.40)
                     return True
             except Exception:
@@ -82,7 +82,7 @@ def build_firmware_blob():
         cfg = bytearray(open(CFG_PATH, "rb").read())
         # Keep UART baudrate at 115200 (0x0000C01D)
         if len(cfg) >= 13 and cfg[:4] == b"\x55\xab\x23\x87" and cfg[6:8] == b"\x0c\x00":
-            cfg[9:13] = b"\x1d\xc0\x00\x00"
+            cfg[9:13] = b"\x14\xc0\x52\x02"  # 115200
         patch.extend(cfg)
     return bytes(patch)
 
@@ -130,6 +130,10 @@ def slip_encode(data):
             out.extend([0xDB, 0xDC])
         elif b == 0xDB:
             out.extend([0xDB, 0xDD])
+        elif b == 0x11:
+            out.extend([0xDB, 0xDE])
+        elif b == 0x13:
+            out.extend([0xDB, 0xDF])
         else:
             out.append(b)
     out.append(0xC0)
@@ -146,6 +150,10 @@ def slip_decode(frame):
                 out.append(0xC0)
             elif nxt == 0xDD:
                 out.append(0xDB)
+            elif nxt == 0xDE:
+                out.append(0x11)
+            elif nxt == 0xDF:
+                out.append(0x13)
             else:
                 out.append(nxt)
             i += 2
@@ -154,13 +162,35 @@ def slip_decode(frame):
             i += 1
     return bytes(out)
 
-def h5_pack(pkt_type, payload, seq=0, ack=0, reliable=False):
+def crc16_x25(data):
+    crc = 0xFFFF
+    for b in data:
+        crc ^= b
+        for _ in range(8):
+            crc = (crc >> 1) ^ 0x8408 if crc & 1 else crc >> 1
+    return crc & 0xFFFF
+
+def bitrev16(value):
+    out = 0
+    for i in range(16):
+        out = (out << 1) | ((value >> i) & 1)
+    return out
+
+def h5_pack(pkt_type, payload, seq=0, ack=0, reliable=False, use_crc=False):
     b0 = (seq & 0x07) | ((ack & 0x07) << 3) | (0x80 if reliable else 0x00)
+    if use_crc:
+        # Realtek H5 negotiates DIC=1 in CONFIG_RESP (cfg bit 4).  From then
+        # on every packet carries a CRC-16/X25 trailer and header bit 6.
+        b0 |= 0x40
     plen = len(payload)
     b1 = (pkt_type & 0x0F) | ((plen & 0x0F) << 4)
     b2 = (plen >> 4) & 0xFF
     b3 = (~(b0 + b1 + b2)) & 0xFF
-    return slip_encode(bytes([b0, b1, b2, b3]) + payload)
+    frame = bytes([b0, b1, b2, b3]) + payload
+    if use_crc:
+        crc = bitrev16(crc16_x25(frame))
+        frame += bytes([(crc >> 8) & 0xFF, crc & 0xFF])
+    return slip_encode(frame)
 
 class H5Transport:
     def __init__(self, fd):
@@ -168,6 +198,7 @@ class H5Transport:
         self.tx_seq = 0
         self.rx_seq = 0
         self.rx_buf = b""
+        self.use_crc = False
 
     def read_frames(self, timeout=0.3):
         frames = []
@@ -188,7 +219,11 @@ class H5Transport:
                     self.rx_buf = self.rx_buf[idx + 1:]
                     dec = slip_decode(raw)
                     if len(dec) >= 4:
-                        frames.append(dec)
+                        plen = ((dec[1] >> 4) & 0x0F) | (dec[2] << 4)
+                        if len(dec) >= 4 + plen:
+                            # Drop the optional CRC trailer; callers only
+                            # need header + payload.
+                            frames.append(dec[:4 + plen])
                 else:
                     self.rx_buf = self.rx_buf[1:]
             if frames:
@@ -202,7 +237,6 @@ class H5Transport:
         sync_pkt = h5_pack(0x0F, b"\x01\x7e")
         sync_rsp_pkt = h5_pack(0x0F, b"\x02\x7d")
         conf_pkt = h5_pack(0x0F, b"\x03\xfc\x14")
-        conf_rsp_pkt = h5_pack(0x0F, b"\x04\x7b")
 
         got_sync = False
         deadline = time.time() + timeout
@@ -221,31 +255,42 @@ class H5Transport:
                         got_sync = True
                         os.write(self.fd, conf_pkt)
                     elif pload.startswith(b"\x03\xfc"):
-                        os.write(self.fd, conf_rsp_pkt)
+                        cfg = pload[2] if len(pload) >= 3 else 0x14
+                        self.use_crc = bool(cfg & 0x10)
+                        os.write(self.fd, h5_pack(
+                            0x0F, bytes([0x04, 0x7B, cfg]),
+                            use_crc=self.use_crc))
                         if got_sync:
                             return True
                     elif pload.startswith(b"\x04\x7b"):
+                        cfg = pload[2] if len(pload) >= 3 else 0x14
+                        self.use_crc = bool(cfg & 0x10)
                         return True
         return False
 
     def send_cmd(self, ogf_ocf, payload=b"", timeout=0.8):
         cmd_bytes = struct.pack("<HB", ogf_ocf, len(payload)) + payload
-        pkt = h5_pack(0x01, cmd_bytes, seq=self.tx_seq, ack=self.rx_seq, reliable=True)
-        os.write(self.fd, pkt)
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            for f in self.read_frames(0.1):
-                b0, b1 = f[0], f[1]
-                ptype = b1 & 0x0F
-                pload = f[4:]
-                if b0 & 0x80:
-                    seq = b0 & 0x07
-                    self.rx_seq = (seq + 1) & 0x07
-                    # Send pure ACK
-                    os.write(self.fd, h5_pack(0x00, b"", seq=0, ack=self.rx_seq, reliable=False))
-                if ptype == 0x04 and len(pload) >= 6:
-                    self.tx_seq = (self.tx_seq + 1) & 0x07
-                    return pload
+        seq = self.tx_seq
+        pkt = h5_pack(0x01, cmd_bytes, seq=seq, ack=self.rx_seq,
+                      reliable=True, use_crc=self.use_crc)
+        # Realtek retries the same sequence number three times.
+        for _attempt in range(3):
+            os.write(self.fd, pkt)
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                for f in self.read_frames(0.1):
+                    b0, b1 = f[0], f[1]
+                    ptype = b1 & 0x0F
+                    pload = f[4:]
+                    if b0 & 0x80:
+                        rx_seq = b0 & 0x07
+                        self.rx_seq = (rx_seq + 1) & 0x07
+                        os.write(self.fd, h5_pack(
+                            0x00, b"", seq=0, ack=self.rx_seq,
+                            reliable=False, use_crc=self.use_crc))
+                    if ptype == 0x04 and len(pload) >= 3:
+                        self.tx_seq = (seq + 1) & 0x07
+                        return pload
         return None
 
     def collect_events(self, duration=4.0):
@@ -259,7 +304,8 @@ class H5Transport:
                 if b0 & 0x80:
                     seq = b0 & 0x07
                     self.rx_seq = (seq + 1) & 0x07
-                    os.write(self.fd, h5_pack(0x00, b"", seq=0, ack=self.rx_seq, reliable=False))
+                    os.write(self.fd, h5_pack(0x00, b"", seq=0, ack=self.rx_seq,
+                                               reliable=False, use_crc=self.use_crc))
                 if ptype == 0x04:
                     evts.append(pload)
         return evts
@@ -267,7 +313,7 @@ class H5Transport:
     def download_fw(self, blob):
         frag_size = 252
         total_frags = (len(blob) + frag_size - 1) // frag_size
-        print(f"[BT] Uploading Realtek RTL8822ES firmware over H5 ({len(blob)} bytes, {total_frags} chunks)...", flush=True)
+        print(f"[BT] Uploading Realtek RTL8822CS firmware over H5 ({len(blob)} bytes, {total_frags} chunks)...", flush=True)
         for i in range(total_frags):
             chunk = blob[i * frag_size:(i + 1) * frag_size]
             idx = 0 if i == 0 else (((i - 1) % 0x7F) + 1)
@@ -277,6 +323,14 @@ class H5Transport:
             if not resp:
                 print(f"[BT] Warning: H5 chunk {i}/{total_frags} timed out", flush=True)
                 return False
+        # Realtek appends zero-length 0xFC20 commands so that the H5
+        # sequence is 0 again before the post-download HCI Reset.
+        add = (8 - (self.tx_seq % 8)) % 8
+        if add == 0:
+            add = 7
+        for j in range(add):
+            idx = (total_frags + j) & 0x7F
+            self.send_cmd(0xFC20, bytes([idx]), timeout=0.8)
         time.sleep(0.4)
         print("[BT] Firmware upload complete.", flush=True)
         return True
@@ -367,7 +421,9 @@ def do_init(do_reset=True):
                     h5.send_cmd(0xFC6D, b"", timeout=0.5)
                     blob = build_firmware_blob()
                     if blob and h5.download_fw(blob):
-                        h5.handshake(timeout=1.5)
+                        # The controller is already in H5 with CRC; send a
+                        # plain HCI Reset, do not renegotiate the link.
+                        h5.send_cmd(0x0C03, b"", timeout=1.0)
                 h5.send_cmd(0x0C03, b"", timeout=0.6)
                 bd = h5.send_cmd(0x1009, b"", timeout=0.6)
                 mac = "Unknown"
@@ -415,7 +471,28 @@ def do_scan():
             for mac, (name, rssi) in sorted(found.items(), key=lambda x: x[1][1], reverse=True):
                 print(f"  {mac}  RSSI: {rssi:4d} dBm  {name}", flush=True)
         else:
-            print("  No nearby Bluetooth devices discovered during scan window.", flush=True)
+            print("  No BLE devices discovered during scan window.", flush=True)
+
+        # Classic BR/EDR inquiry (headphones, speakers, etc.).
+        h5.send_cmd(0x0401, b"\x33\x8b\x9e\x08\x00", timeout=0.8)
+        classic = {}
+        for e in h5.collect_events(duration=8.5):
+            if len(e) >= 3 and e[0] == 0x02:
+                num = e[2]
+                pos = 3
+                for _ in range(num):
+                    if pos + 11 > len(e):
+                        break
+                    mac = ":".join(f"{b:02X}" for b in reversed(e[pos:pos + 6]))
+                    cls = e[pos + 7] | (e[pos + 8] << 8)
+                    classic[mac] = cls
+                    pos += 11
+        if classic:
+            print("  Classic devices:", flush=True)
+            for mac, cls in sorted(classic.items()):
+                print(f"  {mac}  Class: 0x{cls:06X}", flush=True)
+        else:
+            print("  No classic Bluetooth devices discovered.", flush=True)
         return 0
     finally:
         os.close(fd)

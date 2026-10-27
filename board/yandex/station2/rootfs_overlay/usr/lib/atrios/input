@@ -75,10 +75,11 @@ KEY_NAMES = {
 }
 
 def read_volume():
-    pct = None
+    # The state file is the fast path; do not spawn amixer on every knob
+    # event just to decorate the monitor line.
     try:
         with open("/var/lib/atrios/volume") as f:
-            pct = max(0, min(100, int(f.read().strip())))
+            return None, max(0, min(100, int(f.read().strip())))
     except Exception:
         pass
     try:
@@ -86,9 +87,7 @@ def read_volume():
         m = re.search(r": values=(\d+)", out)
         if m:
             raw = int(m.group(1))
-            if pct is None:
-                pct = max(0, min(100, int(round(raw * 100.0 / 255.0))))
-            return raw, pct
+            return raw, max(0, min(100, int(round(raw * 100.0 / 255.0))))
     except Exception:
         pass
     return None
@@ -151,7 +150,10 @@ try:
                         extra = ""
                         if vol is not None:
                             raw, pct = vol
-                            extra = f" [master={raw}/255, {pct}%]"
+                            if raw is None:
+                                extra = f" [{pct}%]"
+                            else:
+                                extra = f" [master={raw}/255, {pct}%]"
                         print(f"[{ts}] Rotary Knob Turned: {d}{extra}", flush=True)
                     else:
                         st = "PRESSED" if ev_val == 1 else ("RELEASED" if ev_val == 0 else "REPEAT")

@@ -29,7 +29,7 @@ import math
 FB_RING = "/dev/fb5"
 NUM_LEDS = 24
 CARD = "AMLAUGESOUND"
-VOLUME_STEP = 2  # percent per detent; fractional ring keeps it smooth
+VOLUME_STEP = 4  # percent per detent; ring fills a full circle in 25 detents
 STATE_DIR = "/var/lib/atrios"
 STATE_FILE = STATE_DIR + "/volume"
 DEFAULT_VOLUME = 60
