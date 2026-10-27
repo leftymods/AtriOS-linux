@@ -362,15 +362,24 @@ audit_alsa() {
         fi
     done
 
-    # 3. Verify hardware SPK mute is disabled (inverted logic)
-    spk_val=$(get_alsa_ctl "SPK mute")
-    if value_is_one_of "$spk_val" 0 false off no; then
-        log_verbose "  * SPK mute: ${spk_val} [OK]"
+    # 3. Verify hardware SPK mute is disabled (inverted logic).
+    #    The control only exists when the DT provides spk_mute-gpios.  On this
+    #    board the amps are enabled through sy6045s, so when the control is
+    #    absent skip the check instead of trusting a stale asound.state that
+    #    may come from a different kernel.
+    if amixer -c 0 cget name='SPK mute' >/dev/null 2>&1 || \
+       amixer -c AMLAUGESOUND cget name='SPK mute' >/dev/null 2>&1; then
+        spk_val=$(get_alsa_ctl "SPK mute")
+        if value_is_one_of "$spk_val" 0 false off no; then
+            log_verbose "  * SPK mute: ${spk_val} [OK]"
+        else
+            CHECK_ALSA_STATUS="FAIL"
+            CHECK_ALSA_MSG="SPK mute is active (${spk_val})"
+            log_error "ALSA mixer muted: ${CHECK_ALSA_MSG}"
+            return 1
+        fi
     else
-        CHECK_ALSA_STATUS="FAIL"
-        CHECK_ALSA_MSG="SPK mute is active (${spk_val})"
-        log_error "ALSA mixer muted: ${CHECK_ALSA_MSG}"
-        return 1
+        log_verbose "  * SPK mute: control not present (no spk_mute GPIO) [SKIP]"
     fi
 
     # 4. Verify user volume levels are non-zero (0 means muted)

@@ -144,11 +144,10 @@ case "$ACTION" in
     rm -f "$REC_FILE"
     if command -v arecord >/dev/null 2>&1; then
       MIC_OK=0
-      # On this ASoC card device 0 is the TDM-B multicodec DAI (the real
-      # ES7210 loopback/ADC), device 3 is TDM-C, device 5 is PDM and
-      # device 1 is the PDM dummy.  Prefer the non-dummy ADC paths and
-      # fall back through channel counts.
-      for dev in 1 0 3 5; do
+      # Device map of this ASoC card: 0 = TDM-B multicodec (real ES7210
+      # loopback/ADC), 1 = PDM, 2 = SPDIF-B, 3 = TDM-C (HDMI/I2S out).
+      # Device 0 carries the microphone array, so try it first.
+      for dev in 0 3 1; do
         for ch in 8 4 2; do
           if arecord -D "hw:$CARD,$dev" -c "$ch" -r 48000 -f S32_LE -d 3 "$REC_FILE" 2>/dev/null; then
             MIC_OK=1
@@ -190,7 +189,7 @@ case "$ACTION" in
     OUT="${3:-/tmp/recording_8ch.wav}"
     echo "Recording $DUR seconds to $OUT..."
     MIC_OK=0
-    for dev in 1 0 3 5; do
+    for dev in 0 3 1; do
       for ch in 8 4 2; do
         if arecord -D "hw:$CARD,$dev" -c "$ch" -r 48000 -f S32_LE -d "$DUR" "$OUT" 2>/dev/null; then
           MIC_OK=1

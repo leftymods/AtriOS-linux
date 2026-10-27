@@ -30,13 +30,25 @@ def reset_bt_rfkill():
             try:
                 t = open(p_type).read().strip()
                 if t == "bluetooth":
+                    # rfkill state 0 = unblocked -> bt_set_block(blocked=0)
+                    # -> "BT_RADIO going: on" + bt_power_on().  State 1 is
+                    # blocked and powers the chip down, so the sequence must
+                    # finish on 0 or the UART stays silent.
                     with open(p_state, "w") as f:
-                        f.write("1\n")          # block: BT_EN off
-                    time.sleep(0.25)
+                        f.write("1\n")          # blocked -> power off
+                    time.sleep(0.15)
                     with open(p_state, "w") as f:
-                        f.write("0\n")          # unblock: BT_EN on
-                    time.sleep(0.40)
-                    return True
+                        f.write("0\n")          # unblocked -> power on
+                    time.sleep(0.50)
+                    state = open(p_state).read().strip()
+                    if state != "0":
+                        with open(p_state, "w") as f:
+                            f.write("0\n")
+                        time.sleep(0.50)
+                        state = open(p_state).read().strip()
+                    print(f"[BT] rfkill {os.path.basename(rf)} state={state}",
+                          flush=True)
+                    return state == "0"
             except Exception:
                 pass
     return False
@@ -171,9 +183,10 @@ def bitrev16(value):
 
 def h5_pack(pkt_type, payload, seq=0, ack=0, reliable=False, use_crc=False):
     b0 = (seq & 0x07) | ((ack & 0x07) << 3) | (0x80 if reliable else 0x00)
-    if use_crc:
-        # Realtek H5 negotiates DIC=1 in CONFIG_RESP (cfg bit 4).  From then
-        # on every packet carries a CRC-16/X25 trailer and header bit 6.
+    if use_crc and pkt_type in (0x01, 0x02):
+        # Realtek H5 negotiates DIC=1 in CONFIG_RESP (cfg bit 4).  CRC is
+        # carried only by reliable HCI command/ACL packets; ACK and link
+        # control frames stay unprotected (matches rtk_hciattach).
         b0 |= 0x40
     plen = len(payload)
     b1 = (pkt_type & 0x0F) | ((plen & 0x0F) << 4)
@@ -217,7 +230,7 @@ class H5Transport:
                         plen = ((dec[1] >> 4) & 0x0F) | (dec[2] << 4)
                         if len(dec) >= 4 + plen:
                             frame = dec[:4 + plen]
-                            if self.use_crc:
+                            if frame[0] & 0x40:
                                 if len(dec) < 4 + plen + 2:
                                     continue
                                 got = (dec[4 + plen] << 8) | dec[4 + plen + 1]
@@ -232,41 +245,70 @@ class H5Transport:
         return frames
 
     def handshake(self, timeout=1.2):
+        """Realtek H5 link setup: SYNC_REQ/RSP, CONFIG_REQ/RSP.
+
+        Per drivers/bluetooth/hci_h5.c the CONFIG_RESP payload is just
+        {0x04, 0x7b} (2 bytes, no CRC); the host then sends its own
+        CONFIG_REQ {0x03, 0xfc, cfg} and waits for the peer's CONFIG_RSP.
+        """
         termios.tcflush(self.fd, termios.TCIOFLUSH)
         self.tx_seq = 0
         self.rx_seq = 0
-        sync_pkt = h5_pack(0x0F, b"\x01\x7e")
-        sync_rsp_pkt = h5_pack(0x0F, b"\x02\x7d")
-        conf_pkt = h5_pack(0x0F, b"\x03\xfc\x14")
+        self.rx_buf = b""
+        self.use_crc = False
+
+        sync_req = h5_pack(0x0F, b"\x01\x7e")
+        sync_rsp = h5_pack(0x0F, b"\x02\x7d")
+        conf_req = h5_pack(0x0F, b"\x03\xfc\x14")
+        conf_rsp = h5_pack(0x0F, b"\x04\x7b")
 
         got_sync = False
+        sent_conf = False
+        last_sync = 0.0
         deadline = time.time() + timeout
         while time.time() < deadline:
+            now = time.time()
             if not got_sync:
-                self._write(sync_pkt)
-            else:
-                self._write(conf_pkt)
-            for f in self.read_frames(0.2):
-                ptype = f[1] & 0x0F
+                if now - last_sync > 0.25:
+                    self._write(sync_req)
+                    last_sync = now
+            elif not sent_conf:
+                self._write(conf_req)
+                sent_conf = True
+            for f in self.read_frames(0.15):
+                if (f[1] & 0x0F) != 0x0F:
+                    continue
                 pload = f[4:]
-                if ptype == 0x0F:
-                    if pload.startswith(b"\x01\x7e"):
-                        self._write(sync_rsp_pkt)
-                    elif pload.startswith(b"\x02\x7d"):
+                if pload.startswith(b"\x01\x7e"):
+                    self._write(sync_rsp)
+                elif pload.startswith(b"\x02\x7d"):
+                    if not got_sync:
                         got_sync = True
-                        self._write(conf_pkt)
-                    elif pload.startswith(b"\x03\xfc"):
-                        cfg = pload[2] if len(pload) >= 3 else 0x14
-                        self.use_crc = bool(cfg & 0x10)
-                        self._write(h5_pack(
-                            0x0F, bytes([0x04, 0x7B, cfg]),
-                            use_crc=self.use_crc))
-                        if got_sync:
-                            return True
-                    elif pload.startswith(b"\x04\x7b"):
-                        cfg = pload[2] if len(pload) >= 3 else 0x14
-                        self.use_crc = bool(cfg & 0x10)
-                        return True
+                        self._write(conf_req)
+                        sent_conf = True
+                elif pload.startswith(b"\x03\xfc"):
+                    # Peer's config request: reply 2 bytes, then our own.
+                    if len(pload) >= 3:
+                        self.use_crc = bool(pload[2] & 0x10)
+                    self._write(conf_rsp)
+                    if not sent_conf:
+                        self._write(conf_req)
+                        sent_conf = True
+                elif pload.startswith(b"\x04\x7b"):
+                    if len(pload) >= 3:
+                        self.use_crc = bool(pload[2] & 0x10)
+                    # CONFIG_RSP completes the link even when the peer
+                    # started the sync exchange itself.
+                    self.tx_seq = 0
+                    self.rx_seq = 0
+                    return True
+                elif pload.startswith(b"\x05\xfa"):
+                    self._write(h5_pack(0x0F, b"\x06\xf9"))
+                elif pload.startswith(b"\x07\x78"):
+                    # Peer went to sleep; ask it to wake up.
+                    self._write(h5_pack(0x0F, b"\x05\xfa"))
+                    got_sync = True
+                    sent_conf = True
         return False
 
     def _write(self, data):
@@ -305,7 +347,12 @@ class H5Transport:
                         self.rx_seq = (rx_seq + 1) & 0x07
                         self._write(h5_pack(
                             0x00, b"", seq=0, ack=self.rx_seq,
-                            reliable=False, use_crc=self.use_crc))
+                            reliable=False, use_crc=False))
+                    if ptype == 0x0F:
+                        # Wake-up keepalive from the controller.
+                        if pload.startswith(b"\x05\xfa"):
+                            self._write(h5_pack(0x0F, b"\x06\xf9"))
+                        continue
                     if ptype != 0x04 or len(pload) < 3:
                         continue
                     evt = pload[0]
@@ -337,7 +384,11 @@ class H5Transport:
                     seq = b0 & 0x07
                     self.rx_seq = (seq + 1) & 0x07
                     self._write(h5_pack(0x00, b"", seq=0, ack=self.rx_seq,
-                                               reliable=False, use_crc=self.use_crc))
+                                               reliable=False, use_crc=False))
+                if ptype == 0x0F:
+                    if pload.startswith(b"\x05\xfa"):
+                        self._write(h5_pack(0x0F, b"\x06\xf9"))
+                    continue
                 if ptype == 0x04:
                     evts.append(pload)
         return evts
@@ -356,6 +407,13 @@ class H5Transport:
                 print(f"[BT] Warning: H5 chunk {i}/{total_frags} timed out", flush=True)
                 return False
         time.sleep(0.4)
+        # The controller restarts its firmware after the last chunk: H5
+        # sequence numbers and the CRC mode are reset, so redo the link.
+        self.use_crc = False
+        self.rx_buf = b""
+        if not self.handshake(timeout=1.2):
+            print("[BT] Warning: H5 re-handshake after firmware upload failed",
+                  flush=True)
         print("[BT] Firmware upload complete.", flush=True)
         return True
 
@@ -486,14 +544,32 @@ def do_scan():
         return 1
 
     parity = (mode == "h5:1")
-    fd = os.open(UART_DEV, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+    fd = None
     try:
-        config_uart(fd, termios.B115200, parity_even=parity, rtscts=False)
-        h5 = H5Transport(fd)
-        if not h5.handshake(timeout=1.0):
-            do_init(do_reset=True)
+        # A failed handshake usually means the controller was power-cycled
+        # or slept.  Re-init in a fresh session/fd instead of reusing the
+        # old one (which keeps the stale termios/H5 state).
+        for attempt in (0, 1):
+            if fd is not None:
+                os.close(fd)
+                fd = None
+            if attempt:
+                do_init(do_reset=True)
+                info = (open(STATE_FILE).read().strip().split()
+                        if os.path.exists(STATE_FILE) else [])
+                if not info or not info[0].startswith("h5"):
+                    print("[BT] Controller did not come back in H5 mode",
+                          flush=True)
+                    return 1
+                parity = (info[0] == "h5:1")
+            fd = os.open(UART_DEV, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+            config_uart(fd, termios.B115200, parity_even=parity, rtscts=False)
             h5 = H5Transport(fd)
-            h5.handshake(timeout=1.0)
+            if h5.handshake(timeout=1.2):
+                break
+        else:
+            print("[BT] H5 link setup failed", flush=True)
+            return 1
         h5.send_cmd(0x0C03, b"", timeout=0.5)
         # Enable LE Meta Events
         h5.send_cmd(0x0C01, b"\xff\xff\xff\xff\xff\xff\xff\x3f", timeout=0.5)
@@ -534,7 +610,8 @@ def do_scan():
             print("  No classic Bluetooth devices discovered.", flush=True)
         return 0
     finally:
-        os.close(fd)
+        if fd is not None:
+            os.close(fd)
 
 if __name__ == "__main__":
     act = sys.argv[1] if len(sys.argv) > 1 else "init"
