@@ -34,9 +34,11 @@ case "$1" in
     fi
     for rfk in /sys/class/rfkill/rfkill*; do
       if [ -f "$rfk/state" ]; then
-        echo 0 > "$rfk/state" 2>/dev/null || true
-        usleep 100000 2>/dev/null || true
+        # 1 = soft-blocked/off, 0 = unblocked/on.  Pulse off -> on so the
+        # radios are left enabled (the old 0 -> 1 left BT_EN low).
         echo 1 > "$rfk/state" 2>/dev/null || true
+        usleep 100000 2>/dev/null || true
+        echo 0 > "$rfk/state" 2>/dev/null || true
       fi
     done
     usleep 200000 2>/dev/null || sleep 1

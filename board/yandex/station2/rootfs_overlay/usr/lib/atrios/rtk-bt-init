@@ -22,9 +22,9 @@ CFG_PATH = "/lib/firmware/rtlbt/rtl8822cs_config"
 STATE_FILE = "/tmp/atrios_bt_state"
 
 def reset_bt_rfkill():
-    for idx in range(4):
-        p_type = f"/sys/class/rfkill/rfkill{idx}/type"
-        p_state = f"/sys/class/rfkill/rfkill{idx}/state"
+    for rf in glob.glob("/sys/class/rfkill/rfkill*"):
+        p_type = rf + "/type"
+        p_state = rf + "/state"
         if os.path.exists(p_type) and os.path.exists(p_state):
             try:
                 t = open(p_type).read().strip()
@@ -130,10 +130,6 @@ def slip_encode(data):
             out.extend([0xDB, 0xDC])
         elif b == 0xDB:
             out.extend([0xDB, 0xDD])
-        elif b == 0x11:
-            out.extend([0xDB, 0xDE])
-        elif b == 0x13:
-            out.extend([0xDB, 0xDF])
         else:
             out.append(b)
     out.append(0xC0)
@@ -150,10 +146,6 @@ def slip_decode(frame):
                 out.append(0xC0)
             elif nxt == 0xDD:
                 out.append(0xDB)
-            elif nxt == 0xDE:
-                out.append(0x11)
-            elif nxt == 0xDF:
-                out.append(0x13)
             else:
                 out.append(nxt)
             i += 2
@@ -219,11 +211,19 @@ class H5Transport:
                     self.rx_buf = self.rx_buf[idx + 1:]
                     dec = slip_decode(raw)
                     if len(dec) >= 4:
+                        if (dec[0] + dec[1] + dec[2] + dec[3]) & 0xFF != 0xFF:
+                            continue
                         plen = ((dec[1] >> 4) & 0x0F) | (dec[2] << 4)
                         if len(dec) >= 4 + plen:
-                            # Drop the optional CRC trailer; callers only
-                            # need header + payload.
-                            frames.append(dec[:4 + plen])
+                            frame = dec[:4 + plen]
+                            if self.use_crc:
+                                if len(dec) < 4 + plen + 2:
+                                    continue
+                                got = (dec[4 + plen] << 8) | dec[4 + plen + 1]
+                                want = bitrev16(crc16_x25(frame))
+                                if got != want:
+                                    continue
+                            frames.append(frame)
                 else:
                     self.rx_buf = self.rx_buf[1:]
             if frames:
@@ -242,22 +242,22 @@ class H5Transport:
         deadline = time.time() + timeout
         while time.time() < deadline:
             if not got_sync:
-                os.write(self.fd, sync_pkt)
+                self._write(sync_pkt)
             else:
-                os.write(self.fd, conf_pkt)
+                self._write(conf_pkt)
             for f in self.read_frames(0.2):
                 ptype = f[1] & 0x0F
                 pload = f[4:]
                 if ptype == 0x0F:
                     if pload.startswith(b"\x01\x7e"):
-                        os.write(self.fd, sync_rsp_pkt)
+                        self._write(sync_rsp_pkt)
                     elif pload.startswith(b"\x02\x7d"):
                         got_sync = True
-                        os.write(self.fd, conf_pkt)
+                        self._write(conf_pkt)
                     elif pload.startswith(b"\x03\xfc"):
                         cfg = pload[2] if len(pload) >= 3 else 0x14
                         self.use_crc = bool(cfg & 0x10)
-                        os.write(self.fd, h5_pack(
+                        self._write(h5_pack(
                             0x0F, bytes([0x04, 0x7B, cfg]),
                             use_crc=self.use_crc))
                         if got_sync:
@@ -268,14 +268,31 @@ class H5Transport:
                         return True
         return False
 
-    def send_cmd(self, ogf_ocf, payload=b"", timeout=0.8):
+    def _write(self, data):
+        """Write a complete H5 frame even on a non-blocking tty."""
+        view = memoryview(data)
+        while view:
+            try:
+                n = os.write(self.fd, view)
+                if n <= 0:
+                    time.sleep(0.002)
+                    continue
+                view = view[n:]
+            except BlockingIOError:
+                select.select([], [self.fd], [], 0.05)
+            except Exception:
+                return False
+        return True
+
+    def send_cmd(self, ogf_ocf, payload=b"", timeout=0.8,
+                 expect_complete=True):
         cmd_bytes = struct.pack("<HB", ogf_ocf, len(payload)) + payload
         seq = self.tx_seq
-        pkt = h5_pack(0x01, cmd_bytes, seq=seq, ack=self.rx_seq,
-                      reliable=True, use_crc=self.use_crc)
         # Realtek retries the same sequence number three times.
         for _attempt in range(3):
-            os.write(self.fd, pkt)
+            pkt = h5_pack(0x01, cmd_bytes, seq=seq, ack=self.rx_seq,
+                          reliable=True, use_crc=self.use_crc)
+            self._write(pkt)
             deadline = time.time() + timeout
             while time.time() < deadline:
                 for f in self.read_frames(0.1):
@@ -285,12 +302,26 @@ class H5Transport:
                     if b0 & 0x80:
                         rx_seq = b0 & 0x07
                         self.rx_seq = (rx_seq + 1) & 0x07
-                        os.write(self.fd, h5_pack(
+                        self._write(h5_pack(
                             0x00, b"", seq=0, ack=self.rx_seq,
                             reliable=False, use_crc=self.use_crc))
-                    if ptype == 0x04 and len(pload) >= 3:
-                        self.tx_seq = (seq + 1) & 0x07
-                        return pload
+                    if ptype != 0x04 or len(pload) < 3:
+                        continue
+                    evt = pload[0]
+                    if expect_complete:
+                        if (evt == 0x0E and len(pload) >= 6
+                                and struct.unpack_from("<H", pload, 3)[0] == ogf_ocf
+                                and pload[5] == 0):
+                            self.tx_seq = (seq + 1) & 0x07
+                            return pload
+                    else:
+                        # Commands such as Inquiry return Command Status,
+                        # followed by asynchronous result events.
+                        if (evt == 0x0F and len(pload) >= 6
+                                and pload[2] == 0
+                                and struct.unpack_from("<H", pload, 4)[0] == ogf_ocf):
+                            self.tx_seq = (seq + 1) & 0x07
+                            return pload
         return None
 
     def collect_events(self, duration=4.0):
@@ -304,7 +335,7 @@ class H5Transport:
                 if b0 & 0x80:
                     seq = b0 & 0x07
                     self.rx_seq = (seq + 1) & 0x07
-                    os.write(self.fd, h5_pack(0x00, b"", seq=0, ack=self.rx_seq,
+                    self._write(h5_pack(0x00, b"", seq=0, ack=self.rx_seq,
                                                reliable=False, use_crc=self.use_crc))
                 if ptype == 0x04:
                     evts.append(pload)
@@ -323,14 +354,6 @@ class H5Transport:
             if not resp:
                 print(f"[BT] Warning: H5 chunk {i}/{total_frags} timed out", flush=True)
                 return False
-        # Realtek appends zero-length 0xFC20 commands so that the H5
-        # sequence is 0 again before the post-download HCI Reset.
-        add = (8 - (self.tx_seq % 8)) % 8
-        if add == 0:
-            add = 7
-        for j in range(add):
-            idx = (total_frags + j) & 0x7F
-            self.send_cmd(0xFC20, bytes([idx]), timeout=0.8)
         time.sleep(0.4)
         print("[BT] Firmware upload complete.", flush=True)
         return True
@@ -398,7 +421,9 @@ def do_init(do_reset=True):
                 if lmp_subver in (0x8822, 0x0000):
                     blob = build_firmware_blob()
                     if blob:
-                        h4_download_fw(fd, blob)
+                        if not h4_download_fw(fd, blob):
+                            print("[BT] Error: H4 firmware upload failed", flush=True)
+                            return 1
                         h4_cmd(fd, 0x0C03, b"", timeout=0.5)
                 bd = h4_cmd(fd, 0x1009, b"", timeout=0.4)
                 mac = "Unknown"
@@ -415,15 +440,28 @@ def do_init(do_reset=True):
             h5 = H5Transport(fd)
             if h5.handshake(timeout=1.2):
                 ver = h5.send_cmd(0x1001, b"", timeout=0.6)
-                lmp_subver = struct.unpack_from("<H", ver, 12)[0] if (ver and len(ver) >= 14) else 0x8822
+                if not ver:
+                    # CONFIG_RESP may omit the cfg byte; probe the opposite
+                    # DIC mode with the first real HCI command.
+                    h5.use_crc = not h5.use_crc
+                    ver = h5.send_cmd(0x1001, b"", timeout=0.6)
+                if not ver:
+                    print(f"[BT] H5 link up but Read Local Version failed (parity={'even' if parity else 'none'}, crc={h5.use_crc})", flush=True)
+                    continue
+                lmp_subver = struct.unpack_from("<H", ver, 12)[0] if len(ver) >= 14 else 0
                 print(f"[BT] Controller responded on {UART_DEV} (H5 3-wire, parity={'even' if parity else 'none'}, lmp_subver=0x{lmp_subver:04x}).", flush=True)
                 if lmp_subver == 0x8822:
                     h5.send_cmd(0xFC6D, b"", timeout=0.5)
                     blob = build_firmware_blob()
-                    if blob and h5.download_fw(blob):
-                        # The controller is already in H5 with CRC; send a
-                        # plain HCI Reset, do not renegotiate the link.
-                        h5.send_cmd(0x0C03, b"", timeout=1.0)
+                    if not blob:
+                        print("[BT] Error: RTL8822CS firmware/config not found", flush=True)
+                        return 1
+                    if not h5.download_fw(blob):
+                        print("[BT] Error: firmware upload failed; controller not ready", flush=True)
+                        return 1
+                    h5.send_cmd(0x0C03, b"", timeout=1.0)
+                else:
+                    print(f"[BT] WARNING: unexpected lmp_subver 0x{lmp_subver:04x}; skipping firmware download", flush=True)
                 h5.send_cmd(0x0C03, b"", timeout=0.6)
                 bd = h5.send_cmd(0x1009, b"", timeout=0.6)
                 mac = "Unknown"
@@ -474,19 +512,19 @@ def do_scan():
             print("  No BLE devices discovered during scan window.", flush=True)
 
         # Classic BR/EDR inquiry (headphones, speakers, etc.).
-        h5.send_cmd(0x0401, b"\x33\x8b\x9e\x08\x00", timeout=0.8)
+        h5.send_cmd(0x0401, b"\x33\x8b\x9e\x07\x00", timeout=0.8, expect_complete=False)
         classic = {}
-        for e in h5.collect_events(duration=8.5):
+        for e in h5.collect_events(duration=10.0):
             if len(e) >= 3 and e[0] == 0x02:
                 num = e[2]
                 pos = 3
                 for _ in range(num):
-                    if pos + 11 > len(e):
+                    if pos + 14 > len(e):
                         break
                     mac = ":".join(f"{b:02X}" for b in reversed(e[pos:pos + 6]))
-                    cls = e[pos + 7] | (e[pos + 8] << 8)
+                    cls = e[pos + 8] | (e[pos + 9] << 8) | (e[pos + 10] << 16)
                     classic[mac] = cls
-                    pos += 11
+                    pos += 14
         if classic:
             print("  Classic devices:", flush=True)
             for mac, cls in sorted(classic.items()):
