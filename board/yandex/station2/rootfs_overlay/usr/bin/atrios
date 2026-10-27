@@ -1,0 +1,58 @@
+#!/bin/sh
+# atrios - single entry point for all AtriOS hardware tools
+L=/usr/lib/atrios
+if [ ! -d "$L" ]; then
+  _base="$(cd "$(dirname "$0")/../lib/atrios" 2>/dev/null && pwd || true)"
+  [ -d "$_base" ] && L="$_base"
+fi
+
+usage() {
+cat <<'EOT'
+AtriOS - Yandex Station Max tools
+
+  atrios status                      Wi-Fi / Bluetooth / Zigbee overview
+  atrios check                       Audio hardware & bus audit (check_audio.sh)
+  atrios test                        Speakers + microphone array test
+
+  Screen (25x16):
+    atrios screen kisser [1|2|animate]  Boykisser cat animation
+    atrios screen eyes [state]          Eyes (open/blink/wink/left/right/up/down/happy/love/wide/angry/sleep/cry/squint/dizzy/animate)
+    atrios screen clock|ticker "TEXT"|fill [0..255]|pixel X Y [B]|gradient|off
+  LED ring (24 RGB):
+    atrios ring rainbow|volume N|off
+  Light sensor:
+    atrios sensor
+
+  Audio:
+    atrios volume [0..100%]    atrios mute [on|off]
+    atrios play [file.wav]     atrios record [sec] [file.wav]
+    atrios amps                atrios audio check [--verbose]
+
+  Wireless:
+    atrios wifi [scan|connect SSID PASS|power 1|0]
+    atrios bt [init|scan]
+    atrios zigbee [reset|ping]
+
+  Buttons / knob monitor:
+    atrios input
+EOT
+}
+
+c="$1"
+[ $# -gt 0 ] && shift
+case "$c" in
+  screen|ring|sensor) exec python3 $L/light "$c" "$@" ;;
+  kisser|cat|boykisser) exec python3 $L/light screen kisser "$@" ;;
+  eyes)               exec python3 $L/light screen eyes "$@" ;;
+  clock|ticker)       exec python3 $L/light screen "$c" "$@" ;;
+  light)              exec python3 $L/light "$@" ;;
+  check|check-audio)  exec /bin/sh $L/check_audio.sh "$@" ;;
+  test|play|record|volume|mute|amps) exec /bin/sh $L/audio "$c" "$@" ;;
+  audio)              exec /bin/sh $L/audio "$@" ;;
+  wifi|bt|bluetooth|zigbee) exec /bin/sh $L/wireless "$c" "$@" ;;
+  wireless)           exec /bin/sh $L/wireless "$@" ;;
+  status)             exec /bin/sh $L/wireless status ;;
+  input|buttons)      exec /bin/sh $L/input "$@" ;;
+  ""|help|-h|--help)  usage ;;
+  *) echo "atrios: unknown command '$c'"; echo; usage; exit 1 ;;
+esac

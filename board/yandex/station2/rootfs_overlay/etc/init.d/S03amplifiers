@@ -1,0 +1,232 @@
+#!/bin/sh
+# /etc/init.d/S03amplifiers - Initialize Silergy SY6045S / Everest ES8156 hardware audio amplifiers
+
+case "$1" in
+  start)
+    echo "[AtriOS] Initializing audio amplifiers and power booster..."
+
+    # 1. 20V PVDD Amplifier Power Booster rail.
+    # The DTS models it as the fixed regulator "20V_AMPL" on GPIOX_10
+    # (line 75 of the periphs controller, gpio-485 on this kernel) with
+    # regulator-always-on.  The regulator driver owns the line, so an
+    # export through sysfs fails with EBUSY.  Only touch the sysfs GPIO
+    # when the regulator is not registered, otherwise leave it alone.
+    rail_reg=""
+    for r in /sys/class/regulator/regulator.*; do
+      if [ "$(cat "$r/name" 2>/dev/null)" = "20V_AMPL" ]; then
+        rail_reg="$r"
+        break
+      fi
+    done
+    rail_state=""
+    if [ -n "$rail_reg" ]; then
+      rail_state=$(cat "$rail_reg/state" 2>/dev/null || true)
+      echo "[AtriOS] 20V rail: ${rail_reg##*/} state=${rail_state:-?} ($(cat "$rail_reg/microvolts" 2>/dev/null) uV)"
+    fi
+    if [ -z "$rail_reg" ] || [ "$rail_state" != "enabled" ]; then
+      for g in 485; do
+        if [ ! -d "/sys/class/gpio/gpio$g" ]; then
+          (echo "$g" > /sys/class/gpio/export) 2>/dev/null || true
+        fi
+        if [ -d "/sys/class/gpio/gpio$g" ]; then
+          (echo out > "/sys/class/gpio/gpio$g/direction") 2>/dev/null || true
+          (echo 1 > "/sys/class/gpio/gpio$g/value") 2>/dev/null || true
+        fi
+      done
+    fi
+
+    # Wait for the ALSA card; S03 can run before the ASoC driver probes.
+    i=0
+    while ! grep -qi AUGESOUND /proc/asound/cards 2>/dev/null && [ "$i" -lt 20 ]; do
+      sleep 1
+      i=$((i+1))
+    done
+
+    # 1b. Route the TDM_B clock pads to mst_b.  The vendor kernel only
+    # programs the MCLK pad mux; SCLK/LRCLK stay on mst_a, so the SY6045S
+    # chips never receive clocks and stay in hardware shutdown.  Do this
+    # after the ASoC card has probed so the driver cannot overwrite it.
+    #
+    # SM1 (S905X3) has the audio clock block at 0xFF660000 and a different
+    # pad-control layout from G12A: MST_PAD_CTRL0 is 0x20 (MCLK) and
+    # MST_PAD_CTRL1 is 0x24 (SCLK/LRCLK).  GUIDE.md used the G12A offsets
+    # 0x1C/0x20, which are wrong for this SoC.
+    if command -v python3 >/dev/null 2>&1; then
+      python3 -c '
+import mmap, os, struct
+fd = os.open("/dev/mem", os.O_RDWR | os.O_SYNC)
+m = mmap.mmap(fd, 0x1000, mmap.MAP_SHARED, mmap.PROT_READ | mmap.PROT_WRITE, offset=0xFF660000)
+struct.pack_into("<I", m, 0x24, 0x01110111)  # SM1 MST_PAD_CTRL1: SCLK/LRCLK -> mst_b
+struct.pack_into("<I", m, 0x20, 0x00000011)  # SM1 MST_PAD_CTRL0: MCLK -> mst_b
+m.flush()
+os.close(fd)
+' 2>/dev/null || echo "[AtriOS] WARN: TDM_B pad clock mux write failed"
+    fi
+
+    # 2. Restore ALSA mixer controls from /var/lib/alsa/asound.state
+    # Restores all 23 hardware mixer controls at boot.
+    if [ -f "/var/lib/alsa/asound.state" ]; then
+      if command -v alsactl >/dev/null 2>&1; then
+        alsactl restore -f /var/lib/alsa/asound.state 2>/dev/null || true
+      elif [ -x /usr/sbin/alsactl ]; then
+        /usr/sbin/alsactl restore -f /var/lib/alsa/asound.state 2>/dev/null || true
+      fi
+    fi
+
+    # 3. Direct hardware register unmute via I2C bus 2
+    # Silergy SY6045S: reg 0x06=0x00 (master unmute), reg 0x22=0x00 (unmute channels)
+    # Tweeters (0x2a) and Woofer (0x2b)
+    if command -v i2cset >/dev/null 2>&1; then
+      i2cset -y -f 2 0x2a 0x06 0x00 2>/dev/null || true
+      i2cset -y -f 2 0x2a 0x22 0x00 2>/dev/null || true
+      i2cset -y -f 2 0x2b 0x06 0x00 2>/dev/null || true
+      i2cset -y -f 2 0x2b 0x22 0x00 2>/dev/null || true
+
+      # Everest ES8156 Headphone DAC (0x08 on I2C2):
+      # reg 0x13=0x11 (unmute headphone), reg 0x14=0xbe (DAC volume 0dB), reg 0x08=0x3f (power on)
+      i2cset -y -f 2 0x08 0x13 0x11 2>/dev/null || true
+      i2cset -y -f 2 0x08 0x14 0xbe 2>/dev/null || true
+      i2cset -y -f 2 0x08 0x08 0x3f 2>/dev/null || true
+    fi
+
+    # Confirm unmuted status via i2cget if available
+    if command -v i2cget >/dev/null 2>&1; then
+      for addr in 0x2a 0x2b; do
+        mute_val=$(i2cget -y -f 2 "$addr" 0x06 2>/dev/null || echo "N/A")
+        if [ "$mute_val" != "0x00" ] && [ "$mute_val" != "N/A" ]; then
+          i2cset -y -f 2 "$addr" 0x06 0x00 2>/dev/null || true
+        fi
+      done
+    fi
+
+    # 4. Configure ALSA hardware mixer controls for AMLAUGESOUND (safety net / explicit unmute)
+    if command -v amixer >/dev/null 2>&1; then
+      card="AMLAUGESOUND"
+
+      # Audio output routing: FRDDR_A -> TDMOUT_B, TODDR_A -> PDM Capture
+      amixer -c "$card" set 'FRDDR_A SINK 1 SEL' 'OUT 1' 2>/dev/null || true
+      amixer -c "$card" set 'FRDDR_A SINK 2 SEL' 'OUT 1' 2>/dev/null || true
+      amixer -c "$card" set 'FRDDR_A SINK 3 SEL' 'OUT 1' 2>/dev/null || true
+      amixer -c "$card" cset numid=31 4 2>/dev/null || true
+
+      # Audio output routing: route playback to TDMOUT_B
+      amixer -c "$card" cset name='Audio Out Sink' 'TDMOUT_B' 2>/dev/null || true
+      amixer -c "$card" cset name='Audio Out Sink' 1 2>/dev/null || true
+      amixer -c "$card" cset name='SPK mute' 0 2>/dev/null || true
+
+      # Woofer controls (Master 255 = 0dB, Ch1/Ch2 159 [0x9F] = 0dB per sy6045s-woofer-settings.txt)
+      amixer -c "$card" cset name='Woofer Master Playback Switch' 1 2>/dev/null || true
+      amixer -c "$card" cset name='Woofer Master Playback Volume' 255 2>/dev/null || true
+      amixer -c "$card" cset name='Woofer Ch1 Playback Switch' 1 2>/dev/null || true
+      amixer -c "$card" cset name='Woofer Ch1 Playback Volume' 159 2>/dev/null || true
+      amixer -c "$card" cset name='Woofer Ch2 Playback Switch' 1 2>/dev/null || true
+      amixer -c "$card" cset name='Woofer Ch2 Playback Volume' 159 2>/dev/null || true
+      amixer -c "$card" cset name='Woofer EQ Switch' 1 2>/dev/null || true
+      amixer -c "$card" cset name='Woofer DRC Switch' 1 2>/dev/null || true
+
+      # Tweeters controls (Master 255 = 0dB, Ch1/Ch2 159 [0x9F] = 0dB per sy6045s-tweeters-settings.txt)
+      amixer -c "$card" cset name='Tweeters Master Playback Switch' 1 2>/dev/null || true
+      amixer -c "$card" cset name='Tweeters Master Playback Volume' 255 2>/dev/null || true
+      amixer -c "$card" cset name='Tweeters Ch1 Playback Switch' 1 2>/dev/null || true
+      amixer -c "$card" cset name='Tweeters Ch1 Playback Volume' 159 2>/dev/null || true
+      amixer -c "$card" cset name='Tweeters Ch2 Playback Switch' 1 2>/dev/null || true
+      amixer -c "$card" cset name='Tweeters Ch2 Playback Volume' 159 2>/dev/null || true
+      amixer -c "$card" cset name='Tweeters EQ Switch' 1 2>/dev/null || true
+      amixer -c "$card" cset name='Tweeters DRC Switch' 1 2>/dev/null || true
+
+      # Everest ES8156 Headphone DAC controls (nominal volume 193 per stock mixer_paths_3.xml)
+      amixer -c "$card" cset name='Headphone Headphone Switch' 1 2>/dev/null || true
+      amixer -c "$card" cset name='Headphone DAC Playback Volume' 193 2>/dev/null || true
+
+      # Loopback ADC gains and PDM shift
+      amixer -c "$card" cset name='Loopback ADC1_MAX_GAIN' 188 2>/dev/null || true
+      amixer -c "$card" cset name='Loopback ADC2_MAX_GAIN' 203 2>/dev/null || true
+      amixer -c "$card" cset name='PDM HCIC shift gain (~ 6dB * value)' 2 2>/dev/null || true
+
+      # Capture path: open the ADC/PDM inputs and set a sane capture level.
+      for ctl in "TDMIN_A Capture Switch" "TDMIN_B Capture Switch" \
+                 "TDMIN_C Capture Switch" "ADC Capture Switch" \
+                 "Mic Capture Switch"; do
+        amixer -c "$card" cset name="$ctl" 1 2>/dev/null || true
+      done
+      amixer -c "$card" cset name='ADC Capture Volume' 192 2>/dev/null || true
+
+      # ALSA Simple Mixer sset fallbacks
+      amixer -c "$card" sset 'Woofer Master' 255 unmute 2>/dev/null || true
+      amixer -c "$card" sset 'Tweeters Master' 255 unmute 2>/dev/null || true
+      amixer -c "$card" sset 'Headphone Headphone' unmute 2>/dev/null || true
+    fi
+
+    echo "[AtriOS] Audio amplifiers initialized."
+    ;;
+
+  stop)
+    echo "[AtriOS] Stopping audio amplifiers and muting channels..."
+
+    # 1. Mute ALSA mixer controls
+    if command -v amixer >/dev/null 2>&1; then
+      card="AMLAUGESOUND"
+      amixer -c "$card" cset name='SPK mute' 1 2>/dev/null || true
+      amixer -c "$card" cset name='Woofer Master Playback Switch' 0 2>/dev/null || true
+      amixer -c "$card" cset name='Tweeters Master Playback Switch' 0 2>/dev/null || true
+      amixer -c "$card" cset name='Headphone Headphone Switch' 0 2>/dev/null || true
+    fi
+
+    # 2. Hardware mute SY6045S and ES8156 via I2C bus 2
+    if command -v i2cset >/dev/null 2>&1; then
+      # SY6045S master mute: reg 0x06=0x08
+      i2cset -y -f 2 0x2a 0x06 0x08 2>/dev/null || true
+      i2cset -y -f 2 0x2b 0x06 0x08 2>/dev/null || true
+      # ES8156 headphone mute: reg 0x13=0x00
+      i2cset -y -f 2 0x08 0x13 0x00 2>/dev/null || true
+    fi
+
+    # 3. Disable 20V booster rail
+    for g in 485; do
+      if [ -d "/sys/class/gpio/gpio$g" ]; then
+        (echo 0 > "/sys/class/gpio/gpio$g/value") 2>/dev/null || true
+      fi
+    done
+
+    echo "[AtriOS] Audio amplifiers stopped."
+    ;;
+
+  restart|reload)
+    "$0" stop
+    sleep 1
+    "$0" start
+    ;;
+
+  status)
+    echo "[AtriOS] Audio Amplifiers Status:"
+    pwr="OFF"
+    for g in 485; do
+      if [ -f "/sys/class/gpio/gpio$g/value" ]; then
+        val=$(cat "/sys/class/gpio/gpio$g/value" 2>/dev/null)
+        if [ "$val" = "1" ]; then
+          pwr="ON (GPIO $g = 1)"
+          break
+        fi
+      fi
+    done
+    echo "  * 20V Booster Power: $pwr"
+
+    if command -v i2cget >/dev/null 2>&1; then
+      twt=$(i2cget -y -f 2 0x2a 0x06 2>/dev/null || echo "N/A")
+      wfr=$(i2cget -y -f 2 0x2b 0x06 2>/dev/null || echo "N/A")
+      echo "  * Tweeters (0x2a) Reg 0x06 Mute: $twt"
+      echo "  * Woofer   (0x2b) Reg 0x06 Mute: $wfr"
+    fi
+
+    if [ -f "/proc/asound/cards" ]; then
+      echo "  * ALSA Cards:"
+      cat /proc/asound/cards | sed 's/^/    /'
+    fi
+    ;;
+
+  *)
+    echo "Usage: $0 {start|stop|restart|reload|status}"
+    exit 1
+    ;;
+esac
+exit 0

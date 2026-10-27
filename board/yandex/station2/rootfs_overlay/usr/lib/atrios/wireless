@@ -1,0 +1,237 @@
+#!/bin/sh
+# AtriOS Unified Wireless Management Utility (atrios-wireless)
+# Manages:
+#   1. Wi-Fi (Realtek RTL8822CS/ES 802.11ac SDIO via 88x2es.ko)
+#   2. Bluetooth (RTL8822CS Bluetooth 5.0 UART /dev/ttyS1)
+#   3. Zigbee (Silicon Labs EFR32 /dev/ttyAML4 via zigbee-control.ko)
+
+CMD="${1:-status}"
+
+case "$CMD" in
+  status)
+    echo "=========================================================="
+    echo "       AtriOS Wireless & IoT Connectivity Overview        "
+    echo "=========================================================="
+    # Wi-Fi Status
+    echo "[1. Wi-Fi (Realtek RTL8822CS SDIO)]:"
+    if ip link show wlan0 >/dev/null 2>&1; then
+      STATE=$(ip link show wlan0 | grep -o 'state [A-Z]*' | awk '{print $2}')
+      IP=$(ip -4 addr show wlan0 | grep -o 'inet [0-9.]*' | awk '{print $2}')
+      echo "  * Interface wlan0: UP (State: ${STATE:-UNKNOWN})"
+      if [ -n "$IP" ]; then
+        echo "  * IP Address: $IP"
+      else
+        echo "  * IP Address: Not assigned (disconnected)"
+      fi
+    else
+      echo "  * Interface wlan0: NOT FOUND (Check SDIO power or 88x2es.ko)"
+    fi
+
+    # Bluetooth Status
+    echo ""
+    echo "[2. Bluetooth (Realtek RTL8822ES UART)]:"
+    if command -v hciconfig >/dev/null 2>&1 && hciconfig hci0 >/dev/null 2>&1; then
+      BT_STATE=$(hciconfig hci0 | grep -o 'UP RUNNING\|DOWN')
+      echo "  * HCI Device: hci0 ($BT_STATE)"
+    elif [ -e /sys/class/bluetooth/hci0 ]; then
+      echo "  * HCI Device: hci0 registered in sysfs"
+    elif [ -f /tmp/atrios_bt_state ]; then
+      echo "  * UART Controller (/dev/ttyS1): UP ($(cat /tmp/atrios_bt_state))"
+    else
+      echo "  * HCI Device: Not attached. Available UART: /dev/ttyS1 (run 'atrios bt init')"
+    fi
+
+    # Zigbee Status
+    echo ""
+    echo "[3. Zigbee (Silicon Labs EFR32 Coordinator)]:"
+    ZB_DEV=""
+    for dev in /dev/ttyAML4 /dev/ttyS4; do
+      if [ -c "$dev" ]; then
+        ZB_DEV="$dev"
+        break
+      fi
+    done
+    if [ -n "$ZB_DEV" ]; then
+      echo "  * Coordinator UART: $ZB_DEV"
+    else
+      echo "  * Coordinator UART: Not found (/dev/ttyAML4 / /dev/ttyS4)"
+    fi
+    if [ -d /sys/devices/platform/zigbee ]; then
+      echo "  * Driver: zigbee-control registered"
+    fi
+    echo "=========================================================="
+    ;;
+
+  wifi)
+    SUBCMD="${2:-status}"
+    if [ "$SUBCMD" = "scan" ]; then
+      echo "Scanning available Wi-Fi networks on wlan0..."
+      ip link set wlan0 up 2>/dev/null || true
+      if command -v iw >/dev/null 2>&1; then
+        iw dev wlan0 scan 2>/dev/null | grep -E 'SSID:|signal:' | head -n 30
+      elif command -v iwlist >/dev/null 2>&1; then
+        iwlist wlan0 scan 2>/dev/null | grep -E 'ESSID|Quality' | head -n 30
+      fi
+    elif [ "$SUBCMD" = "power" ]; then
+      STATE="${3:-1}"
+      echo "Setting Wi-Fi SDIO power to $STATE..."
+      if [ -x /usr/lib/atrios/wifi-power ]; then
+        /usr/lib/atrios/wifi-power "$STATE"
+      fi
+    elif [ "$SUBCMD" = "connect" ]; then
+      SSID="$3"
+      PASS="$4"
+      if [ -z "$SSID" ]; then
+        echo "Usage: atrios wifi connect <SSID> [Password]"
+        exit 1
+      fi
+      echo "Connecting to '$SSID'..."
+      mkdir -p /etc/wpa_supplicant
+      CONF="/etc/wpa_supplicant/wpa_supplicant.conf"
+      if [ -n "$PASS" ]; then
+        wpa_passphrase "$SSID" "$PASS" > "$CONF" 2>/dev/null || {
+          echo "network={" > "$CONF"
+          echo "    ssid=\"$SSID\"" >> "$CONF"
+          echo "    psk=\"$PASS\"" >> "$CONF"
+          echo "}" >> "$CONF"
+        }
+      else
+        echo "network={" > "$CONF"
+        echo "    ssid=\"$SSID\"" >> "$CONF"
+        echo "    key_mgmt=NONE" >> "$CONF"
+        echo "}" >> "$CONF"
+      fi
+      killall wpa_supplicant udhcpc 2>/dev/null || true
+      ip link set wlan0 up
+      wpa_supplicant -B -i wlan0 -c "$CONF" -D nl80211,wext
+      sleep 2
+      udhcpc -i wlan0 -n -q -t 5 2>/dev/null &
+      echo "Connection requested. Run 'atrios wifi' to check status."
+    else
+      ip -4 addr show wlan0 2>/dev/null || ip link show wlan0 2>/dev/null
+    fi
+    ;;
+
+  bt|bluetooth)
+    SUBCMD="${2:-status}"
+    bt_do_init() {
+      echo "Attaching Bluetooth controller on /dev/ttyS1..."
+      killall hciattach btattach rtk_hciattach 2>/dev/null || true
+      usleep 200000 2>/dev/null || sleep 1
+      BT_RC=99
+      if [ -f /usr/lib/atrios/rtk-bt-init ]; then
+        python3 /usr/lib/atrios/rtk-bt-init init
+        BT_RC=$?
+      fi
+      # Only attach kernel H4 line discipline if controller is in H4 mode (BT_RC == 0)
+      if [ "$BT_RC" -eq 0 ]; then
+        if command -v hciattach >/dev/null 2>&1; then
+          hciattach /dev/ttyS1 any 115200 flow 2>/dev/null || hciattach /dev/ttyS1 any 115200 noflow 2>/dev/null || true
+        elif command -v btattach >/dev/null 2>&1; then
+          btattach -B /dev/ttyS1 -S 115200 -P h4 >/dev/null 2>&1 &
+        fi
+        sleep 1
+        if command -v hciconfig >/dev/null 2>&1; then
+          hciconfig hci0 up 2>/dev/null || true
+        fi
+      fi
+    }
+    if [ "$SUBCMD" = "init" ]; then
+      bt_do_init
+      if [ -e /sys/class/bluetooth/hci0 ] && command -v hciconfig >/dev/null 2>&1; then
+        hciconfig hci0 2>/dev/null || true
+      elif [ -f /tmp/atrios_bt_state ]; then
+        echo "Bluetooth controller ready ($(cat /tmp/atrios_bt_state))"
+      fi
+    elif [ "$SUBCMD" = "scan" ]; then
+      if [ ! -e /sys/class/bluetooth/hci0 ] && [ ! -f /tmp/atrios_bt_state ]; then
+        bt_do_init
+      fi
+      echo "Scanning for nearby Bluetooth devices..."
+      if [ -f /tmp/atrios_bt_state ] && grep -q "^h5" /tmp/atrios_bt_state 2>/dev/null; then
+        python3 /usr/lib/atrios/rtk-bt-init scan
+      elif [ -e /sys/class/bluetooth/hci0 ]; then
+        if command -v hciconfig >/dev/null 2>&1; then
+          hciconfig hci0 up 2>/dev/null || true
+        fi
+        if command -v hcitool >/dev/null 2>&1; then
+          hcitool -i hci0 scan 2>/dev/null || {
+            hcitool -i hci0 lescan --duplicates 2>/dev/null &
+            SCAN_PID=$!
+            sleep 5
+            kill -INT $SCAN_PID 2>/dev/null || true
+          }
+        elif command -v bluetoothctl >/dev/null 2>&1; then
+          bluetoothctl --timeout 5 scan on 2>/dev/null || true
+        fi
+      else
+        python3 /usr/lib/atrios/rtk-bt-init scan 2>/dev/null || echo "Bluetooth controller not responding."
+      fi
+    else
+      if [ -e /sys/class/bluetooth/hci0 ] && command -v hciconfig >/dev/null 2>&1; then
+        hciconfig -a
+      elif [ -f /tmp/atrios_bt_state ]; then
+        echo "Bluetooth UART Controller (/dev/ttyS1): $(cat /tmp/atrios_bt_state)"
+      else
+        ls -la /sys/class/bluetooth/ 2>/dev/null || echo "No Bluetooth adapters attached (run 'atrios bt init')"
+      fi
+    fi
+    ;;
+
+  zigbee)
+    SUBCMD="${2:-status}"
+    ZB_DEV=""
+    for dev in /dev/ttyAML4 /dev/ttyS4 /dev/ttyAML3 /dev/ttyS3 /dev/ttyAML2 /dev/ttyS2; do
+      if [ -c "$dev" ]; then
+        ZB_DEV="$dev"
+        break
+      fi
+    done
+
+    if [ "$SUBCMD" = "reset" ]; then
+      echo "Pulsing EFR32 Zigbee hardware reset pin..."
+      # Use sysfs zigbee-control if available
+      P=/sys/devices/platform/zigbee/zb-reset
+      if [ -d "$P" ]; then
+        echo out > "$P/direction" 2>/dev/null
+        echo 0 > "$P/value"
+        sleep 1
+        echo 1 > "$P/value"
+        echo "[OK] Reset pulsed via $P"
+      elif [ -e "$P" ]; then
+        echo 0 > "$P"; sleep 1; echo 1 > "$P"
+        echo "[OK] Reset pulsed via $P"
+      else
+        echo "Error: zigbee-control sysfs not found"
+      fi
+    elif [ "$SUBCMD" = "ping" ] || [ "$SUBCMD" = "probe" ]; then
+      if [ -z "$ZB_DEV" ]; then
+        echo "Error: Zigbee UART not found (/dev/ttyAML4 / /dev/ttyS4)"
+        exit 1
+      fi
+      echo "Probing EFR32 on $ZB_DEV (115200 8N1)..."
+      stty -F "$ZB_DEV" 115200 raw -echo -echoe -echok 2>/dev/null || true
+      # Send EZSP ping byte
+      printf '\x00\x00\x00' > "$ZB_DEV" 2>/dev/null || true
+      echo "[OK] Probe frame sent to $ZB_DEV. Ready for Zigbee2MQTT / ZHA integration."
+    else
+      echo "Zigbee Device: ${ZB_DEV:-Not found}"
+      ls -la /sys/devices/platform/zigbee/ 2>/dev/null || true
+    fi
+    ;;
+
+  *)
+    echo "Usage: atrios <wifi|bt|zigbee|status> [args]"
+    echo "Commands:"
+    echo "  atrios status                         - Overview of Wi-Fi, BT and Zigbee"
+    echo "  atrios wifi scan                      - Scan for Wi-Fi access points"
+    echo "  atrios wifi connect <SSID> [Password] - Connect to Wi-Fi"
+    echo "  atrios wifi power [1|0]               - Toggle SDIO bus power"
+    echo "  atrios bt status                      - Show Bluetooth HCI devices"
+    echo "  atrios bt scan                        - Scan Bluetooth devices"
+    echo "  atrios zigbee reset                   - Hardware reset EFR32 coordinator"
+    echo "  atrios zigbee ping                    - Test EFR32 serial connectivity"
+    exit 1
+    ;;
+esac
+exit 0

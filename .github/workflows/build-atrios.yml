@@ -1,0 +1,117 @@
+name: Build AtriOS firmware
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Firmware version number
+        required: true
+        default: "105"
+        type: string
+  push:
+    branches:
+      - slim
+    paths:
+      - ".github/workflows/build-atrios.yml"
+      - "Makefile"
+      - "build_atrios.sh"
+      - "board/**"
+      - "device/**"
+      - "tools/bin/**"
+      - "tools/fw_builder/**"
+      - "prebuilts/misc/linux-x86/dtc/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: atrios-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build, verify and package image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    env:
+      FW_VERSION: ${{ github.event.inputs.version || '105' }}
+    steps:
+      - name: Checkout only firmware build inputs
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            board
+            device
+            tools/bin
+            tools/fw_builder
+            prebuilts/misc/linux-x86/dtc
+          sparse-checkout-cone-mode: true
+          filter: blob:none
+          fetch-depth: 1
+
+      - name: Verify checkout contents
+        run: |
+          du -sh .git .
+          find . -path ./.git -prune -o -type f -print | wc -l
+          for p in \
+            build_atrios.sh \
+            board/yandex/station2/station2_defconfig \
+            tools/bin/make_ext4fs \
+            tools/fw_builder/fw_builder.py \
+            prebuilts/misc/linux-x86/dtc/dtc; do
+            test -e "$p" || { echo "Missing required path: $p"; exit 1; }
+          done
+
+      - name: Install build dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bash bc bison build-essential bzip2 ca-certificates cpio \
+            device-tree-compiler diffutils file flex g++-13 gawk gcc-13 \
+            gettext git gperf kmod libelf-dev libncurses-dev libssl-dev \
+            make patch perl python3 python3-cryptography python3-pip \
+            python3-setuptools rsync sed tar texinfo unzip wget xz-utils \
+            zlib1g-dev zstd
+
+      - name: Show toolchain and disk
+        run: |
+          nproc
+          free -h
+          df -h /
+          gcc-13 --version | head -1
+          g++-13 --version | head -1
+          python3 -c "import cryptography; print('cryptography', cryptography.__version__)"
+
+      - name: Build firmware image
+        run: |
+          set -o pipefail
+          HOSTCC=gcc-13 HOSTCXX=g++-13 ./build_atrios.sh -n "$FW_VERSION" 2>&1 | tee build.log
+
+      - name: Verify image
+        run: |
+          IMG="tools/fw_builder/yandex_s905x3_custom_v${FW_VERSION}.img"
+          test -s "$IMG"
+          tools/bin/ampack verify "$IMG"
+          sha256sum "$IMG" | tee "${IMG}.sha256"
+          ls -lh "$IMG"
+
+      - name: Upload firmware image
+        uses: actions/upload-artifact@v4
+        with:
+          name: atrios-firmware-v${{ env.FW_VERSION }}
+          path: |
+            tools/fw_builder/yandex_s905x3_custom_v${{ env.FW_VERSION }}.img
+            tools/fw_builder/yandex_s905x3_custom_v${{ env.FW_VERSION }}.img.sha256
+          compression-level: 0
+          retention-days: 14
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: atrios-build-log-v${{ env.FW_VERSION }}
+          path: build.log
+          if-no-files-found: ignore
+          retention-days: 14

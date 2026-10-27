@@ -1,0 +1,263 @@
+state.AMLAUGESOUND {
+	control.1 {
+		iface MIXER
+		name 'Audio Power Save'
+		value false
+		comment {
+			access 'read write'
+			type BOOLEAN
+			count 1
+		}
+	}
+	control.2 {
+		iface MIXER
+		name 'SPK mute'
+		value false
+		comment {
+			access 'read write'
+			type BOOLEAN
+			count 1
+		}
+	}
+	control.3 {
+		iface MIXER
+		name 'PDM HCIC shift gain (~ 6dB * value)'
+		value 2
+		comment {
+			access 'read write'
+			type INTEGER
+			count 1
+			range '0 - 15'
+		}
+	}
+	control.4 {
+		iface MIXER
+		name 'Woofer Master Playback Switch'
+		value true
+		comment {
+			access 'read write'
+			type BOOLEAN
+			count 1
+		}
+	}
+	control.5 {
+		iface MIXER
+		name 'Woofer Master Playback Volume'
+		value 255
+		comment {
+			access 'read write'
+			type INTEGER
+			count 1
+			range '0 - 255'
+			dbmin -12750
+			dbmax 0
+			dbvalue.0 0
+		}
+	}
+	control.6 {
+		iface MIXER
+		name 'Woofer Ch1 Playback Switch'
+		value true
+		comment {
+			access 'read write'
+			type BOOLEAN
+			count 1
+		}
+	}
+	control.7 {
+		iface MIXER
+		name 'Woofer Ch1 Playback Volume'
+		value 159
+		comment {
+			access 'read write'
+			type INTEGER
+			count 1
+			range '0 - 255'
+			dbmin -7950
+			dbmax 4800
+			dbvalue.0 0
+		}
+	}
+	control.8 {
+		iface MIXER
+		name 'Woofer Ch2 Playback Switch'
+		value true
+		comment {
+			access 'read write'
+			type BOOLEAN
+			count 1
+		}
+	}
+	control.9 {
+		iface MIXER
+		name 'Woofer Ch2 Playback Volume'
+		value 159
+		comment {
+			access 'read write'
+			type INTEGER
+			count 1
+			range '0 - 255'
+			dbmin -7950
+			dbmax 4800
+			dbvalue.0 0
+		}
+	}
+	control.10 {
+		iface MIXER
+		name 'Woofer EQ Switch'
+		value true
+		comment {
+			access 'read write'
+			type BOOLEAN
+			count 1
+		}
+	}
+	control.11 {
+		iface MIXER
+		name 'Woofer DRC Switch'
+		value true
+		comment {
+			access 'read write'
+			type BOOLEAN
+			count 1
+		}
+	}
+	control.12 {
+		iface MIXER
+		name 'Tweeters Master Playback Switch'
+		value true
+		comment {
+			access 'read write'
+			type BOOLEAN
+			count 1
+		}
+	}
+	control.13 {
+		iface MIXER
+		name 'Tweeters Master Playback Volume'
+		value 255
+		comment {
+			access 'read write'
+			type INTEGER
+			count 1
+			range '0 - 255'
+			dbmin -12750
+			dbmax 0
+			dbvalue.0 0
+		}
+	}
+	control.14 {
+		iface MIXER
+		name 'Tweeters Ch1 Playback Switch'
+		value true
+		comment {
+			access 'read write'
+			type BOOLEAN
+			count 1
+		}
+	}
+	control.15 {
+		iface MIXER
+		name 'Tweeters Ch1 Playback Volume'
+		value 159
+		comment {
+			access 'read write'
+			type INTEGER
+			count 1
+			range '0 - 255'
+			dbmin -7950
+			dbmax 4800
+			dbvalue.0 0
+		}
+	}
+	control.16 {
+		iface MIXER
+		name 'Tweeters Ch2 Playback Switch'
+		value true
+		comment {
+			access 'read write'
+			type BOOLEAN
+			count 1
+		}
+	}
+	control.17 {
+		iface MIXER
+		name 'Tweeters Ch2 Playback Volume'
+		value 159
+		comment {
+			access 'read write'
+			type INTEGER
+			count 1
+			range '0 - 255'
+			dbmin -7950
+			dbmax 4800
+			dbvalue.0 0
+		}
+	}
+	control.18 {
+		iface MIXER
+		name 'Tweeters EQ Switch'
+		value true
+		comment {
+			access 'read write'
+			type BOOLEAN
+			count 1
+		}
+	}
+	control.19 {
+		iface MIXER
+		name 'Tweeters DRC Switch'
+		value true
+		comment {
+			access 'read write'
+			type BOOLEAN
+			count 1
+		}
+	}
+	control.20 {
+		iface MIXER
+		name 'Headphone Headphone Switch'
+		value true
+		comment {
+			access 'read write'
+			type BOOLEAN
+			count 1
+		}
+	}
+	control.21 {
+		iface MIXER
+		name 'Headphone DAC Playback Volume'
+		value 193
+		comment {
+			access 'read write'
+			type INTEGER
+			count 1
+			range '0 - 255'
+			dbmin -9550
+			dbmax 3200
+			dbvalue.0 100
+		}
+	}
+	control.22 {
+		iface MIXER
+		name 'Loopback ADC1_MAX_GAIN'
+		value 188
+		comment {
+			access 'read write'
+			type INTEGER
+			count 1
+			range '0 - 255'
+		}
+	}
+	control.23 {
+		iface MIXER
+		name 'Loopback ADC2_MAX_GAIN'
+		value 203
+		comment {
+			access 'read write'
+			type INTEGER
+			count 1
+			range '0 - 255'
+		}
+	}
+}

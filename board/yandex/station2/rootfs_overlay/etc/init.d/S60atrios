@@ -1,0 +1,23 @@
+#!/bin/sh
+# /etc/init.d/S60atrios - Launch AtriOS user interaction daemons (rotary & screen)
+
+case "$1" in
+  start)
+    echo "[AtriOS] Starting user interface daemons..."
+    # keep the serial console quiet (hide driver debug spam)
+    dmesg -n 4 2>/dev/null || true
+    if [ -x /usr/lib/atrios/rotaryd ]; then
+      /usr/lib/atrios/rotaryd >/var/log/atrios-rotaryd.log 2>&1 &
+    fi
+    if [ -x /usr/lib/atrios/screend ]; then
+      /usr/lib/atrios/screend >/var/log/atrios-screend.log 2>&1 &
+    fi
+    ;;
+  stop)
+    pkill -f /usr/lib/atrios/rotaryd 2>/dev/null; pkill -f /usr/lib/atrios/screend 2>/dev/null; true
+    ;;
+  *)
+    echo "Usage: $0 {start|stop}"
+    exit 1
+esac
+exit 0

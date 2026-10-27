@@ -1,0 +1,428 @@
+#!/usr/bin/env python3
+"""
+AtriOS Realtek RTL8822ES/CS UART Bluetooth Driver & Scanner (/dev/ttyS1)
+Supports both H4 (4-wire) and H5 (Realtek 3-wire SLIP) UART protocols:
+1. Pulses bluetooth rfkill (GPIOX_17 BT_EN) so the controller resets cleanly.
+2. Auto-detects H4 (8N1) or H5 (8E1/8N1 SLIP) on /dev/ttyS1 at 115200 baud.
+3. Uploads /lib/firmware/rtl8822es_fw + /lib/firmware/rtl8822es_config with
+   baudrate patched to 115200 (0x0000C01D).
+4. Provides direct BLE + Classic inquiry scanning when the controller uses H5
+   (since the prebuilt 4.9.113 kernel only includes CONFIG_BT_HCIUART_H4).
+"""
+import os
+import sys
+import time
+import struct
+import select
+import termios
+
+UART_DEV = "/dev/ttyS1"
+FW_PATH = "/lib/firmware/rtl8822es_fw"
+CFG_PATH = "/lib/firmware/rtl8822es_config"
+STATE_FILE = "/tmp/atrios_bt_state"
+
+def reset_bt_rfkill():
+    for idx in range(4):
+        p_type = f"/sys/class/rfkill/rfkill{idx}/type"
+        p_state = f"/sys/class/rfkill/rfkill{idx}/state"
+        if os.path.exists(p_type) and os.path.exists(p_state):
+            try:
+                t = open(p_type).read().strip()
+                if t == "bluetooth":
+                    with open(p_state, "w") as f:
+                        f.write("0\n")
+                    time.sleep(0.25)
+                    with open(p_state, "w") as f:
+                        f.write("1\n")
+                    time.sleep(0.40)
+                    return True
+            except Exception:
+                pass
+    return False
+
+def config_uart(fd, baud=termios.B115200, parity_even=False, rtscts=False):
+    try:
+        attrs = termios.tcgetattr(fd)
+    except Exception:
+        return False
+    cflag = termios.CS8 | termios.CREAD | termios.CLOCAL
+    if rtscts and hasattr(termios, "CRTSCTS"):
+        cflag |= termios.CRTSCTS
+    if parity_even:
+        cflag |= termios.PARENB
+    attrs[0] = 0
+    attrs[1] = 0
+    attrs[2] = cflag | baud
+    attrs[3] = 0
+    attrs[4] = baud
+    attrs[5] = baud
+    attrs[6][termios.VMIN] = 0
+    attrs[6][termios.VTIME] = 0
+    try:
+        termios.tcsetattr(fd, termios.TCSANOW, attrs)
+        termios.tcflush(fd, termios.TCIOFLUSH)
+        return True
+    except Exception:
+        return False
+
+def build_firmware_blob():
+    if not os.path.exists(FW_PATH):
+        return None
+    fw = open(FW_PATH, "rb").read()
+    if fw[:8] == b"RTBTCore" and len(fw) > 51:
+        patch_len = struct.unpack_from("<I", fw, 0x24)[0]
+        if 40 + patch_len <= len(fw):
+            patch = bytearray(fw[40:40 + patch_len])
+        else:
+            patch = bytearray(fw[40:-11])
+    else:
+        patch = bytearray(fw)
+
+    if os.path.exists(CFG_PATH):
+        cfg = bytearray(open(CFG_PATH, "rb").read())
+        # Keep UART baudrate at 115200 (0x0000C01D)
+        if len(cfg) >= 13 and cfg[:4] == b"\x55\xab\x23\x87" and cfg[6:8] == b"\x0c\x00":
+            cfg[9:13] = b"\x1d\xc0\x00\x00"
+        patch.extend(cfg)
+    return bytes(patch)
+
+# ---------------- H4 Protocol ----------------
+def h4_cmd(fd, ogf_ocf, payload=b"", timeout=0.5):
+    pkt = struct.pack("<BHB", 0x01, ogf_ocf, len(payload)) + payload
+    os.write(fd, pkt)
+    buf = b""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        r, _, _ = select.select([fd], [], [], 0.04)
+        if r:
+            try:
+                chunk = os.read(fd, 512)
+                if chunk:
+                    buf += chunk
+                    if len(buf) >= 3 and buf[0] == 0x04 and len(buf) >= 3 + buf[2]:
+                        return buf
+            except Exception:
+                pass
+    return buf
+
+def h4_download_fw(fd, blob):
+    frag_size = 252
+    total_frags = (len(blob) + frag_size - 1) // frag_size
+    print(f"[BT] Uploading Realtek RTL8822ES firmware over H4 ({len(blob)} bytes, {total_frags} chunks)...", flush=True)
+    for i in range(total_frags):
+        chunk = blob[i * frag_size:(i + 1) * frag_size]
+        idx = 0 if i == 0 else (((i - 1) % 0x7F) + 1)
+        if i == total_frags - 1:
+            idx |= 0x80
+        resp = h4_cmd(fd, 0xFC20, bytes([idx]) + chunk, timeout=1.0)
+        if not resp:
+            print(f"[BT] Warning: H4 chunk {i}/{total_frags} timed out", flush=True)
+            return False
+    time.sleep(0.35)
+    print("[BT] Firmware upload complete.", flush=True)
+    return True
+
+# ---------------- H5 (3-Wire SLIP) Protocol ----------------
+def slip_encode(data):
+    out = bytearray([0xC0])
+    for b in data:
+        if b == 0xC0:
+            out.extend([0xDB, 0xDC])
+        elif b == 0xDB:
+            out.extend([0xDB, 0xDD])
+        else:
+            out.append(b)
+    out.append(0xC0)
+    return bytes(out)
+
+def slip_decode(frame):
+    out = bytearray()
+    i = 0
+    while i < len(frame):
+        b = frame[i]
+        if b == 0xDB and i + 1 < len(frame):
+            nxt = frame[i + 1]
+            if nxt == 0xDC:
+                out.append(0xC0)
+            elif nxt == 0xDD:
+                out.append(0xDB)
+            else:
+                out.append(nxt)
+            i += 2
+        else:
+            out.append(b)
+            i += 1
+    return bytes(out)
+
+def h5_pack(pkt_type, payload, seq=0, ack=0, reliable=False):
+    b0 = (seq & 0x07) | ((ack & 0x07) << 3) | (0x80 if reliable else 0x00)
+    plen = len(payload)
+    b1 = (pkt_type & 0x0F) | ((plen & 0x0F) << 4)
+    b2 = (plen >> 4) & 0xFF
+    b3 = (~(b0 + b1 + b2)) & 0xFF
+    return slip_encode(bytes([b0, b1, b2, b3]) + payload)
+
+class H5Transport:
+    def __init__(self, fd):
+        self.fd = fd
+        self.tx_seq = 0
+        self.rx_seq = 0
+        self.rx_buf = b""
+
+    def read_frames(self, timeout=0.3):
+        frames = []
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            r, _, _ = select.select([self.fd], [], [], 0.03)
+            if r:
+                try:
+                    c = os.read(self.fd, 1024)
+                    if c:
+                        self.rx_buf += c
+                except Exception:
+                    pass
+            while b"\xc0" in self.rx_buf:
+                idx = self.rx_buf.find(b"\xc0")
+                if idx > 0:
+                    raw = self.rx_buf[:idx]
+                    self.rx_buf = self.rx_buf[idx + 1:]
+                    dec = slip_decode(raw)
+                    if len(dec) >= 4:
+                        frames.append(dec)
+                else:
+                    self.rx_buf = self.rx_buf[1:]
+            if frames:
+                break
+        return frames
+
+    def handshake(self, timeout=1.2):
+        termios.tcflush(self.fd, termios.TCIOFLUSH)
+        self.tx_seq = 0
+        self.rx_seq = 0
+        sync_pkt = h5_pack(0x0F, b"\x01\x7e")
+        sync_rsp_pkt = h5_pack(0x0F, b"\x02\x7d")
+        conf_pkt = h5_pack(0x0F, b"\x03\xfc\x14")
+        conf_rsp_pkt = h5_pack(0x0F, b"\x04\x7b")
+
+        got_sync = False
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if not got_sync:
+                os.write(self.fd, sync_pkt)
+            else:
+                os.write(self.fd, conf_pkt)
+            for f in self.read_frames(0.2):
+                ptype = f[1] & 0x0F
+                pload = f[4:]
+                if ptype == 0x0F:
+                    if pload.startswith(b"\x01\x7e"):
+                        os.write(self.fd, sync_rsp_pkt)
+                    elif pload.startswith(b"\x02\x7d"):
+                        got_sync = True
+                        os.write(self.fd, conf_pkt)
+                    elif pload.startswith(b"\x03\xfc"):
+                        os.write(self.fd, conf_rsp_pkt)
+                        if got_sync:
+                            return True
+                    elif pload.startswith(b"\x04\x7b"):
+                        return True
+        return False
+
+    def send_cmd(self, ogf_ocf, payload=b"", timeout=0.8):
+        cmd_bytes = struct.pack("<HB", ogf_ocf, len(payload)) + payload
+        pkt = h5_pack(0x01, cmd_bytes, seq=self.tx_seq, ack=self.rx_seq, reliable=True)
+        os.write(self.fd, pkt)
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            for f in self.read_frames(0.1):
+                b0, b1 = f[0], f[1]
+                ptype = b1 & 0x0F
+                pload = f[4:]
+                if b0 & 0x80:
+                    seq = b0 & 0x07
+                    self.rx_seq = (seq + 1) & 0x07
+                    # Send pure ACK
+                    os.write(self.fd, h5_pack(0x00, b"", seq=0, ack=self.rx_seq, reliable=False))
+                if ptype == 0x04 and len(pload) >= 6:
+                    self.tx_seq = (self.tx_seq + 1) & 0x07
+                    return pload
+        return None
+
+    def collect_events(self, duration=4.0):
+        evts = []
+        deadline = time.time() + duration
+        while time.time() < deadline:
+            for f in self.read_frames(0.1):
+                b0, b1 = f[0], f[1]
+                ptype = b1 & 0x0F
+                pload = f[4:]
+                if b0 & 0x80:
+                    seq = b0 & 0x07
+                    self.rx_seq = (seq + 1) & 0x07
+                    os.write(self.fd, h5_pack(0x00, b"", seq=0, ack=self.rx_seq, reliable=False))
+                if ptype == 0x04:
+                    evts.append(pload)
+        return evts
+
+    def download_fw(self, blob):
+        frag_size = 252
+        total_frags = (len(blob) + frag_size - 1) // frag_size
+        print(f"[BT] Uploading Realtek RTL8822ES firmware over H5 ({len(blob)} bytes, {total_frags} chunks)...", flush=True)
+        for i in range(total_frags):
+            chunk = blob[i * frag_size:(i + 1) * frag_size]
+            idx = 0 if i == 0 else (((i - 1) % 0x7F) + 1)
+            if i == total_frags - 1:
+                idx |= 0x80
+            resp = self.send_cmd(0xFC20, bytes([idx]) + chunk, timeout=1.0)
+            if not resp:
+                print(f"[BT] Warning: H5 chunk {i}/{total_frags} timed out", flush=True)
+                return False
+        time.sleep(0.4)
+        print("[BT] Firmware upload complete.", flush=True)
+        return True
+
+def parse_ble_adv(evt, found):
+    # LE Meta Event (0x3E), subevent 0x02 (LE Advertising Report)
+    if len(evt) < 4 or evt[0] != 0x3E or evt[2] != 0x02:
+        return
+    num_reports = evt[3]
+    pos = 4
+    for _ in range(num_reports):
+        if pos + 9 > len(evt):
+            break
+        ev_type = evt[pos]
+        addr_type = evt[pos + 1]
+        addr_bytes = evt[pos + 2:pos + 8]
+        mac = ":".join(f"{b:02X}" for b in reversed(addr_bytes))
+        dlen = evt[pos + 8]
+        pos += 9
+        if pos + dlen + 1 > len(evt):
+            break
+        adv_data = evt[pos:pos + dlen]
+        rssi_raw = evt[pos + dlen]
+        rssi = rssi_raw - 256 if rssi_raw > 127 else rssi_raw
+        pos += dlen + 1
+
+        name = found.get(mac, ("", rssi))[0]
+        i = 0
+        while i + 1 < len(adv_data):
+            alen = adv_data[i]
+            if alen == 0 or i + 1 + alen > len(adv_data):
+                break
+            atype = adv_data[i + 1]
+            aval = adv_data[i + 2:i + 1 + alen]
+            if atype in (0x08, 0x09):
+                try:
+                    n = aval.decode("utf-8", errors="ignore").strip()
+                    if n:
+                        name = n
+                except Exception:
+                    pass
+            i += 1 + alen
+        found[mac] = (name or "BLE Device", rssi)
+
+def do_init(do_reset=True):
+    if do_reset:
+        reset_bt_rfkill()
+    if not os.path.exists(UART_DEV):
+        print(f"[BT] Error: {UART_DEV} not found", flush=True)
+        return 1
+
+    fd = os.open(UART_DEV, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+    try:
+        # 1. Try H4 (8N1)
+        for rtscts in (True, False):
+            config_uart(fd, termios.B115200, parity_even=False, rtscts=rtscts)
+            resp = h4_cmd(fd, 0x1001, b"", timeout=0.35)
+            if not resp:
+                resp = h4_cmd(fd, 0x0C03, b"", timeout=0.35)
+                if resp:
+                    resp = h4_cmd(fd, 0x1001, b"", timeout=0.35)
+            if resp and resp[0] == 0x04:
+                lmp_subver = struct.unpack_from("<H", resp, 13)[0] if len(resp) >= 15 else 0
+                print(f"[BT] Controller responded on {UART_DEV} (H4, flow={'on' if rtscts else 'off'}, lmp_subver=0x{lmp_subver:04x}).", flush=True)
+                if lmp_subver in (0x8822, 0x0000):
+                    blob = build_firmware_blob()
+                    if blob:
+                        h4_download_fw(fd, blob)
+                        h4_cmd(fd, 0x0C03, b"", timeout=0.5)
+                bd = h4_cmd(fd, 0x1009, b"", timeout=0.4)
+                mac = "Unknown"
+                if bd and len(bd) >= 13:
+                    mac = ":".join(f"{b:02X}" for b in reversed(bd[7:13]))
+                with open(STATE_FILE, "w") as sf:
+                    sf.write(f"h4 {mac}\n")
+                print(f"[BT] Initialized in H4 mode (BD_ADDR: {mac})", flush=True)
+                return 0
+
+        # 2. Try H5 (3-wire SLIP: 8E1 then 8N1)
+        for parity in (True, False):
+            config_uart(fd, termios.B115200, parity_even=parity, rtscts=False)
+            h5 = H5Transport(fd)
+            if h5.handshake(timeout=1.2):
+                ver = h5.send_cmd(0x1001, b"", timeout=0.6)
+                lmp_subver = struct.unpack_from("<H", ver, 12)[0] if (ver and len(ver) >= 14) else 0x8822
+                print(f"[BT] Controller responded on {UART_DEV} (H5 3-wire, parity={'even' if parity else 'none'}, lmp_subver=0x{lmp_subver:04x}).", flush=True)
+                if lmp_subver == 0x8822:
+                    h5.send_cmd(0xFC6D, b"", timeout=0.5)
+                    blob = build_firmware_blob()
+                    if blob and h5.download_fw(blob):
+                        h5.handshake(timeout=1.5)
+                h5.send_cmd(0x0C03, b"", timeout=0.6)
+                bd = h5.send_cmd(0x1009, b"", timeout=0.6)
+                mac = "Unknown"
+                if bd and len(bd) >= 12:
+                    mac = ":".join(f"{b:02X}" for b in reversed(bd[6:12]))
+                with open(STATE_FILE, "w") as sf:
+                    sf.write(f"h5:{'1' if parity else '0'} {mac}\n")
+                print(f"[BT] Initialized in H5 mode (BD_ADDR: {mac})", flush=True)
+                return 2
+        print(f"[BT] No response from Bluetooth controller on {UART_DEV}", flush=True)
+        return 1
+    finally:
+        os.close(fd)
+
+def do_scan():
+    if not os.path.exists(STATE_FILE):
+        do_init(do_reset=True)
+    mode_info = open(STATE_FILE).read().strip().split() if os.path.exists(STATE_FILE) else []
+    mode = mode_info[0] if mode_info else "h4"
+    if not mode.startswith("h5"):
+        return 1
+
+    parity = (mode == "h5:1")
+    fd = os.open(UART_DEV, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+    try:
+        config_uart(fd, termios.B115200, parity_even=parity, rtscts=False)
+        h5 = H5Transport(fd)
+        if not h5.handshake(timeout=1.0):
+            do_init(do_reset=True)
+            h5 = H5Transport(fd)
+            h5.handshake(timeout=1.0)
+        h5.send_cmd(0x0C03, b"", timeout=0.5)
+        # Enable LE Meta Events
+        h5.send_cmd(0x0C01, b"\xff\xff\xff\xff\xff\xff\xff\x3f", timeout=0.5)
+        # LE Set Scan Parameters (Active scan, 10ms interval/window)
+        h5.send_cmd(0x200B, struct.pack("<BHHBB", 0x01, 0x0010, 0x0010, 0x00, 0x00), timeout=0.5)
+        # LE Set Scan Enable (Enable=1, FilterDuplicates=0)
+        h5.send_cmd(0x200C, b"\x01\x00", timeout=0.5)
+        found = {}
+        evts = h5.collect_events(duration=4.5)
+        h5.send_cmd(0x200C, b"\x00\x00", timeout=0.5)
+        for e in evts:
+            parse_ble_adv(e, found)
+        if found:
+            for mac, (name, rssi) in sorted(found.items(), key=lambda x: x[1][1], reverse=True):
+                print(f"  {mac}  RSSI: {rssi:4d} dBm  {name}", flush=True)
+        else:
+            print("  No nearby Bluetooth devices discovered during scan window.", flush=True)
+        return 0
+    finally:
+        os.close(fd)
+
+if __name__ == "__main__":
+    act = sys.argv[1] if len(sys.argv) > 1 else "init"
+    if act == "scan":
+        sys.exit(do_scan())
+    else:
+        sys.exit(do_init(do_reset=True))

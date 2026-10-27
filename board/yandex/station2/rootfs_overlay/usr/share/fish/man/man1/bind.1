@@ -1,0 +1,330 @@
+.\" Man page generated from reStructuredText.
+.
+.
+.nr rst2man-indent-level 0
+.
+.de1 rstReportMargin
+\\$1 \\n[an-margin]
+level \\n[rst2man-indent-level]
+level margin: \\n[rst2man-indent\\n[rst2man-indent-level]]
+-
+\\n[rst2man-indent0]
+\\n[rst2man-indent1]
+\\n[rst2man-indent2]
+..
+.de1 INDENT
+.\" .rstReportMargin pre:
+. RS \\$1
+. nr rst2man-indent\\n[rst2man-indent-level] \\n[an-margin]
+. nr rst2man-indent-level +1
+.\" .rstReportMargin post:
+..
+.de UNINDENT
+. RE
+.\" indent \\n[an-margin]
+.\" old: \\n[rst2man-indent\\n[rst2man-indent-level]]
+.nr rst2man-indent-level -1
+.\" new: \\n[rst2man-indent\\n[rst2man-indent-level]]
+.in \\n[rst2man-indent\\n[rst2man-indent-level]]u
+..
+.TH "BIND" "1" "Feb 13, 2022" "3.3" "fish-shell"
+.SH NAME
+bind \- handle fish key bindings
+.SH SYNOPSIS
+.INDENT 0.0
+.INDENT 3.5
+.sp
+.nf
+.ft C
+bind [(\-M | \-\-mode) MODE] [(\-m | \-\-sets\-mode) NEW_MODE] [\-\-preset | \-\-user] [(\-s | \-\-silent)] [(\-k | \-\-key)] SEQUENCE COMMAND [COMMAND...]
+bind [(\-M | \-\-mode) MODE] [(\-k | \-\-key)] [\-\-preset] [\-\-user] SEQUENCE
+bind (\-K | \-\-key\-names) [(\-a | \-\-all)] [\-\-preset] [\-\-user]
+bind (\-f | \-\-function\-names)
+bind (\-L | \-\-list\-modes)
+bind (\-e | \-\-erase) [(\-M | \-\-mode) MODE] [\-\-preset] [\-\-user] (\-a | \-\-all | [(\-k | \-\-key)] SEQUENCE [SEQUENCE...])
+.ft P
+.fi
+.UNINDENT
+.UNINDENT
+.SH DESCRIPTION
+.sp
+\fBbind\fP manages bindings.
+.sp
+It can add bindings if given a SEQUENCE of characters to bind to. These should be written as fish escape sequences\&. The most important of these are \fB\ec\fP for the control key, and \fB\ee\fP for escape, and because of historical reasons also the Alt key (sometimes also called "Meta").
+.sp
+For example, \fBAlt\fP+\fBW\fP can be written as \fB\eew\fP, and \fBControl\fP+\fBX\fP (^X) can be written as \fB\ecx\fP\&. Note that Alt\-based key bindings are case sensitive and Control\-based key bindings are not. This is a constraint of text\-based terminals, not \fBfish\fP\&.
+.sp
+The generic key binding that matches if no other binding does can be set by specifying a \fBSEQUENCE\fP of the empty string (that is, \fB\(aq\(aq\fP ). For most key bindings, it makes sense to bind this to the \fBself\-insert\fP function (i.e. \fBbind \(aq\(aq self\-insert\fP). This will insert any keystrokes not specifically bound to into the editor. Non\-printable characters are ignored by the editor, so this will not result in control sequences being inserted.
+.sp
+If the \fB\-k\fP switch is used, the name of a key (such as \(aqdown\(aq, \(aqup\(aq or \(aqbackspace\(aq) is used instead of a sequence. The names used are the same as the corresponding curses variables, but without the \(aqkey_\(aq prefix. (See \fBterminfo(5)\fP for more information, or use \fBbind \-\-key\-names\fP for a list of all available named keys). Normally this will print an error if the current \fB$TERM\fP entry doesn\(aqt have a given key, unless the \fB\-s\fP switch is given.
+.sp
+To find out what sequence a key combination sends, you can use fish_key_reader\&.
+.sp
+\fBCOMMAND\fP can be any fish command, but it can also be one of a set of special input functions. These include functions for moving the cursor, operating on the kill\-ring, performing tab completion, etc. Use \fBbind \-\-function\-names\fP for a complete list of these input functions.
+.sp
+When \fBCOMMAND\fP is a shellscript command, it is a good practice to put the actual code into a function and simply bind to the function name. This way it becomes significantly easier to test the function while editing, and the result is usually more readable as well.
+.sp
+If a script produces output, it should finish by calling \fBcommandline \-f repaint\fP to tell fish that a repaint is in order.
+.sp
+Note that special input functions cannot be combined with ordinary shell script commands. The commands must be entirely a sequence of special input functions (from \fBbind \-f\fP) or all shell script commands (i.e., valid fish script).
+.sp
+If no \fBSEQUENCE\fP is provided, all bindings (or just the bindings in the given \fBMODE\fP) are printed. If \fBSEQUENCE\fP is provided but no \fBCOMMAND\fP, just the binding matching that sequence is printed.
+.sp
+To save custom keybindings, put the \fBbind\fP statements into config.fish\&. Alternatively, fish also automatically executes a function called \fBfish_user_key_bindings\fP if it exists.
+.sp
+Key bindings may use "modes", which mimics Vi\(aqs modal input behavior. The default mode is "default", and every bind applies to a single mode. The mode can be viewed/changed with the \fB$fish_bind_mode\fP variable.
+.SH OPTIONS
+.sp
+The following options are available:
+.INDENT 0.0
+.IP \(bu 2
+\fB\-k\fP or \fB\-\-key\fP Specify a key name, such as \(aqleft\(aq or \(aqbackspace\(aq instead of a character sequence
+.IP \(bu 2
+\fB\-K\fP or \fB\-\-key\-names\fP Display a list of available key names. Specifying \fB\-a\fP or \fB\-\-all\fP includes keys that don\(aqt have a known mapping
+.IP \(bu 2
+\fB\-f\fP or \fB\-\-function\-names\fP Display a list of available input functions
+.IP \(bu 2
+\fB\-L\fP or \fB\-\-list\-modes\fP Display a list of defined bind modes
+.IP \(bu 2
+\fB\-M MODE\fP or \fB\-\-mode MODE\fP Specify a bind mode that the bind is used in. Defaults to "default"
+.IP \(bu 2
+\fB\-m NEW_MODE\fP or \fB\-\-sets\-mode NEW_MODE\fP Change the current mode to \fBNEW_MODE\fP after this binding is executed
+.IP \(bu 2
+\fB\-e\fP or \fB\-\-erase\fP Erase the binding with the given sequence and mode instead of defining a new one. Multiple sequences can be specified with this flag. Specifying \fB\-a\fP or \fB\-\-all\fP with \fB\-M\fP or \fB\-\-mode\fP erases all binds in the given mode regardless of sequence. Specifying \fB\-a\fP or \fB\-\-all\fP without \fB\-M\fP or \fB\-\-mode\fP erases all binds in all modes regardless of sequence.
+.IP \(bu 2
+\fB\-a\fP or \fB\-\-all\fP See \fB\-\-erase\fP and \fB\-\-key\-names\fP
+.IP \(bu 2
+\fB\-\-preset\fP and \fB\-\-user\fP specify if bind should operate on user or preset bindings. User bindings take precedence over preset bindings when fish looks up mappings. By default, all \fBbind\fP invocations work on the "user" level except for listing, which will show both levels. All invocations except for inserting new bindings can operate on both levels at the same time (if both \fB\-\-preset\fP and \fB\-\-user\fP are given). \fB\-\-preset\fP should only be used in full binding sets (like when working on \fBfish_vi_key_bindings\fP).
+.UNINDENT
+.SH SPECIAL INPUT FUNCTIONS
+.sp
+The following special input functions are available:
+.INDENT 0.0
+.IP \(bu 2
+\fBand\fP, only execute the next function if the previous succeeded (note: only some functions report success)
+.IP \(bu 2
+\fBaccept\-autosuggestion\fP, accept the current autosuggestion completely
+.IP \(bu 2
+\fBbackward\-char\fP, moves one character to the left
+.IP \(bu 2
+\fBbackward\-bigword\fP, move one whitespace\-delimited word to the left
+.IP \(bu 2
+\fBbackward\-delete\-char\fP, deletes one character of input to the left of the cursor
+.IP \(bu 2
+\fBbackward\-kill\-bigword\fP, move the whitespace\-delimited word to the left of the cursor to the killring
+.IP \(bu 2
+\fBbackward\-kill\-line\fP, move everything from the beginning of the line to the cursor to the killring
+.IP \(bu 2
+\fBbackward\-kill\-path\-component\fP, move one path component to the left of the cursor to the killring. A path component is everything likely to belong to a path component, i.e. not any of the following: \fI/={,}\(aq":@ |;<>&\fP, plus newlines and tabs.
+.IP \(bu 2
+\fBbackward\-kill\-word\fP, move the word to the left of the cursor to the killring. The "word" here is everything up to punctuation or whitespace.
+.IP \(bu 2
+\fBbackward\-word\fP, move one word to the left
+.IP \(bu 2
+\fBbeginning\-of\-buffer\fP, moves to the beginning of the buffer, i.e. the start of the first line
+.IP \(bu 2
+\fBbeginning\-of\-history\fP, move to the beginning of the history
+.IP \(bu 2
+\fBbeginning\-of\-line\fP, move to the beginning of the line
+.IP \(bu 2
+\fBbegin\-selection\fP, start selecting text
+.IP \(bu 2
+\fBcancel\fP, cancel the current commandline and replace it with a new empty one
+.IP \(bu 2
+\fBcancel\-commandline\fP, cancel the current commandline and replace it with a new empty one, leaving the old one in place with a marker to show that it was cancelled
+.IP \(bu 2
+\fBcapitalize\-word\fP, make the current word begin with a capital letter
+.IP \(bu 2
+\fBcomplete\fP, guess the remainder of the current token
+.IP \(bu 2
+\fBcomplete\-and\-search\fP, invoke the searchable pager on completion options (for convenience, this also moves backwards in the completion pager)
+.IP \(bu 2
+\fBdelete\-char\fP, delete one character to the right of the cursor
+.IP \(bu 2
+\fBdelete\-or\-exit\fP, deletes one character to the right of the cursor or exits the shell if the commandline is empty.
+.IP \(bu 2
+\fBdown\-line\fP, move down one line
+.IP \(bu 2
+\fBdowncase\-word\fP, make the current word lowercase
+.IP \(bu 2
+\fBend\-of\-buffer\fP, moves to the end of the buffer, i.e. the end of the first line
+.IP \(bu 2
+\fBend\-of\-history\fP, move to the end of the history
+.IP \(bu 2
+\fBend\-of\-line\fP, move to the end of the line
+.IP \(bu 2
+\fBend\-selection\fP, end selecting text
+.IP \(bu 2
+\fBexpand\-abbr\fP, expands any abbreviation currently under the cursor
+.IP \(bu 2
+\fBexecute\fP, run the current commandline
+.IP \(bu 2
+\fBexit\fP, exit the shell
+.IP \(bu 2
+\fBforward\-bigword\fP, move one whitespace\-delimited word to the right
+.IP \(bu 2
+\fBforward\-char\fP, move one character to the right
+.IP \(bu 2
+\fBforward\-single\-char\fP, move one character to the right; if an autosuggestion is available, only take a single char from it
+.IP \(bu 2
+\fBforward\-word\fP, move one word to the right
+.IP \(bu 2
+\fBhistory\-search\-backward\fP, search the history for the previous match
+.IP \(bu 2
+\fBhistory\-search\-forward\fP, search the history for the next match
+.IP \(bu 2
+\fBhistory\-prefix\-search\-backward\fP, search the history for the previous prefix match
+.IP \(bu 2
+\fBhistory\-prefix\-search\-forward\fP, search the history for the next prefix match
+.IP \(bu 2
+\fBhistory\-token\-search\-backward\fP, search the history for the previous matching argument
+.IP \(bu 2
+\fBhistory\-token\-search\-forward\fP, search the history for the next matching argument
+.IP \(bu 2
+\fBforward\-jump\fP and \fBbackward\-jump\fP, read another character and jump to its next occurence after/before the cursor
+.IP \(bu 2
+\fBforward\-jump\-till\fP and \fBbackward\-jump\-till\fP, jump to right \fIbefore\fP the next occurence
+.IP \(bu 2
+\fBrepeat\-jump\fP and \fBrepeat\-jump\-reverse\fP, redo the last jump in the same/opposite direction
+.IP \(bu 2
+\fBkill\-bigword\fP, move the next whitespace\-delimited word to the killring
+.IP \(bu 2
+\fBkill\-line\fP, move everything from the cursor to the end of the line to the killring
+.IP \(bu 2
+\fBkill\-selection\fP, move the selected text to the killring
+.IP \(bu 2
+\fBkill\-whole\-line\fP, move the line to the killring
+.IP \(bu 2
+\fBkill\-word\fP, move the next word to the killring
+.IP \(bu 2
+\fBor\fP, only execute the next function if the previous succeeded (note: only some functions report success)
+.IP \(bu 2
+\fBpager\-toggle\-search\fP, toggles the search field if the completions pager is visible.
+.IP \(bu 2
+\fBrepaint\fP, reexecutes the prompt functions and redraws the prompt (also \fBforce\-repaint\fP for backwards\-compatibility)
+.IP \(bu 2
+\fBrepaint\-mode\fP, reexecutes the fish_mode_prompt and redraws the prompt. This is useful for vi\-mode. If no \fBfish_mode_prompt\fP exists or it prints nothing, it acts like a normal repaint.
+.IP \(bu 2
+\fBself\-insert\fP, inserts the matching sequence into the command line
+.IP \(bu 2
+\fBself\-insert\-notfirst\fP, inserts the matching sequence into the command line, unless the cursor is at the beginning
+.IP \(bu 2
+\fBsuppress\-autosuggestion\fP, remove the current autosuggestion. Returns true if there was a suggestion to remove.
+.IP \(bu 2
+\fBswap\-selection\-start\-stop\fP, go to the other end of the highlighted text without changing the selection
+.IP \(bu 2
+\fBtranspose\-chars\fP, transpose two characters to the left of the cursor
+.IP \(bu 2
+\fBtranspose\-words\fP, transpose two words to the left of the cursor
+.IP \(bu 2
+\fBtogglecase\-char\fP, toggle the capitalisation (case) of the character under the cursor
+.IP \(bu 2
+\fBtogglecase\-selection\fP, toggle the capitalisation (case) of the selection
+.IP \(bu 2
+\fBinsert\-line\-under\fP, add a new line under the current line
+.IP \(bu 2
+\fBinsert\-line\-over\fP, add a new line over the current line
+.IP \(bu 2
+\fBup\-line\fP, move up one line
+.IP \(bu 2
+\fBundo\fP and \fBredo\fP, revert or redo the most recent edits on the command line
+.IP \(bu 2
+\fBupcase\-word\fP, make the current word uppercase
+.IP \(bu 2
+\fByank\fP, insert the latest entry of the killring into the buffer
+.IP \(bu 2
+\fByank\-pop\fP, rotate to the previous entry of the killring
+.UNINDENT
+.SH ADDITIONAL FUNCTIONS
+.sp
+The following functions are included as normal functions, but are particularly useful for input editing:
+.INDENT 0.0
+.IP \(bu 2
+\fBup\-or\-search\fP and \fBdown\-or\-search\fP,  which move the cursor or search the history depending on the cursor position and current mode
+.IP \(bu 2
+\fBedit_command_buffer\fP, open the visual editor (controlled by the \fBVISUAL\fP or \fBEDITOR\fP environment variables) with the current command\-line contents
+.IP \(bu 2
+\fBdelete\-or\-exit\fP, quit the shell if the current command\-line is empty, or delete the character under the cursor if not
+.IP \(bu 2
+\fBfish_clipboard_copy\fP, copy the current selection to the system clipboard
+.IP \(bu 2
+\fBfish_clipboard_paste\fP, paste the current selection from the system clipboard before the cursor
+.IP \(bu 2
+\fBfish_commandline_append\fP, append the argument to the command\-line. If the command\-line already ends with the argument, this removes the suffix instead. Starts with the last command from history if the command\-line is empty.
+.IP \(bu 2
+\fBfish_commandline_prepend\fP, prepend the argument to the command\-line. If the command\-line already starts with the argument, this removes the prefix instead. Starts with the last command from history if the command\-line is empty.
+.UNINDENT
+.SH EXAMPLES
+.sp
+Exit the shell when \fBControl\fP+\fBD\fP is pressed:
+.INDENT 0.0
+.INDENT 3.5
+.sp
+.nf
+.ft C
+bind \ecd \(aqexit\(aq
+.ft P
+.fi
+.UNINDENT
+.UNINDENT
+.sp
+Perform a history search when \fBPage Up\fP is pressed:
+.INDENT 0.0
+.INDENT 3.5
+.sp
+.nf
+.ft C
+bind \-k ppage history\-search\-backward
+.ft P
+.fi
+.UNINDENT
+.UNINDENT
+.sp
+Turn on Vi key bindings and rebind \fBControl\fP+\fBC\fP to clear the input line:
+.INDENT 0.0
+.INDENT 3.5
+.sp
+.nf
+.ft C
+set \-g fish_key_bindings fish_vi_key_bindings
+bind \-M insert \ecc kill\-whole\-line repaint
+.ft P
+.fi
+.UNINDENT
+.UNINDENT
+.sp
+Launch \fBgit diff\fP and repaint the commandline afterwards when \fBControl\fP+\fBG\fP is pressed:
+.INDENT 0.0
+.INDENT 3.5
+.sp
+.nf
+.ft C
+bind \ecg \(aqgit diff; commandline \-f repaint\(aq
+.ft P
+.fi
+.UNINDENT
+.UNINDENT
+.SH TERMINAL LIMITATIONS
+.sp
+Unix terminals, like the ones fish operates in, are at heart 70s technology. They have some limitations that applications running inside them can\(aqt workaround.
+.sp
+For instance, the control key modifies a character by setting the top three bits to 0. This means:
+.INDENT 0.0
+.IP \(bu 2
+Many characters + control are indistinguishable from other keys. \fBControl\fP+\fBI\fP \fIis\fP tab, \fBControl\fP+\fBJ\fP \fIis\fP newline (\fIn\fP).
+.IP \(bu 2
+Control and shift don\(aqt work simultaneously
+.UNINDENT
+.sp
+Other keys don\(aqt have a direct encoding, and are sent as escape sequences. For example \fB→\fP (Right) often sends \fB\ee\e[C\fP\&. These can differ from terminal to terminal, and the mapping is typically available in \fIterminfo(5)\fP\&. Sometimes however a terminal identifies as e.g. \fBxterm\-256color\fP for compatibility, but then implements xterm\(aqs sequences incorrectly.
+.SH SPECIAL CASE: THE ESCAPE CHARACTER
+.sp
+The escape key can be used standalone, for example, to switch from insertion mode to normal mode when using Vi keybindings. Escape can also be used as a "meta" key, to indicate the start of an escape sequence, like for function or arrow keys. Custom bindings can also be defined that begin with an escape character.
+.sp
+Holding alt and something else also typically sends escape, for example holding alt+a will send an escape character and then an "a".
+.sp
+fish waits for a period after receiving the escape character, to determine whether it is standalone or part of an escape sequence. While waiting, additional key presses make the escape key behave as a meta key. If no other key presses come in, it is handled as a standalone escape. The waiting period is set to 30 milliseconds (0.03 seconds). It can be configured by setting the \fBfish_escape_delay_ms\fP variable to a value between 10 and 5000 ms. This can be a universal variable that you set once from an interactive session.
+.SH COPYRIGHT
+2022, fish-shell developers
+.\" Generated by docutils manpage writer.
+.

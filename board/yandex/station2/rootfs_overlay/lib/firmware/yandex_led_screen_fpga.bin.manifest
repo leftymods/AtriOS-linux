@@ -1,0 +1,6 @@
+fw_version = 6
+crc16 = 0x4003
+user_code = 0xa0df
+uf_crc16 = 0xbf81
+force_upd = 0
+source_tag = fpga

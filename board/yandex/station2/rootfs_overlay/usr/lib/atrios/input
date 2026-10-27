@@ -1,0 +1,151 @@
+#!/bin/sh
+# AtriOS Physical Controls, Rotary Knob, Ambient Light Sensor & Mic Mute Monitor
+echo "=========================================================="
+echo "      AtriOS Buttons, Knob, Sensor & Mic Mute Monitor     "
+echo "=========================================================="
+
+# 1. Check Ambient Light Sensor (LTR-308ALS)
+LUX_PATH="/sys/bus/iio/devices/iio:device0/in_intensity_input"
+if [ -f "$LUX_PATH" ]; then
+  RAW_LUX=$(cat "$LUX_PATH" 2>/dev/null || echo "0")
+  echo "Ambient Light Sensor (LTR-308ALS): raw=${RAW_LUX}"
+else
+  echo "Ambient Light Sensor (LTR-308ALS): Not detected on sysfs"
+fi
+
+# 2. Ensure /dev/input/event* nodes exist from /sys/class/input/event*
+mkdir -p /dev/input 2>/dev/null || true
+for sys_ev in /sys/class/input/event*; do
+  if [ -e "$sys_ev/dev" ]; then
+    ev_name=$(basename "$sys_ev")
+    if [ ! -c "/dev/input/$ev_name" ]; then
+      maj_min=$(cat "$sys_ev/dev" 2>/dev/null)
+      maj=$(echo "$maj_min" | cut -d: -f1)
+      min=$(echo "$maj_min" | cut -d: -f2)
+      [ -n "$maj" ] && [ -n "$min" ] && mknod "/dev/input/$ev_name" c "$maj" "$min" 2>/dev/null || true
+    fi
+  fi
+done
+
+echo ""
+echo "Discovered input devices:"
+FOUND_EV=0
+for sys_ev in /sys/class/input/event*; do
+  if [ -e "$sys_ev" ]; then
+    ev_name=$(basename "$sys_ev")
+    dev_label=$(cat "$sys_ev/device/name" 2>/dev/null || echo "Unknown")
+    echo "  * /dev/input/$ev_name -> $dev_label"
+    FOUND_EV=1
+  fi
+done
+
+if [ "$FOUND_EV" -eq 0 ]; then
+  echo "  [!] No /sys/class/input/event* devices found."
+  if [ -f /proc/bus/input/devices ]; then
+    echo "  System /proc/bus/input/devices:"
+    grep -E "^[NH]: " /proc/bus/input/devices 2>/dev/null | sed 's/^/    /'
+  fi
+  exit 1
+fi
+
+echo ""
+echo "Physical Button Map:"
+echo "  * Top Button 1: Assistant / Alice (KEY_VOICECOMMAND [582] / KEY_POWER [116])"
+echo "  * Top Button 2: Microphone Mute   (KEY_MICMUTE      [248])"
+echo "  * Rotary Knob : Volume Wheel      (KEY_PAGEUP [104] / KEY_PAGEDOWN [109])"
+echo ""
+echo "Listening for live hardware events... Press Ctrl+C to exit."
+echo "----------------------------------------------------------"
+
+if command -v python3 >/dev/null 2>&1; then
+  exec python3 -u -c '
+import os, sys, glob, struct, select, time, subprocess, re
+
+EVENT_FORMAT = "QQHHi"
+EVENT_SIZE = struct.calcsize(EVENT_FORMAT)
+KEY_NAMES = {
+    582: "KEY_VOICECOMMAND (Top Button #1: Alice / Assistant)",
+    116: "KEY_POWER (Top Button #1 Alt: Assistant / Power)",
+    248: "KEY_MICMUTE (Top Button #2: Physical Mic Mute)",
+    104: "KEY_PAGEUP (Rotary Knob Clockwise -> Volume Up)",
+    109: "KEY_PAGEDOWN (Rotary Knob Counter-Clockwise -> Volume Down)",
+    256: "BTN_MISC / BTN_0 (Hardware VAD Trigger)",
+    115: "KEY_VOLUMEUP (Remote Vol+)",
+    114: "KEY_VOLUMEDOWN (Remote Vol-)",
+}
+
+def read_volume():
+    try:
+        out = subprocess.check_output(["amixer", "-c", "AMLAUGESOUND", "cget", "name=Woofer Master Playback Volume"], stderr=subprocess.DEVNULL, text=True, timeout=0.5)
+        m = re.search(r": values=(\d+)", out)
+        if m:
+            raw = int(m.group(1))
+            return raw, max(0, min(100, int(round(raw * 100.0 / 255.0))))
+    except Exception:
+        pass
+    return None
+
+fds = {}
+for p in sorted(glob.glob("/dev/input/event*")):
+    try:
+        fd = os.open(p, os.O_RDONLY | os.O_NONBLOCK)
+        name_p = f"/sys/class/input/{os.path.basename(p)}/device/name"
+        name = open(name_p).read().strip() if os.path.exists(name_p) else os.path.basename(p)
+        fds[fd] = (p, name)
+    except Exception as e:
+        print(f"  [!] Cannot open {p}: {e}", flush=True)
+
+if not fds:
+    sys.exit(1)
+
+mic_muted = False
+press_t = 0.0
+
+try:
+    while True:
+        r, _, _ = select.select(list(fds.keys()), [], [], 0.1)
+        for fd in r:
+            p, name = fds[fd]
+            try:
+                data = os.read(fd, EVENT_SIZE * 64)
+            except Exception:
+                continue
+            for off in range(0, len(data), EVENT_SIZE):
+                chunk = data[off:off + EVENT_SIZE]
+                if len(chunk) < EVENT_SIZE:
+                    continue
+                sec, usec, ev_type, ev_code, ev_val = struct.unpack(EVENT_FORMAT, chunk)
+                if ev_type == 1:
+                    ts = time.strftime("%H:%M:%S")
+                    kname = KEY_NAMES.get(ev_code, f"KEY_{ev_code}")
+                    if ev_code == 248 and ev_val == 1:
+                        mic_muted = not mic_muted
+                        cmd = "on" if mic_muted else "off"
+                        subprocess.Popen(["/bin/sh", "/usr/lib/atrios/audio", "mute", cmd],
+                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        st = "MUTED" if mic_muted else "UNMUTED"
+                        print(f"[{ts}] >>> TOP BUTTON #2 (MIC MUTE) PRESSED -> {st} <<<", flush=True)
+                    elif ev_code in (582, 116):
+                        if ev_val == 1:
+                            press_t = time.time()
+                            print(f"[{ts}] >>> TOP BUTTON #1 (ASSISTANT) PRESSED <<<", flush=True)
+                        elif ev_val == 0:
+                            dur = time.time() - press_t if press_t else 0.0
+                            print(f"[{ts}] Top Button #1 released ({dur:.2f}s)", flush=True)
+                    elif ev_code in (104, 109) and ev_val == 1:
+                        d = "Clockwise (+Vol)" if ev_code == 104 else "Counter-Clockwise (-Vol)"
+                        vol = read_volume()
+                        extra = ""
+                        if vol is not None:
+                            raw, pct = vol
+                            extra = f" [master={raw}/255, {pct}%]"
+                        print(f"[{ts}] Rotary Knob Turned: {d}{extra}", flush=True)
+                    else:
+                        st = "PRESSED" if ev_val == 1 else ("RELEASED" if ev_val == 0 else "REPEAT")
+                        print(f"[{ts}] [{st}] {kname} ({name})", flush=True)
+except KeyboardInterrupt:
+    print("\n[Input Monitor] Exited.", flush=True)
+'
+elif command -v evtest >/dev/null 2>&1; then
+  exec evtest /dev/input/event0
+fi

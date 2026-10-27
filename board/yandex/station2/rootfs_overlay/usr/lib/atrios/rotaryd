@@ -1,0 +1,260 @@
+#!/usr/bin/env python3
+"""
+AtriOS Hardware Interaction Daemon (atrios-rotaryd)
+Handles:
+  - Rotary Knob: Volume up/down with animated LED ring arc feedback
+  - Top Button #2 (KEY_MICMUTE [248]): Software Microphone Mute toggle
+  - Top Button #1 (KEY_VOICECOMMAND [582] / KEY_POWER [116]): Alice/Assistant call, Play/Pause
+"""
+
+import sys
+import os
+import glob
+import struct
+import time
+import subprocess
+import select
+import re
+import threading
+
+FB_RING = "/dev/fb5"
+NUM_LEDS = 24
+CARD = "AMLAUGESOUND"
+VOLUME_STEP = 2  # percent per detent; fractional ring keeps it smooth
+
+KEY_VOICECOMMAND = 582
+KEY_POWER = 116
+KEY_MICMUTE = 248
+KEY_PAGEUP = 104    # Knob CW
+KEY_PAGEDOWN = 109  # Knob CCW
+
+mic_muted = False
+current_volume = 60
+volume_lock = threading.Lock()
+pending_volume = None
+
+def set_ring_frame(frame):
+    try:
+        with open(FB_RING, "wb") as f:
+            f.write(frame)
+            f.flush()
+    except Exception:
+        pass
+
+def show_mute_ring():
+    # No ring indication for mic mute
+    set_ring_frame(b"\x00" * (NUM_LEDS * 3))
+
+def show_volume_ring(vol_pct):
+    # Fractional last LED: one LED per 4.166%, so a 2% step changes the
+    # brightness of the edge LED instead of jumping a whole LED.
+    exact = NUM_LEDS * max(0, min(100, vol_pct)) / 100.0
+    full = int(exact)
+    frac = exact - full
+    frame = bytearray(NUM_LEDS * 3)
+    for i in range(full):
+        ratio = i / max(1, NUM_LEDS - 1)
+        frame[i * 3 + 0] = int(180 * ratio)
+        frame[i * 3 + 1] = int(220 * (1.0 - ratio))
+        frame[i * 3 + 2] = 255
+    if full < NUM_LEDS and frac > 0:
+        ratio = full / max(1, NUM_LEDS - 1)
+        frame[full * 3 + 0] = int(180 * ratio * frac)
+        frame[full * 3 + 1] = int(220 * (1.0 - ratio) * frac)
+        frame[full * 3 + 2] = int(255 * frac)
+    set_ring_frame(frame)
+
+def clear_ring():
+    if mic_muted:
+        show_mute_ring()
+    else:
+        set_ring_frame(b"\x00" * (NUM_LEDS * 3))
+
+def toggle_software_mic_mute():
+    global mic_muted
+    mic_muted = not mic_muted
+
+    pw_val = "1" if mic_muted else "0"
+    alsa_cmd = "mute" if mic_muted else "unmute"
+    alsa_vol = "0%" if mic_muted else "100%"
+    sw_val = "0" if mic_muted else "1"
+
+    # PipeWire mute
+    try:
+        subprocess.run(["wpctl", "set-mute", "@DEFAULT_AUDIO_SOURCE@", pw_val],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
+    # ALSA AMLAUGESOUND hardware capture mute
+    for card in ["AMLAUGESOUND", "0", "1"]:
+        try:
+            subprocess.run(["amixer", "-c", card, "sset", "Capture", alsa_cmd],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(["amixer", "-c", card, "sset", "Capture", alsa_vol],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            for ctrl in ["Capture Switch", "ADC Capture Switch", "Mic Capture Switch", "TDMIN_A Switch", "TDMIN_B Switch"]:
+                subprocess.run(["amixer", "-c", card, "cset", f"name={ctrl}", sw_val],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+
+    if mic_muted:
+        show_mute_ring()
+    else:
+        clear_ring()
+
+def read_volume():
+    """Return the current user volume as 0..100.
+
+    PipeWire's sink volume is the best source when it is running (the
+    hardware master can stay at 0 dB while PipeWire scales in software).
+    Fall back to the ALSA master control otherwise.
+    """
+    try:
+        out = subprocess.check_output(
+            ["wpctl", "get-volume", "@DEFAULT_AUDIO_SINK@"],
+            stderr=subprocess.DEVNULL, text=True, timeout=0.5)
+        m = re.search(r"Volume:\s+([0-9.]+)", out)
+        if m:
+            return max(0, min(100, int(round(float(m.group(1)) * 100))))
+    except Exception:
+        pass
+    try:
+        out = subprocess.check_output(
+            ["amixer", "-c", CARD, "cget",
+             "name=Woofer Master Playback Volume"],
+            stderr=subprocess.DEVNULL, text=True, timeout=0.5)
+        m = re.search(r": values=(\d+)", out)
+        if m:
+            raw = int(m.group(1))
+            return max(0, min(100, int(round(raw * 100.0 / 255.0))))
+    except Exception:
+        pass
+    return None
+
+def set_volume(pct):
+    """Apply one user-visible volume in percent to ALSA and PipeWire."""
+    pct = max(0, min(100, int(pct)))
+    raw = int(round(pct * 255.0 / 100.0))
+    # Master volume controls only; the per-channel 0 dB trims stay at 159.
+    for ctl in ("Woofer Master Playback Volume",
+                "Tweeters Master Playback Volume",
+                "Headphone DAC Playback Volume"):
+        try:
+            subprocess.run(
+                ["amixer", "-c", CARD, "cset", f"name={ctl}", str(raw)],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=0.5)
+        except Exception:
+            pass
+    try:
+        subprocess.run(
+            ["wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", f"{pct}%"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=0.5)
+    except Exception:
+        pass
+
+def adjust_volume(step):
+    global current_volume, pending_volume
+    current_volume = max(0, min(100, current_volume + step))
+    # Update the ring immediately; the worker applies the ALSA/PipeWire
+    # change without blocking the event loop.
+    show_volume_ring(current_volume)
+    with volume_lock:
+        pending_volume = current_volume
+
+def volume_worker():
+    last = -1
+    while True:
+        time.sleep(0.01)
+        with volume_lock:
+            target = pending_volume
+            pending_volume = None
+        if target is not None and target != last:
+            set_volume(target)
+            last = target
+
+def find_devices():
+    return sorted(glob.glob("/dev/input/event*"))
+
+def main():
+    global current_volume
+    EVENT_FORMAT = "QQHHi"
+    EVENT_SIZE = struct.calcsize(EVENT_FORMAT)
+    open_fds = {}
+
+    for p in find_devices():
+        try:
+            fd = os.open(p, os.O_RDONLY | os.O_NONBLOCK)
+            open_fds[fd] = p
+        except Exception:
+            pass
+
+    top_press_time = 0
+    last_volume_time = 0
+    threading.Thread(target=volume_worker, daemon=True).start()
+    v = read_volume()
+    if v is not None:
+        current_volume = v
+    last_sync = time.time()
+
+    while True:
+        # 100 ms wakeup keeps the fade-out responsive; input events still
+        # wake select immediately, so the knob itself is not delayed.
+        rlist, _, _ = select.select(list(open_fds.keys()), [], [], 0.1)
+        now = time.time()
+
+        # Re-read the user volume periodically when the knob is idle, so an
+        # external PipeWire/ALSA change is not overwritten by the next step.
+        if now - last_sync > 2.0 and (last_volume_time == 0 or now - last_volume_time > 2.0):
+            v = read_volume()
+            if v is not None:
+                current_volume = v
+            last_sync = now
+
+        # Fade out volume bar after 2 seconds if not in mic mute mode
+        if not mic_muted and last_volume_time > 0 and (now - last_volume_time > 2.0):
+            clear_ring()
+            last_volume_time = 0
+
+        for fd in rlist:
+            try:
+                data = os.read(fd, EVENT_SIZE * 64)
+                for offset in range(0, len(data), EVENT_SIZE):
+                    chunk = data[offset:offset + EVENT_SIZE]
+                    if len(chunk) < EVENT_SIZE:
+                        continue
+                    sec, usec, ev_type, ev_code, ev_value = struct.unpack(EVENT_FORMAT, chunk)
+                    if ev_type == 1: # EV_KEY
+                        # Rotary knob CW
+                        if ev_code == KEY_PAGEUP and ev_value == 1:
+                            adjust_volume(VOLUME_STEP)
+                            last_volume_time = time.time()
+                        # Rotary knob CCW
+                        elif ev_code == KEY_PAGEDOWN and ev_value == 1:
+                            adjust_volume(-VOLUME_STEP)
+                            last_volume_time = time.time()
+                        # Top Button 2: Dedicated Physical Microphone Mute
+                        elif ev_code == KEY_MICMUTE and ev_value == 1:
+                            toggle_software_mic_mute()
+                        # Top Button 1: Assistant / Play-Pause
+                        elif ev_code in (KEY_VOICECOMMAND, KEY_POWER):
+                            if ev_value == 1:
+                                top_press_time = time.time()
+                            elif ev_value == 0:
+                                duration = time.time() - top_press_time
+                                if duration >= 2.5:
+                                    pass
+                                else:
+                                    try:
+                                        subprocess.run(["playerctl", "play-pause"],
+                                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                    except Exception:
+                                        pass
+            except Exception:
+                pass
+
+if __name__ == "__main__":
+    main()
