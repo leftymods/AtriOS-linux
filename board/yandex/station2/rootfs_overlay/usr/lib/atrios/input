@@ -99,6 +99,8 @@ if not fds:
     sys.exit(1)
 
 mic_muted = False
+# gpio_keypad reports KEY_MICMUTE active-low (physical press = value 0).
+MIC_MUTE_ACTIVE_LOW = True
 press_t = 0.0
 
 try:
@@ -118,13 +120,17 @@ try:
                 if ev_type == 1:
                     ts = time.strftime("%H:%M:%S")
                     kname = KEY_NAMES.get(ev_code, f"KEY_{ev_code}")
-                    if ev_code == 248 and ev_val == 1:
-                        mic_muted = not mic_muted
-                        cmd = "on" if mic_muted else "off"
-                        subprocess.Popen(["/bin/sh", "/usr/lib/atrios/audio", "mute", cmd],
-                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                        st = "MUTED" if mic_muted else "UNMUTED"
-                        print(f"[{ts}] >>> TOP BUTTON #2 (MIC MUTE) PRESSED -> {st} <<<", flush=True)
+                    if ev_code == 248:
+                        active_edge = 0 if MIC_MUTE_ACTIVE_LOW else 1
+                        if ev_val == active_edge:
+                            mic_muted = not mic_muted
+                            cmd = "on" if mic_muted else "off"
+                            subprocess.Popen(["/bin/sh", "/usr/lib/atrios/audio", "mute", cmd],
+                                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                            st = "MUTED" if mic_muted else "UNMUTED"
+                            print(f"[{ts}] >>> TOP BUTTON #2 (MIC MUTE) PRESSED -> {st} <<<", flush=True)
+                        else:
+                            print(f"[{ts}] [RELEASED] KEY_MICMUTE (Top Button #2)", flush=True)
                     elif ev_code in (582, 116):
                         if ev_val == 1:
                             press_t = time.time()

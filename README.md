@@ -138,6 +138,8 @@ atrios test
 - **Громкость** — `atrios volume 0..100` и физическая крутилка работают с мастер-контролами `Woofer Master Playback Volume`, `Tweeters Master Playback Volume`, `Headphone DAC Playback Volume`. Поканальные `Ch1/Ch2` остаются на 159 (0 dB).
 - **Диагностика** — мастер-громкость и громкость наушников считаются пользовательскими: `atrios test` падает только на 0/mute, а не на конкретном значении 255/193.
 - **Крутилка** — `rotaryd` синхронизирует текущую громкость с PipeWire/ALSA, меняет её шагом 2% за детент, а кольцо обновляет сразу, не дожидаясь ALSA/PipeWire (применение громкости вынесено в отдельный worker).
+- **Тест музыкой** — положи любой WAV в `/root/music/` (например `/root/music/tsoi.wav`); `atrios test` и `atrios play` возьмут его вместо синуса. В образе есть `/usr/share/sounds/atrios/test-music.wav` (public-domain melody).
+- **Диагностика микрофона** — `atrios micprobe` перебирает `Audio In Source` (`LOOPBACK_A/B`, `TDMIN_LB/B`, `PDMIN`) и устройства захвата, печатает RMS/peak/ZCR. По этому выводу видно, какой тракт реально несёт голос, а какой только шумит.
 
 ---
 
@@ -186,10 +188,10 @@ AtriOS-Android/
 cd AtriOS-linux
 
 # Запуск сборки с указанием номера версии (например, v116)
-./build_atrios.sh 116
+./build_atrios.sh 120
 ```
 
 Результатом сборки является готовый образ для прошивки:  
-`tools/fw_builder/yandex_s905x3_custom_v116.img` (~1.46 ГБ)
+`tools/fw_builder/yandex_s905x3_custom_v120.img` (~1.46 ГБ)
 
 Прошивка устройства выполняется через стандартный **Amlogic USB Burning Tool** в режиме восстановления (Recovery) либо через альтернативный загрузочный инструмент, если он используется в вашей сборке.

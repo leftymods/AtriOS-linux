@@ -55,10 +55,19 @@ case "$ACTION" in
     echo "[Amplifier Re-Init]: Applying 0dB hardware unmute..."
     /etc/init.d/S03amplifiers start >/dev/null 2>&1 || true
     echo ""
-    echo "[Playback Test]: Playing test chime on speakers / headphone jack..."
-    WAV="/usr/share/sounds/alsa/Front_Center.wav"
+    echo "[Playback Test]: Playing test music on speakers / headphone jack..."
+    WAV=""
+    for f in /root/music/*.wav /root/music/*.mp3 \
+             /usr/share/sounds/atrios/test-music.wav \
+             /usr/share/sounds/alsa/Front_Center.wav; do
+      if [ -f "$f" ]; then
+        WAV="$f"
+        break
+      fi
+    done
     PLAY_OK=0
-    if command -v pw-play >/dev/null 2>&1 && pidof pipewire >/dev/null 2>&1 && [ -f "$WAV" ]; then
+    if command -v pw-play >/dev/null 2>&1 && pidof pipewire >/dev/null 2>&1 && [ -n "$WAV" ]; then
+      echo "  * pw-play $WAV"
       pw-play "$WAV" 2>/dev/null && PLAY_OK=1
     fi
     if [ "$PLAY_OK" -eq 0 ]; then
@@ -70,10 +79,13 @@ case "$ACTION" in
         usleep 200000 2>/dev/null || sleep 1
       fi
       /etc/init.d/S03amplifiers start >/dev/null 2>&1 || true
-      if command -v speaker-test >/dev/null 2>&1; then
-        speaker-test -D default -c 2 -r 48000 -F S32_LE -t sine -f 440 -l 1 2>/dev/null ||         speaker-test -D "plughw:$CARD,0" -c 2 -r 48000 -F S32_LE -t sine -f 440 -l 1 2>/dev/null ||         speaker-test -D "hw:$CARD,0" -c 2 -r 48000 -F S32_LE -t sine -f 440 -l 1 2>/dev/null || true
-      elif command -v aplay >/dev/null 2>&1 && [ -f "$WAV" ]; then
-        aplay -D default "$WAV" 2>/dev/null ||         aplay -D "plughw:$CARD,0" "$WAV" 2>/dev/null || true
+      if command -v aplay >/dev/null 2>&1 && [ -n "$WAV" ]; then
+        aplay -D default "$WAV" 2>/dev/null || \
+        aplay -D "plughw:$CARD,0" "$WAV" 2>/dev/null || true
+      elif command -v speaker-test >/dev/null 2>&1; then
+        speaker-test -D default -c 2 -r 48000 -F S32_LE -t sine -f 440 -l 1 2>/dev/null || \
+        speaker-test -D "plughw:$CARD,0" -c 2 -r 48000 -F S32_LE -t sine -f 440 -l 1 2>/dev/null || \
+        speaker-test -D "hw:$CARD,0" -c 2 -r 48000 -F S32_LE -t sine -f 440 -l 1 2>/dev/null || true
       fi
       if [ "$PW_WAS_RUNNING" -eq 1 ]; then
         /etc/init.d/S50pipewire start >/dev/null 2>&1 || true

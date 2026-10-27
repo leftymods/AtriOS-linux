@@ -25,6 +25,9 @@ VOLUME_STEP = 2  # percent per detent; fractional ring keeps it smooth
 KEY_VOICECOMMAND = 582
 KEY_POWER = 116
 KEY_MICMUTE = 248
+# The gpio_keypad reports the mic-mute key active-low: the physical press
+# arrives as value 0.  Flip this if the button feels inverted.
+MIC_MUTE_ACTIVE_LOW = True
 KEY_PAGEUP = 104    # Knob CW
 KEY_PAGEDOWN = 109  # Knob CCW
 
@@ -237,7 +240,7 @@ def main():
                             adjust_volume(-VOLUME_STEP)
                             last_volume_time = time.time()
                         # Top Button 2: Dedicated Physical Microphone Mute
-                        elif ev_code == KEY_MICMUTE and ev_value == 1:
+                        elif ev_code == KEY_MICMUTE and ev_value == (0 if MIC_MUTE_ACTIVE_LOW else 1):
                             toggle_software_mic_mute()
                         # Top Button 1: Assistant / Play-Pause
                         elif ev_code in (KEY_VOICECOMMAND, KEY_POWER):

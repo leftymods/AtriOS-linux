@@ -428,20 +428,32 @@ audit_playback() {
     if [ -e "/dev/snd/pcmC0D0p" ] || ( [ -f /proc/asound/cards ] && grep -qi "AUGESOUND" /proc/asound/cards ); then
         log_verbose "  * Live sound card detected. Executing PCM stream verification..."
 
+        # Prefer real music over a sine beep.  Put any WAV in /root/music
+        # (for example /root/music/tsoi.wav) and the test will use it.
+        TEST_AUDIO=""
+        for f in /root/music/*.wav /root/music/*.mp3 \
+                 /usr/share/sounds/atrios/test-music.wav \
+                 /usr/share/sounds/alsa/Front_Center.wav; do
+            if [ -f "$f" ]; then
+                TEST_AUDIO="$f"
+                break
+            fi
+        done
+
         # Priority 1: PipeWire pw-play if daemon is running
-        if command -v pw-play >/dev/null 2>&1 && pidof pipewire >/dev/null 2>&1 && [ -f "/usr/share/sounds/alsa/Front_Center.wav" ]; then
-            log_verbose "  * Playing test stream via PipeWire (pw-play)..."
-            play_output=$(pw-play /usr/share/sounds/alsa/Front_Center.wav 2>&1) || play_err=$?
-        # Priority 2: speaker-test finite 1-loop sine test tone
+        if command -v pw-play >/dev/null 2>&1 && pidof pipewire >/dev/null 2>&1 && [ -n "$TEST_AUDIO" ]; then
+            log_verbose "  * Playing test audio via PipeWire: ${TEST_AUDIO}"
+            play_output=$(pw-play "$TEST_AUDIO" 2>&1) || play_err=$?
+        # Priority 2: aplay WAV/music playback
+        elif command -v aplay >/dev/null 2>&1 && [ -n "$TEST_AUDIO" ]; then
+            log_verbose "  * Playing test audio via aplay: ${TEST_AUDIO}"
+            play_output=$(aplay -D default "$TEST_AUDIO" 2>&1) || \
+            play_output=$(aplay -D "plughw:${ALSA_CARD_NAME},0" "$TEST_AUDIO" 2>&1) || play_err=$?
+        # Priority 3: speaker-test finite 1-loop sine test tone
         elif command -v speaker-test >/dev/null 2>&1; then
             log_verbose "  * Playing 440Hz sine test tone via speaker-test..."
             play_output=$(speaker-test -D default -c 2 -r 48000 -t sine -f 440 -l 1 2>&1) || \
             play_output=$(speaker-test -D "plughw:${ALSA_CARD_NAME},0" -c 2 -r 48000 -t sine -f 440 -l 1 2>&1) || play_err=$?
-        # Priority 3: aplay WAV playback
-        elif command -v aplay >/dev/null 2>&1 && [ -f "/usr/share/sounds/alsa/Front_Center.wav" ]; then
-            log_verbose "  * Playing test stream via aplay..."
-            play_output=$(aplay -D default /usr/share/sounds/alsa/Front_Center.wav 2>&1) || \
-            play_output=$(aplay -D "plughw:${ALSA_CARD_NAME},0" /usr/share/sounds/alsa/Front_Center.wav 2>&1) || play_err=$?
         fi
 
         # Inspect return code and output for underruns / xruns
