@@ -182,16 +182,42 @@ AtriOS-Android/
 | Вендорные модули и firmware | `board/yandex/station2/rootfs_overlay/lib/{modules,firmware}` |
 | Корневая ФС | собирается Buildroot (`board/yandex/station2/station2_defconfig`) |
 
-Сборка выполняется в окружении Linux / WSL2:
+### Сборка одной командой
+
+Сборка полностью автономна: всё необходимое лежит в репозитории (загрузчик,
+DTS, ядро, вендорные модули, `fw_builder`, `ampack`, `make_ext4fs`, `dtc`),
+а Buildroot при отсутствии клонируется скриптом. Ручное копирование файлов
+в staging не требуется.
+
+Зависимости хоста (Debian/Ubuntu):
 
 ```bash
-cd AtriOS-linux
-
-# Запуск сборки с указанием номера версии (например, v116)
-./build_atrios.sh 120
+sudo apt-get install -y gcc-13 g++-13 make bc bison flex \
+    libssl-dev libncurses-dev libelf-dev rsync cpio unzip \
+    device-tree-compiler python3 kmod
 ```
 
-Результатом сборки является готовый образ для прошивки:  
-`tools/fw_builder/yandex_s905x3_custom_v126.img` (~1.46 ГБ)
+Сборка:
+
+```bash
+git clone https://github.com/leftymods/AtriOS-linux.git
+cd AtriOS-linux
+
+./build_atrios.sh              # версия берётся из файла VERSION
+./build_atrios.sh -n 130       # разовая сборка с явным номером
+./build_atrios.sh --no-buildroot   # пересобрать образ на готовом rootfs.tar
+```
+
+Скрипт сам выбирает совместимый host-компилятор (GCC <= 13 — Buildroot 2024.02
+не собирается GCC 14/15), собирает rootfs, накладывает `rootfs_overlay`,
+пакует `system.PARTITION`, образ и проверяет его через `ampack verify`.
+В конце печатается SHA256.
+
+Результат: `tools/fw_builder/yandex_s905x3_custom_v<версия>.img` (~1.46 ГБ)
+и `.sha256` рядом с ним.
+
+Номер релиза хранится в файле `VERSION`: измените его и закоммитьте вместе
+с изменениями, чтобы выпустить следующий образ. CI (GitHub Actions) собирает
+образ тем же скриптом и прикладывает его артефактом к запуску.
 
 Прошивка устройства выполняется через стандартный **Amlogic USB Burning Tool** в режиме восстановления (Recovery) либо через альтернативный загрузочный инструмент, если он используется в вашей сборке.

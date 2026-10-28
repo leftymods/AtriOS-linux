@@ -1,0 +1,11 @@
+buildroot/
+tools/fw_builder/staging/
+tools/fw_builder/overlay/system/
+tools/fw_builder/*.img
+tools/fw_builder/*.img.sha256
+tools/fw_builder/.fw_builder_cache.json
+tools/fw_builder/.nobase_work/
+tools/fw_builder/.fw_build_work/
+__pycache__/
+tools/fw_builder/.system_from_rootfs
+tools/fw_builder/overlay/dts/*.dtb

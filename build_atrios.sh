@@ -1,46 +1,59 @@
 #!/bin/bash
-set -e
+# AtriOS Linux firmware build - fully scripted, one command:
+#
+#   ./build_atrios.sh              # build rootfs + image, next version number
+#   ./build_atrios.sh 130          # explicit version
+#   ./build_atrios.sh 130 --no-buildroot   # reuse the last rootfs.tar
+#
+# Everything the build needs is either tracked in this repository
+# (board/, device/, tools/bin, tools/fw_builder, prebuilts/.../dtc) or
+# fetched/compiled here (Buildroot itself).  No manual staging of files.
+set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Sanitize PATH to prevent Buildroot dependency errors due to Windows spaces in WSL
+# Keep a predictable PATH; Buildroot rejects some host setups otherwise.
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PROJECT_ROOT/tools/bin"
+export LC_ALL=C
 
 BUILDROOT_DIR="$PROJECT_ROOT/buildroot"
 BOARD_DIR="$PROJECT_ROOT/board/yandex/station2"
 OVERLAY_DIR="$BOARD_DIR/rootfs_overlay"
 TOOLS_DIR="$PROJECT_ROOT/tools/fw_builder"
+STAGING_DIR="$TOOLS_DIR/staging"
+SYSTEM_TREE="$TOOLS_DIR/overlay/system"
+ROOTFS_TAR="$BUILDROOT_DIR/output/images/rootfs.tar"
 MAKE_EXT4FS="$PROJECT_ROOT/tools/bin/make_ext4fs"
-[ ! -x "$MAKE_EXT4FS" ] && MAKE_EXT4FS="$(which make_ext4fs 2>/dev/null || true)"
-
-# Prefer the DTC shipped with the Amlogic source drop (DTC 1.4.2), then system dtc.
+AMPACK="$PROJECT_ROOT/tools/bin/ampack"
 DTC="$PROJECT_ROOT/prebuilts/misc/linux-x86/dtc/dtc"
-[ ! -x "$DTC" ] && DTC="$(which dtc 2>/dev/null || true)"
+SYSTEM_PARTITION_SIZE=1551892480
 
-VERSION_NUM=105
+VERSION_NUM=""
 BUILD_ROOTFS=1
-SKIP_ROOTFS_REASON=""
 
 usage() {
     cat <<EOF
 Usage: $0 [VERSION_NUM] [options]
 
 Options:
-  -n, --version NUM    Firmware version number (default: 105)
-      --no-buildroot   Skip the Buildroot rootfs build (assemble from repo assets)
+  -n, --version NUM    Firmware version number (default: contents of ./VERSION)
+      --no-buildroot   Reuse the existing Buildroot rootfs.tar instead of rebuilding
   -h, --help           Show this help
+
+Prerequisites (Debian/Ubuntu):
+  sudo apt-get install -y gcc-13 g++-13 make bc bison flex \
+      libssl-dev libncurses-dev libelf-dev rsync cpio unzip \
+      device-tree-compiler python3 kmod
 EOF
 }
 
 while [ $# -gt 0 ]; do
     case "$1" in
         -n|--version)
-            [ -n "$2" ] || { echo "[!] --version requires a number"; exit 2; }
+            [ -n "${2:-}" ] || { echo "[!] --version requires a number"; exit 2; }
             VERSION_NUM="$2"; shift 2 ;;
         --no-buildroot)
-            BUILD_ROOTFS=0
-            SKIP_ROOTFS_REASON="--no-buildroot requested"
-            shift ;;
+            BUILD_ROOTFS=0; shift ;;
         -h|--help)
             usage; exit 0 ;;
         ''|*[!0-9]*)
@@ -55,15 +68,52 @@ echo "          AtriOS Linux Master Build System                 "
 echo "      Target: Yandex Station Max [Amlogic S905X3]         "
 echo "=========================================================="
 
-echo "[1/6] Verifying toolchain and build directories..."
-if [ ! -x "$DTC" ]; then
-    echo "[!] No usable dtc found (expected $PROJECT_ROOT/prebuilts/misc/linux-x86/dtc/dtc)"
+# ---------------------------------------------------------------------------
+# [0/6] Host compiler
+# ---------------------------------------------------------------------------
+# Buildroot 2024.02 predates GCC 14/15 and fails on them.  Pick the newest
+# host compiler that is known to work instead of relying on the caller.
+host_gcc_major() { "$1" -dumpversion 2>/dev/null | cut -d. -f1; }
+
+if [ -z "${HOSTCC:-}" ]; then
+    for c in gcc-13 gcc-12 gcc; do
+        command -v "$c" >/dev/null 2>&1 || continue
+        major="$(host_gcc_major "$c")"
+        [ -n "$major" ] || continue
+        if [ "$major" -le 13 ]; then
+            HOSTCC="$c"
+            break
+        fi
+    done
+fi
+
+if [ -z "${HOSTCC:-}" ] || [ "$(host_gcc_major "$HOSTCC")" -gt 13 ]; then
+    echo "[!] No host GCC <= 13 found (Buildroot 2024.02 does not build with 14+)."
+    echo "    Install it:  sudo apt-get install -y gcc-13 g++-13"
     exit 1
 fi
-echo "      DTC: $DTC"
+ALIASED_CXX="${HOSTCC/gcc/g++}"
+if [ -z "${HOSTCXX:-}" ]; then
+    if command -v "$ALIASED_CXX" >/dev/null 2>&1; then
+        HOSTCXX="$ALIASED_CXX"
+    else
+        HOSTCXX="$HOSTCC"
+    fi
+fi
+export HOSTCC HOSTCXX
+echo "[0/6] Host compiler: $HOSTCC ($("$HOSTCC" -dumpversion)) / $HOSTCXX"
 
-# Vendor kernel modules and firmware are extracted from the stock vendor image
-# once and committed to the repo; the build must never depend on the stock image.
+# ---------------------------------------------------------------------------
+# [1/6] Tools and inputs
+# ---------------------------------------------------------------------------
+for tool in "$DTC" "$MAKE_EXT4FS" "$AMPACK" python3 rsync tar; do
+    if [ ! -x "$tool" ] && ! command -v "$tool" >/dev/null 2>&1; then
+        echo "[!] Required build tool not found: $tool"
+        exit 1
+    fi
+done
+echo "[1/6] Build tools present (dtc, make_ext4fs, ampack, python3)"
+
 VENDOR_KO_COUNT=$(find "$OVERLAY_DIR/lib/modules/4.9.113" -maxdepth 1 -name '*.ko' 2>/dev/null | wc -l)
 VENDOR_FW_COUNT=$(find "$OVERLAY_DIR/lib/firmware" -type f 2>/dev/null | wc -l)
 if [ "$VENDOR_KO_COUNT" -lt 51 ] || [ "$VENDOR_FW_COUNT" -lt 1 ]; then
@@ -73,100 +123,124 @@ if [ "$VENDOR_KO_COUNT" -lt 51 ] || [ "$VENDOR_FW_COUNT" -lt 1 ]; then
 fi
 echo "      Vendor payload: $VENDOR_KO_COUNT kernel modules, $VENDOR_FW_COUNT firmware files"
 
+# The bootloader partition is shipped as a repository asset; refuse to build
+# an image whose bootloader asset is missing rather than silently packing a
+# placeholder.
+for asset in bootloader.img u-boot.bin.sd.bin platform.conf aml_sdc_burn.ini logo.PARTITION; do
+    if [ ! -s "$PROJECT_ROOT/device/yandex/station_max/upgrade/$asset" ]; then
+        echo "[!] Missing bootloader asset: device/yandex/station_max/upgrade/$asset"
+        exit 1
+    fi
+done
+
+# Version: the tracked VERSION file is the release number this tree builds.
+# Bump it (and commit) when cutting a new image; -n overrides for a one-off.
+if [ -z "$VERSION_NUM" ] && [ -s "$PROJECT_ROOT/VERSION" ]; then
+    VERSION_NUM="$(tr -dc '0-9' < "$PROJECT_ROOT/VERSION")"
+fi
+if [ -z "$VERSION_NUM" ]; then
+    last="$(ls "$TOOLS_DIR"/yandex_s905x3_custom_v*.img 2>/dev/null \
+            | sed 's/.*_v//; s/\.img$//' | sort -n | tail -1)"
+    VERSION_NUM=$(( ${last:-0} + 1 ))
+fi
+echo "      Version: v$VERSION_NUM"
+
+# ---------------------------------------------------------------------------
+# [2/6] Buildroot rootfs
+# ---------------------------------------------------------------------------
 if [ "$BUILD_ROOTFS" -eq 1 ]; then
     if [ ! -d "$BUILDROOT_DIR" ]; then
-        echo "[!] Buildroot source tree not found at $BUILDROOT_DIR"
-        echo "[!] Fetching Buildroot 2024.02 LTS..."
-        if ! git clone --depth 1 -b 2024.02.x https://github.com/buildroot/buildroot.git "$BUILDROOT_DIR"; then
-            echo "[!] Buildroot clone failed. Continuing without a rootfs build."
-            BUILD_ROOTFS=0
-            SKIP_ROOTFS_REASON="Buildroot clone failed"
-        fi
+        echo "[2/6] Buildroot source tree not found; cloning 2024.02 LTS..."
+        git clone --depth 1 -b 2024.02.x https://github.com/buildroot/buildroot.git "$BUILDROOT_DIR"
     fi
-fi
 
-# Ensure defconfig is available in Buildroot with dynamic OVERLAY_DIR
-if [ "$BUILD_ROOTFS" -eq 1 ] && [ -f "$BOARD_DIR/station2_defconfig" ]; then
+    echo "[2/6] Configuring Buildroot (overlay: $OVERLAY_DIR)..."
     mkdir -p "$BUILDROOT_DIR/configs"
     sed "s|BR2_ROOTFS_OVERLAY=.*|BR2_ROOTFS_OVERLAY=\"$OVERLAY_DIR\"|" \
         "$BOARD_DIR/station2_defconfig" > "$BUILDROOT_DIR/configs/yandex_station2_defconfig"
-fi
 
-echo "[2/6] Updating kernel modules dependency map (depmod)..."
-depmod -b "$OVERLAY_DIR" 4.9.113 2>/dev/null || true
+    depmod -b "$OVERLAY_DIR" 4.9.113 2>/dev/null || true
 
-echo "[3/6] Compiling Device Tree with Dual Top Buttons..."
-DTS="$TOOLS_DIR/overlay/dts/sm1_s905x3_yandex.dts"
-DTB="$TOOLS_DIR/overlay/dts/sm1_s905x3_yandex.dtb"
-if ! "$DTC" -I dts -O dtb -o "$DTB" "$DTS"; then
-    echo "[!] Device Tree compilation failed - aborting."
-    exit 1
-fi
-echo "      DTB: $DTB ($(stat -c %s "$DTB") bytes)"
-mkdir -p "$PROJECT_ROOT/common/arch/arm64/boot/dts/amlogic"
-cp "$DTB" "$PROJECT_ROOT/common/arch/arm64/boot/dts/amlogic/sm1_s905x3_yandex.dtb"
+    (
+        cd "$BUILDROOT_DIR"
+        make yandex_station2_defconfig
+        make -j"$(nproc)" HOSTCC="$HOSTCC" HOSTCXX="$HOSTCXX"
+    )
 
-echo "[4/6] Configuring & Building Buildroot rootfs..."
-if [ "$BUILD_ROOTFS" -eq 1 ]; then
-    cd "$BUILDROOT_DIR"
-    echo "Applying AtriOS Station 2 configuration..."
-    make yandex_station2_defconfig
-
-    make -j"$(nproc)"
-    cd "$PROJECT_ROOT"
-else
-    echo "[!] Skipping Buildroot build ($SKIP_ROOTFS_REASON)."
-fi
-
-echo "[5/6] Generating ext4 system.PARTITION from Buildroot rootfs..."
-ROOTFS_TAR="$BUILDROOT_DIR/output/images/rootfs.tar"
-mkdir -p "$TOOLS_DIR/staging"
-if [ -f "$ROOTFS_TAR" ]; then
-    echo "Rootfs archive found: $ROOTFS_TAR"
-    mkdir -p "$TOOLS_DIR/overlay/system"
-    rm -rf "$TOOLS_DIR/overlay/system"/* 2>/dev/null || true
-    tar -xf "$ROOTFS_TAR" -C "$TOOLS_DIR/overlay/system"
-    ln -sf sbin/init "$TOOLS_DIR/overlay/system/init"
-    chmod 755 "$TOOLS_DIR/overlay/system/lib/ld-"* 2>/dev/null || true
-    chmod 755 "$TOOLS_DIR/overlay/system/bin/busybox" 2>/dev/null || true
-
-    # The rootfs must carry the vendor kernel modules and their firmware.
-    ROOTFS_KO_COUNT=$(find "$TOOLS_DIR/overlay/system/lib/modules/4.9.113" -maxdepth 1 -name '*.ko' 2>/dev/null | wc -l)
-    ROOTFS_FW_COUNT=$(find "$TOOLS_DIR/overlay/system/lib/firmware" -type f 2>/dev/null | wc -l)
-    if [ "$ROOTFS_KO_COUNT" -lt 51 ] || [ "$ROOTFS_FW_COUNT" -lt 1 ]; then
-        echo "[!] Rootfs is missing the vendor payload: $ROOTFS_KO_COUNT modules, $ROOTFS_FW_COUNT firmware files"
-        echo "    Check BR2_ROOTFS_OVERLAY=$OVERLAY_DIR"
+    if [ ! -s "$ROOTFS_TAR" ]; then
+        echo "[!] Buildroot finished without $ROOTFS_TAR"
         exit 1
     fi
-    echo "      Rootfs vendor payload: $ROOTFS_KO_COUNT kernel modules, $ROOTFS_FW_COUNT firmware files"
-
-    if [ -x "$MAKE_EXT4FS" ]; then
-        echo "Building raw ext4 system.PARTITION (1.44 GB)..."
-        "$MAKE_EXT4FS" -l 1551892480 "$TOOLS_DIR/staging/system.PARTITION" "$TOOLS_DIR/overlay/system"
-        touch "$TOOLS_DIR/.system_from_rootfs"
-    else
-        echo "[!] make_ext4fs not found - fw_builder will generate the system image."
-    fi
+    echo "      rootfs.tar: $(stat -c %s "$ROOTFS_TAR") bytes"
 else
-    echo "[!] No rootfs.tar found. fw_builder will create a placeholder system.PARTITION."
-    echo "[!] The resulting image will pack and verify but will NOT boot into AtriOS."
+    echo "[2/6] Skipping Buildroot build (--no-buildroot)"
+    if [ ! -s "$ROOTFS_TAR" ]; then
+        echo "[!] --no-buildroot requires an existing $ROOTFS_TAR"
+        exit 1
+    fi
 fi
 
-# Keep the boot cmdline's DT id in sync with the ported DTS amlogic-dt-id.
-CMDLINE="$TOOLS_DIR/overlay/boot/cmdline.txt"
-if [ -f "$CMDLINE" ] && grep -q 'androidboot.hardware.amlogic_dt_id=' "$CMDLINE"; then
-    sed -i 's|androidboot.hardware.amlogic_dt_id=[^ ]*|androidboot.hardware.amlogic_dt_id=yandex_station_2g|' "$CMDLINE"
+# ---------------------------------------------------------------------------
+# [3/6] Device tree
+# ---------------------------------------------------------------------------
+echo "[3/6] Compiling device tree..."
+DTS="$TOOLS_DIR/overlay/dts/sm1_s905x3_yandex.dts"
+DTB="$TOOLS_DIR/overlay/dts/sm1_s905x3_yandex.dtb"
+"$DTC" -I dts -O dtb -o "$DTB" "$DTS" 2>/dev/null
+echo "      DTB: $DTB ($(stat -c %s "$DTB") bytes)"
+
+# ---------------------------------------------------------------------------
+# [4/6] system.PARTITION from rootfs.tar + rootfs_overlay
+# ---------------------------------------------------------------------------
+echo "[4/6] Assembling system.PARTITION..."
+rm -rf "$SYSTEM_TREE"
+mkdir -p "$SYSTEM_TREE"
+tar -xf "$ROOTFS_TAR" -C "$SYSTEM_TREE"
+
+# Re-apply the repository overlay on top of the tarball so that a refreshed
+# --no-buildroot assembly still gets the current scripts.
+rsync -a "$OVERLAY_DIR"/ "$SYSTEM_TREE"/
+
+ln -sf sbin/init "$SYSTEM_TREE/init"
+chmod 755 "$SYSTEM_TREE/lib/ld-"* 2>/dev/null || true
+chmod 755 "$SYSTEM_TREE/bin/busybox" 2>/dev/null || true
+
+ROOTFS_KO_COUNT=$(find "$SYSTEM_TREE/lib/modules/4.9.113" -maxdepth 1 -name '*.ko' 2>/dev/null | wc -l)
+ROOTFS_FW_COUNT=$(find "$SYSTEM_TREE/lib/firmware" -type f 2>/dev/null | wc -l)
+if [ "$ROOTFS_KO_COUNT" -lt 51 ] || [ "$ROOTFS_FW_COUNT" -lt 1 ]; then
+    echo "[!] Rootfs is missing the vendor payload: $ROOTFS_KO_COUNT modules, $ROOTFS_FW_COUNT firmware files"
+    exit 1
 fi
 
-echo "[6/6] Packaging and signing AtriOS firmware image..."
-cd "$TOOLS_DIR"
-rm -f .fw_builder_cache.json
+mkdir -p "$STAGING_DIR"
+"$MAKE_EXT4FS" -l "$SYSTEM_PARTITION_SIZE" -a system "$STAGING_DIR/system.PARTITION" "$SYSTEM_TREE"
+touch "$TOOLS_DIR/.system_from_rootfs"
+echo "      system.PARTITION: $(stat -c %s "$STAGING_DIR/system.PARTITION") bytes"
+echo "      Rootfs vendor payload: $ROOTFS_KO_COUNT kernel modules, $ROOTFS_FW_COUNT firmware files"
 
-BUILD_ARGS=(build --version-num "$VERSION_NUM")
-echo "      Source: repository assets (bootloader, U-Boot, logo, DTS, kernel, vendor modules) - no stock image."
+# ---------------------------------------------------------------------------
+# [5/6] Package and verify
+# ---------------------------------------------------------------------------
+echo "[5/6] Packaging firmware image..."
+IMG="$TOOLS_DIR/yandex_s905x3_custom_v${VERSION_NUM}.img"
+(
+    cd "$TOOLS_DIR"
+    rm -f .fw_builder_cache.json
+    python3 fw_builder.py build --version-num "$VERSION_NUM"
+)
 
-python3 "$TOOLS_DIR/fw_builder.py" "${BUILD_ARGS[@]}"
+if [ ! -s "$IMG" ]; then
+    echo "[!] Firmware image was not produced: $IMG"
+    exit 1
+fi
+
+echo "[6/6] Verifying image..."
+"$AMPACK" verify "$IMG" >/dev/null
+sha256sum "$IMG" | tee "$IMG.sha256"
+ls -lh "$IMG"
+
 echo "=========================================================="
-echo "SUCCESS: AtriOS Linux Firmware build complete!"
-echo "Image location: $TOOLS_DIR/yandex_s905x3_custom_v${VERSION_NUM}.img"
+echo "SUCCESS: AtriOS Linux v$VERSION_NUM"
+echo "Image:  $IMG"
+echo "SHA256: $(cut -d' ' -f1 "$IMG.sha256")"
 echo "=========================================================="
