@@ -174,14 +174,16 @@
 /*
  * 10/100 Ethernet.  Vendor: internal_phy = <1>, i.e. the on-SoC PHY reached
  * through the mdio multiplexer (int_mdio/internal_ephy), not an external
- * RGMII PHY.  GPIOZ_14/15 carry the link/activity LEDs.
+ * RGMII PHY.  No pinctrl here: eth_link_led/eth_act_led are GPIOZ_14/15,
+ * which are the same pads as i2c2_sda_z/i2c2_sck_z - the codec bus below.
+ * The vendor DT dropped the ethernet pinctrl for exactly this reason
+ * ("pinctrl removed to prevent GPIOZ_14/15 collision with i2c2", vendor
+ * DTS:380), so the link/activity LEDs are simply not driven on this board.
  */
 &ethmac {
 	status = "okay";
 	phy-mode = "rmii";
 	phy-handle = <&internal_ephy>;
-	pinctrl-0 = <&eth_leds_pins>;
-	pinctrl-names = "default";
 };
 
 /*
@@ -638,4 +640,288 @@
 	status = "okay";
 	pinctrl-0 = <&remote_input_ao_pins>;
 	pinctrl-names = "default";
+};
+
+/*
+ * ------------------------------------------------------------------
+ * Audio: ES7210 mics, ES8156 headphone DAC, 2x SY6045S amps, TDM-B,
+ * PDM array and the AXG DPCM sound card.
+ *
+ * Everything here is mainline 7.3 (sound/soc/meson/axg-*.c) plus the
+ * in-house codec drivers from mainline/drivers/audio (patches/linux/
+ * 0007..0009).  Vendor reference: sm1_s905x3_yandex.dts -
+ * i2c@1d000 codecs :2126-2164, auge_sound :4244, audiobus tdm@1 :2391,
+ * PDM pinctrl :1342.  Details and the userspace contract:
+ * mainline/docs/audio.md
+ * ------------------------------------------------------------------
+ */
+
+/*
+ * Audio clock controller and DDR arbiter.  Both are status = "disabled"
+ * in meson-sm1.dtsi while tdmif_b and every FIFO reference them, so
+ * without these two nodes the card and the DAIs defer forever.
+ */
+&clkc_audio {
+	status = "okay";
+};
+
+&arb {
+	status = "okay";
+};
+
+/*
+ * i2c2 = vendor i2c@1d000 (0xffd1d000), the codec bus; the vendor
+ * aliases say so explicitly (i2c2 = "/.../i2c@1d000").
+ *
+ * Pin conflict: i2c2_sda_z / i2c2_sck_z are GPIOZ_14/15, the same pads
+ * as the ethernet link/activity LEDs, which is why &ethmac above no
+ * longer claims eth_leds_pins (vendor DTS:380 removed it for the same
+ * reason).  The alternative group i2c2_sda_x/sck_x (GPIOX_17/18) is not
+ * usable either: GPIOX_17 is the RTL8822CS BT enable line.
+ */
+&i2c2 {
+	status = "okay";
+	pinctrl-0 = <&i2c2_sda_z_pins>, <&i2c2_sck_z_pins>;
+	pinctrl-names = "default";
+	/* vendor: 300 kHz (0x493e0); 100 kHz is the safe bring-up value */
+	clock-frequency = <100000>;
+
+	/*
+	 * ES8156 headphone DAC.  The sound-name-prefix is load-bearing:
+	 * userspace addresses "Headphone DAC Playback Volume" /
+	 * "Headphone Headphone Switch" and the card routes through the
+	 * "Headphone LOUT"/"Headphone ROUT" widgets.
+	 * hp-det: vendor GPIO 77 -> mainline GPIOX_11 (the vendor periphs
+	 * bank is one pin higher, see docs/audio.md section 5).
+	 */
+	es8156: audio-codec@8 {
+		compatible = "everest,es8156";
+		reg = <0x08>;
+		#sound-dai-cells = <0>;
+		sound-name-prefix = "Headphone";
+		hp-det-gpios = <&gpio GPIOX_11 GPIO_ACTIVE_HIGH>;
+		status = "okay";
+	};
+
+	/* SY6045S tweeter amp (L/R tweeters). */
+	sy6045s_tweeters: audio-codec@2a {
+		compatible = "silergy,sy6045s";
+		reg = <0x2a>;
+		#sound-dai-cells = <0>;
+		sound-name-prefix = "Tweeters";
+		vddio-supply = <&reg_3v3_d>;
+		pvdd-supply = <&reg_20v_amp>;
+		/* settings file lives in /lib/firmware */
+		firmware-name = "sy6045s-tweeters-settings.txt";
+		/* vendor "restore-regs": (addr, size, mask) triplets */
+		silergy,restore-regs = <0x07 0x01 0xff 0x06 0x01 0x08>;
+		status = "okay";
+	};
+
+	/* SY6045S woofer amp, PBTL bridged (subwoofer). */
+	sy6045s_woofer: audio-codec@2b {
+		compatible = "silergy,sy6045s";
+		reg = <0x2b>;
+		#sound-dai-cells = <0>;
+		sound-name-prefix = "Woofer";
+		vddio-supply = <&reg_3v3_d>;
+		pvdd-supply = <&reg_20v_amp>;
+		firmware-name = "sy6045s-woofer-settings.txt";
+		silergy,restore-regs = <0x07 0x01 0xff 0x06 0x01 0x08>;
+		pbtl-mode;
+		status = "okay";
+	};
+
+	/*
+	 * ES7210 mic ADC.  The vendor used "everest,es7210_2ch"; the 4ch
+	 * generic compatible is a superset and the driver limits itself by
+	 * the number of slots.  Prefix "Loopback" keeps the
+	 * "Loopback ADC1_MAX_GAIN" control names used by userspace.
+	 */
+	es7210: audio-codec@40 {
+		compatible = "everest,es7210";
+		reg = <0x40>;
+		#sound-dai-cells = <0>;
+		sound-name-prefix = "Loopback";
+		status = "okay";
+	};
+};
+
+/*
+ * TDM-B (vendor tdm@1) on the AO pads:
+ *   AO_8 = sclk, AO_7 = fs, AO_6 = dout2, AO_4 = din0, AO_9 = mclk0.
+ *
+ * The pinctrl groups only mux the pads to the audio function; the pad
+ * clock muxes in MST_PAD_CTRL0/1 select *which* master drives them and
+ * reset to MST_A.  They must be re-parented to MST_B, otherwise the
+ * pads stay silent.  This is the real replacement for the vendor
+ * /dev/mem poke in /etc/init.d/S03amplifiers and matches what
+ * meson-g12a-u200.dts does for TDM-B.  Pad mapping: TDM-B sclk =
+ * SCLK pad 1, lrclk = LRCLK pad 1, mclk = MCLK pad 0 (vendor
+ * mclk_pad = <0>).
+ */
+&tdmif_b {
+	pinctrl-0 = <&tdm_ao_b_sclk_pins>, <&tdm_ao_b_fs_pins>,
+		<&tdm_ao_b_dout2_pins>, <&tdm_ao_b_din0_pins>,
+		<&mclk0_ao_pins>;
+	pinctrl-names = "default";
+
+	assigned-clocks = <&clkc_audio AUD_CLKID_TDM_MCLK_PAD0>,
+		<&clkc_audio AUD_CLKID_TDM_SCLK_PAD1>,
+		<&clkc_audio AUD_CLKID_TDM_LRCLK_PAD1>;
+	assigned-clock-parents = <&clkc_audio AUD_CLKID_MST_B_MCLK>,
+		<&clkc_audio AUD_CLKID_MST_B_SCLK>,
+		<&clkc_audio AUD_CLKID_MST_B_LRCLK>;
+	assigned-clock-rates = <0>, <0>, <0>;
+	status = "okay";
+};
+
+&tdmout_b {
+	status = "okay";
+};
+
+&tdmin_b {
+	status = "okay";
+};
+
+/*
+ * DMA front-ends.  axg-card is a DPCM card, so only frddr/toddr links
+ * create PCM devices and they are numbered in this order:
+ *   PCM 0 playback -> FRDDR_A -> TDM-B
+ *   PCM 1 capture  <- TODDR_A <- TDMIN_B  (es7210)
+ *   PCM 2 capture  <- TODDR_B <- PDM
+ */
+&frddr_a {
+	status = "okay";
+};
+
+&toddr_a {
+	status = "okay";
+};
+
+&toddr_b {
+	status = "okay";
+};
+
+/*
+ * PDM array: GPIOC_0..3 = pdm_din0..3_c, GPIOC_4 = pdm_dclk_c, i.e.
+ * exactly the vendor "pdmin" pinctrl.  Nothing else in this DTS uses
+ * GPIOC_0..4: i2c0 takes GPIOC_5/6, the rotary encoder GPIOC_7, and the
+ * only other claimant (the disabled SD node) is never probed.
+ */
+&pdm {
+	pinctrl-0 = <&pdm_din0_c_pins>, <&pdm_din1_c_pins>,
+		<&pdm_din2_c_pins>, <&pdm_din3_c_pins>,
+		<&pdm_dclk_c_pins>;
+	pinctrl-names = "default";
+	status = "okay";
+};
+
+/ {
+	/*
+	 * Generic DMIC codec for the PDM link (sound/soc/codecs/dmic.c).
+	 * The prefix must not be "PDM": the controller itself already
+	 * carries sound-name-prefix = "PDM" in meson-sm1.dtsi and two DAPM
+	 * widgets cannot share a name.
+	 */
+	pdm_mics: audio-codec-pdm {
+		compatible = "dmic-codec";
+		#sound-dai-cells = <0>;
+		sound-name-prefix = "MIC";
+	};
+
+	sound {
+		compatible = "amlogic,axg-sound-card";
+		/* card short name: amixer -c AMLAUGESOUND, plughw:AMLAUGESOUND,0 */
+		model = "AML-AUGESOUND";
+
+		/* formatters have to be aux-devs so DAPM can route through them */
+		audio-aux-devs = <&tdmout_b>, <&tdmin_b>;
+		audio-widgets = "Headphone", "Headphones";
+
+		/*
+		 * Interconnect indices are fixed by the audio block: FRDDR_x
+		 * OUT n -> TDMOUT (0 = TDM-A, 1 = TDM-B, 2 = TDM-C, 3/4 =
+		 * SPDIF), TODDR_x IN n <- TDMIN_B (n = TDM interface index),
+		 * TODDR_x IN 4 <- PDM.
+		 */
+		audio-routing = "TDMOUT_B IN 0", "FRDDR_A OUT 1",
+			"TDM_B Playback", "TDMOUT_B OUT",
+			"TDMIN_B IN 1", "TDM_B Capture",
+			"TODDR_A IN 1", "TDMIN_B OUT",
+			"TODDR_B IN 4", "PDM Capture",
+			"Headphones", "Headphone LOUT",
+			"Headphones", "Headphone ROUT";
+
+		/*
+		 * PLL rates copied from meson-g12a-u200.dts: they give the
+		 * audio block exact 12.288/24.576 MHz multiples.  Verify with
+		 * /sys/kernel/debug/clk/clk_summary on the target; if another
+		 * consumer of MPLL0/1/2 shows up these numbers have to move.
+		 */
+		clocks = <&clkc CLKID_MPLL2>,
+			<&clkc CLKID_MPLL0>,
+			<&clkc CLKID_MPLL1>;
+		assigned-clocks = <&clkc CLKID_MPLL2>,
+			<&clkc CLKID_MPLL0>,
+			<&clkc CLKID_MPLL1>;
+		assigned-clock-rates = <294912000>,
+			<270950400>,
+			<393216000>;
+
+		dai-link-0 {
+			sound-dai = <&frddr_a>;     /* PCM 0 playback */
+		};
+
+		dai-link-1 {
+			sound-dai = <&toddr_a>;     /* PCM 1 capture */
+		};
+
+		dai-link-2 {
+			sound-dai = <&toddr_b>;     /* PCM 2 capture */
+		};
+
+		/*
+		 * TDM-B backend: one bus, four codecs.  Slot masks are per
+		 * lane: vendor dai-tdm-lane-slot-mask-out = <0 0 1 0> becomes
+		 * tx-mask-2 (lane 2 = AO_6/dout2) and -in = <1 0 0 0> becomes
+		 * rx-mask-0 (lane 0 = AO_4/din0).
+		 */
+		dai-link-3 {
+			sound-dai = <&tdmif_b>;
+			dai-format = "i2s";
+			mclk-fs = <256>;
+			dai-tdm-slot-num = <2>;
+			dai-tdm-slot-width = <32>;
+			dai-tdm-slot-tx-mask-2 = <1 1>;
+			dai-tdm-slot-rx-mask-0 = <1 1>;
+
+			codec-0 {
+				sound-dai = <&sy6045s_woofer>;
+			};
+			codec-1 {
+				sound-dai = <&sy6045s_tweeters>;
+			};
+			codec-2 {
+				sound-dai = <&es8156>;
+			};
+			codec-3 {
+				/* capture side of the same I2S bus */
+				sound-dai = <&es7210>;
+			};
+		};
+
+		/*
+		 * PDM backend.  No mclk-fs here: axg-pdm derives DCLK/SYSCLK
+		 * from the stream rate in hw_params and the property would only
+		 * be read for tdm-iface links.
+		 */
+		dai-link-4 {
+			sound-dai = <&pdm>;
+
+			codec {
+				sound-dai = <&pdm_mics>;
+			};
+		};
+	};
 };
