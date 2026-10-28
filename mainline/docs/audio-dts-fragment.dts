@@ -1,0 +1,325 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/*
+ * Yandex Station Max (Amlogic S905X3 / SM1) - audio DTS fragment
+ * Target: Linux 7.3 mainline (sound/soc/meson + in-house codec drivers)
+ *
+ * This file is DOCUMENTATION, not a compilable overlay: it is the exact
+ * set of nodes/changes the board DTS (mainline/dts/..., owned separately)
+ * needs.  Merge it by hand, do not include it.
+ *
+ * Legend
+ *   [M]  supported by mainline 7.3 as-is (driver + DT binding exist)
+ *   [N]  needs the new in-house drivers described in docs/audio.md
+ *   [V]  vendor-only, must NOT be copied (userspace /dev/mem poke, etc.)
+ *
+ * Vendor reference: tools/fw_builder/overlay/dts/sm1_s905x3_yandex.dts
+ *   auge_sound        :4244, i2c@1d000 codecs :2126-2164,
+ *   audiobus@ff660000 :2391 (tdm@1 = TDM-B, pdm), pdmin pinctrl :1342
+ *
+ * GPIO numbering: the vendor dt-bindings start the periphs bank one pin
+ * earlier (GPIOV_0 = 0, meson-g12a-gpio.h:31 of the vendor tree), so
+ *     mainline_pin = vendor_pin - 1        (periphs banks only)
+ *     AO bank numbering is identical.
+ * e.g. vendor hp-det 0x4d (77) -> GPIOX_11 (76), vendor 20V_AMPL 0x4b
+ * (75) -> GPIOX_9 (74) = &reg_20v_amp in the board DTS.
+ */
+
+/* ------------------------------------------------------------------ */
+/* 0. Rails                                                            */
+/* ------------------------------------------------------------------ */
+/*
+ * &reg_20v_amp already exists in the board DTS (GPIOX_9, always-on,
+ * pvdd of both sy6045s).  The 3V3_D rail feeding the codecs' vddio was
+ * a separate always-on fixed regulator in the vendor DT
+ * (fixedregulator-3v3d, vendor DTS:4417).  If the board DTS does not
+ * define it yet, add:
+ *
+ *	reg_3v3d: regulator-3v3d {
+ *		compatible = "regulator-fixed";
+ *		regulator-name = "3V3_D";
+ *		regulator-min-microvolt = <3300000>;
+ *		regulator-max-microvolt = <3300000>;
+ *		regulator-always-on;
+ *	};
+ */
+
+/* ------------------------------------------------------------------ */
+/* 1. Codec I2C bus - vendor "i2c@1d000" -> mainline i2c2              */
+/*    (0xffd1d000; vendor used the "i2c2_sda_z/i2c2_sck_z" pinmux)     */
+/*    [M] i2c2: arch/arm64/boot/dts/amlogic/meson-g12-common.dtsi:2366  */
+/* ------------------------------------------------------------------ */
+&i2c2 {
+	status = "okay";
+	pinctrl-0 = <&i2c2_sda_z_pins>, <&i2c2_sck_z_pins>;
+	pinctrl-names = "default";
+	clock-frequency = <100000>;
+
+	/* [N] Everest ES8156 headphone DAC - no mainline driver.
+	 * sound-name-prefix is load-bearing: userspace
+	 * (/usr/lib/atrios/audio) addresses the controls by name
+	 * "Headphone DAC Playback Volume" / "Headphone Headphone Switch".
+	 */
+	es8156: audio-codec@8 {
+		compatible = "everest,es8156";
+		reg = <0x08>;
+		#sound-dai-cells = <0>;
+		sound-name-prefix = "Headphone";
+		/* vendor DT had no supply on this node */
+		/* jack detect: vendor aml-audio-card,hp-det-gpio = <&gpio 77 0>
+		 * (vendor numbering) -> GPIOX_11, active high in the vendor DT */
+		hp-det-gpios = <&gpio GPIOX_11 GPIO_ACTIVE_HIGH>;
+		status = "okay";
+	};
+
+	/* [N] Silergy SY6045S tweeter amp (L/R tweeters) - new driver */
+	sy6045s_tweeters: audio-codec@2a {
+		compatible = "silergy,sy6045s";
+		reg = <0x2a>;
+		#sound-dai-cells = <0>;
+		sound-name-prefix = "Tweeters";
+		vddio-supply = <&reg_3v3d>;
+		pvdd-supply = <&reg_20v_amp>;
+		/* vendor property was "firmware"; the new driver should accept
+		 * both, the file lives in /lib/firmware */
+		firmware-name = "sy6045s-tweeters-settings.txt";
+		/* vendor: restore-regs = <0x07 0x01 0xff 0x06 0x01 0x08>
+		 * = (addr, size, mask) triplets, see docs/audio.md */
+		silergy,restore-regs = <0x07 0x01 0xff 0x06 0x01 0x08>;
+		/* no reset/fault GPIO in the vendor DT */
+		status = "okay";
+	};
+
+	/* [N] Silergy SY6045S woofer amp (PBTL, subwoofer) - new driver */
+	sy6045s_woofer: audio-codec@2b {
+		compatible = "silergy,sy6045s";
+		reg = <0x2b>;
+		#sound-dai-cells = <0>;
+		sound-name-prefix = "Woofer";
+		vddio-supply = <&reg_3v3d>;
+		pvdd-supply = <&reg_20v_amp>;
+		firmware-name = "sy6045s-woofer-settings.txt";
+		silergy,restore-regs = <0x07 0x01 0xff 0x06 0x01 0x08>;
+		pbtl-mode;
+		status = "okay";
+	};
+
+	/* [N] Everest ES7210 mic ADC - no mainline driver.
+	 * The vendor used the 2-channel variant ("everest,es7210_2ch");
+	 * ALSA only exposes Loopback ADC1/ADC2 gain controls, which is why
+	 * the state file has no ADC3/ADC4 entries.  Keep the prefix
+	 * "Loopback" for userspace compatibility.
+	 */
+	es7210: audio-codec@40 {
+		compatible = "everest,es7210";
+		reg = <0x40>;
+		#sound-dai-cells = <0>;
+		sound-name-prefix = "Loopback";
+		/* the vendor userspace mentions a second chip at 0x43 for the
+		 * 8-ch array - NOT present in the vendor DT, needs a probe */
+		status = "okay";
+	};
+};
+
+/* ------------------------------------------------------------------ */
+/* 2. TDM-B (vendor tdm@1)                      [M]                   */
+/*    CPU side: sound/soc/meson/axg-tdm-interface.c (amlogic,axg-tdm-iface,*/
+/*    meson-sm1.dtsi:27 tdmif_b), formatters axg-tdmin.c:243 /          */
+/*    axg-tdmout.c:322 (amlogic,sm1-tdmin / sm1-tdmout)                 */
+/*                                                                     */
+/*    Pads are the AO bank (vendor: tdmb_sclk_ao/fs_ao/dout2_ao/        */
+/*    din0_ao/mclk0_ao).  All groups exist in mainline:                */
+/*    drivers/pinctrl/meson/pinctrl-meson-g12a.c:867-880 and            */
+/*    meson-g12-common.dtsi:1774 (ao_pinctrl).                          */
+/*      GPIOAO_8 = sclk, AO_7 = fs, AO_6 = dout2, AO_4 = din0,          */
+/*      AO_9 = mclk0                                                    */
+/* ------------------------------------------------------------------ */
+&tdmif_b {
+	pinctrl-0 = <&tdm_ao_b_sclk_pins>, <&tdm_ao_b_fs_pins>,
+		    <&tdm_ao_b_dout2_pins>, <&tdm_ao_b_din0_pins>,
+		    <&mclk0_ao_pins>;
+	pinctrl-names = "default";
+	/* TDM-B stays bitclock+frame master (mainline default when no
+	 * bitclock-master/frame-master property is given) */
+	status = "okay";
+};
+
+&tdmout_b {
+	status = "okay";
+};
+
+&tdmin_b {
+	status = "okay";
+};
+
+/* DMA front-ends: these are what actually create PCM devices.
+ * mainline is a DPCM card - the TDM-B and PDM links are no_pcm
+ * (axg-card.c:346), so PCM numbering follows the FE order below.
+ */
+&frddr_a {
+	status = "okay";	/* PCM 0: playback -> TDM-B */
+};
+
+&toddr_a {
+	status = "okay";	/* PCM 1: capture  <- TDM-B (es7210) */
+};
+
+&toddr_b {
+	status = "okay";	/* PCM 2: capture  <- PDM */
+};
+
+/* ------------------------------------------------------------------ */
+/* 3. PDM microphone array                      [M] (untested on SM1) */
+/*    sound/soc/meson/axg-pdm.c (amlogic,sm1-pdm -> amlogic,axg-pdm),  */
+/*    node meson-sm1.dtsi:496.  Pins: GPIOC_0..4 as "pdm_din0..3_c"/   */
+/*    "pdm_dclk_c" (pinctrl-meson-g12a.c:353), pin nodes in            */
+/*    meson-g12-common.dtsi:627-780.                                   */
+/*    Vendor: pdmin pinctrl (vendor DTS:1342) = exactly these 5 pads.  */
+/* ------------------------------------------------------------------ */
+&pdm {
+	pinctrl-0 = <&pdm_din0_c_pins>, <&pdm_din1_c_pins>,
+		    <&pdm_din2_c_pins>, <&pdm_din3_c_pins>,
+		    <&pdm_dclk_c_pins>;
+	pinctrl-names = "default";
+	status = "okay";
+};
+
+/* ------------------------------------------------------------------ */
+/* 4. Codec stub for the PDM link + the sound card                     */
+/* ------------------------------------------------------------------ */
+/ {
+	/* [M] generic DMIC codec (sound/soc/codecs/dmic.c); it has no
+	 * register interface, it just declares the capture DAI. */
+	pdm_mics: audio-codec-pdm {
+		compatible = "dmic-codec";
+		#sound-dai-cells = <0>;
+		/* NOT "PDM": the controller itself is already prefixed
+		 * "PDM" (meson-sm1.dtsi:500) and the DAPM widget name
+		 * "PDM Capture" in audio-routing refers to the controller.
+		 * Two widgets cannot share a name. */
+		sound-name-prefix = "MIC";
+	};
+
+	sound {
+		compatible = "amlogic,axg-sound-card";
+		/* `model` becomes the card short name: userspace uses
+		 * amixer -c AMLAUGESOUND and plughw:AMLAUGESOUND,<dev> */
+		model = "AML-AUGESOUND";
+
+		/* Formatters must be aux-devs so DAPM can route through them */
+		audio-aux-devs = <&tdmout_b>, <&tdmin_b>;
+
+		audio-widgets = "Headphone", "Headphones";
+
+		/*
+		 * TDM-B routing.
+		 *   FRDDR_A OUT 1 -> TDMOUT_B   (OUT index is the fixed
+		 *   interconnect line: 0 = TDM-A, 1 = TDM-B, 2 = TDM-C,
+		 *   3/4 = SPDIF, same as meson-g12a-u200.dts)
+		 *   TDMIN_B OUT  -> TODDR_A IN 1
+		 *   PDM          -> TODDR_B IN 4
+		 * The physical lane (AO_6 = dout2) is not selected here: it is
+		 * set by dai-tdm-slot-tx-mask-2 on the TDM-B link below.
+		 */
+		audio-routing = "TDMOUT_B IN 0", "FRDDR_A OUT 1",
+				"TDM_B Playback", "TDMOUT_B OUT",
+				/* TDMIN input index = TDM interface index
+				 * (A=0, B=1, C=2), cf. meson-g12a-u200.dts */
+				"TDMIN_B IN 1", "TDM_B Capture",
+				/* TODDR input index = TDMIN block index */
+				"TODDR_A IN 1", "TDMIN_B OUT",
+				"TODDR_B IN 4", "PDM Capture",
+				/* hp jack: sink/source names come from the new
+				 * es8156 driver; vendor used "Headphone LOUT/ROUT"
+				 * and the card routing
+				 * "Headphones" <- "Headphone LOUT"/"Headphone ROUT"
+				 * (vendor DTS:4248-4249).  Adjust to the widget
+				 * names the driver ends up exposing. */
+				"Headphones", "Headphone LOUT",
+				"Headphones", "Headphone ROUT";
+
+		/* 24.576 MHz / 12.288 MHz MCLK sources, copied from
+		 * meson-g12a-u200.dts; verify with
+		 * /sys/kernel/debug/clk/clk_summary on the target */
+		clocks = <&clkc CLKID_MPLL2>,
+			 <&clkc CLKID_MPLL0>,
+			 <&clkc CLKID_MPLL1>;
+		assigned-clocks = <&clkc CLKID_MPLL2>,
+				  <&clkc CLKID_MPLL0>,
+				  <&clkc CLKID_MPLL1>;
+		assigned-clock-rates = <294912000>,
+				       <270950400>,
+				       <393216000>;
+
+		/* ---- PCM front-ends (axg-card.c: meson_card_set_fe_link) ---- */
+		dai-link-0 {
+			sound-dai = <&frddr_a>;		/* /dev/snd/pcmC0D0p */
+		};
+
+		dai-link-1 {
+			sound-dai = <&toddr_a>;		/* /dev/snd/pcmC0D1c */
+		};
+
+		dai-link-2 {
+			sound-dai = <&toddr_b>;		/* /dev/snd/pcmC0D2c */
+		};
+
+		/* ---- TDM-B backend: one PCM on the bus, 4 codecs ---- */
+		dai-link-3 {
+			sound-dai = <&tdmif_b>;
+			dai-format = "i2s";		/* vendor: format = "i2s" */
+			mclk-fs = <256>;		/* vendor mclk-fs = 0x100 */
+			dai-tdm-slot-num = <2>;
+			dai-tdm-slot-width = <32>;
+			/* vendor: dai-tdm-lane-slot-mask-out = <0 0 1 0>
+			 *         dai-tdm-lane-slot-mask-in  = <1 0 0 0>
+			 * -> playback on lane 2 (AO_6/dout2), capture on
+			 *    lane 0 (AO_4/din0).  mainline syntax: one
+			 *    property per lane, value = slot bitmask (2 slots
+			 *    => <1 1>), see axg-card.c:175 */
+			dai-tdm-slot-tx-mask-2 = <1 1>;
+			dai-tdm-slot-rx-mask-0 = <1 1>;
+
+			codec-0 {
+				sound-dai = <&sy6045s_woofer>;	/* [N] */
+			};
+			codec-1 {
+				sound-dai = <&sy6045s_tweeters>;/* [N] */
+			};
+			codec-2 {
+				sound-dai = <&es8156>;		/* [N] */
+			};
+			codec-3 {
+				/* capture side of the same I2S bus */
+				sound-dai = <&es7210>;		/* [N] */
+			};
+		};
+
+		/* ---- PDM backend ---- */
+		dai-link-4 {
+			sound-dai = <&pdm>;
+			mclk-fs = <128>;	/* vendor: 0x80 */
+			codec {
+				sound-dai = <&pdm_mics>;
+			};
+		};
+
+		/* Optional, later: TDM-C -> tohdmitx (HDMI audio) and
+		 * SPDIF-B out, both [M] (meson-sm1.dtsi:430, :455,
+		 * sound/soc/meson/g12a-tohdmitx.c).  The vendor card had them
+		 * as PCM devices 2 (SPDIF-B) and 3 (TDM-C); on mainline they
+		 * would be BE links (no PCM of their own). */
+	};
+};
+
+/*
+ * Things deliberately NOT here:
+ *   - aml-audio-card,* properties, prefix-names, "firmware", "pbtl-mode"
+ *     on the card node: vendor-only card driver bindings.
+ *   - "SPK mute" / "Audio Power Save" kcontrols: they came from the
+ *     vendor card and PDM drivers.  check_audio.sh skips "SPK mute" when
+ *     absent (usr/lib/atrios/check_audio.sh:367).
+ *   - the /dev/mem poke of 0xff660020/0xff660024 that
+ *     /etc/init.d/S03amplifiers does on the vendor kernel: mainline's
+ *     audio clock driver owns MST_PAD_CTRL0/1 for SM1
+ *     (drivers/clk/meson/axg-audio.c:71-72, :867-881).  [V]
+ */

@@ -30,12 +30,119 @@ Porting order (agreed): everything else first, Wi-Fi last.
 
 | Block | Vendor driver | Mainline plan | State |
 |---|---|---|---|
-| LED ring (24 RGB) | `leds-is31fl32xx` + `quasar_led_ring` | upstream `leds-is31fl32xx` + `ledtrig-ringfb` | in progress |
-| Front LED matrix 25x16 | `gowin_led_device` + `quasar_led_screen` | new SPI driver | planned |
-| Rotary volume | `rotary-volume` | port to input subsystem | planned |
-| Ambient light | `ltr308als01` | upstream `ltrf216a` alias | in progress |
+| LED ring (24 RGB) | `leds-is31fl32xx` + `quasar_led_ring` | upstream `leds-is31fl32xx` patch + `ledtrig-ringfb` | driver written, patches apply to v7.3 |
+| Front LED matrix 25x16 | `gowin_led_device` + `quasar_led_screen` | new SPI driver, dual PA/SA backend | driver written, needs hardware test |
+| Buttons / mic mute | `amlogic,gpio_keypad` | `atrios-keypad` (polled, debounce) | driver built and checkpatch-clean |
+| Rotary volume | `rotary-volume` | `rotary-volume` input driver | driver written, patch applies |
+| Ambient light | `ltr308als01` | upstream `ltrf216a` (`liteon,ltr308`) | no driver work needed |
 | PCBA ids | `quasar_pcba_ids` | nvmem/at24 + userspace | planned |
 | Zigbee | `zigbee-control` | new serdev driver | planned |
-| Audio | AML auge + es7210/es8156/sy6045s | ASoC meson + codecs | planned |
-| Bluetooth | `88x2es`? no, `bt-dev` + H5 | `btrtl` + `hci_h5` | planned |
-| Wi-Fi | `88x2es` (RTL8822ES) | rtw88 backend | **last** |
+| Audio | AML auge + es7210/es8156/sy6045s | ASoC meson + three ported codecs | codecs in progress |
+| Bluetooth | `bt-dev` + vendor H5 | `btrtl` + `hci_h5` | plan + DTS/CONFIG ready; firmware project-id blocker |
+| Wi-Fi | `88x2es` (RTL8822ES) | rtw88 `rtw8822e` stage (a)/(b) | **last**, dossier ready |
+
+## Сборка (build)
+
+Everything is driven by five scripts (`scripts/lib.sh` is shared helpers); the
+only state outside this checkout is `$SRC_DIR` (sources) and `mainline/out/`
+(artifacts). Nothing is wired into the vendor build.
+
+### Dependencies (Ubuntu 24.04+ / Debian)
+
+```sh
+sudo apt-get install -y build-essential gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+    bison flex libssl-dev libncurses-dev bc device-tree-compiler python3 \
+    xz-utils bzip2 curl git patch kmod rsync
+```
+
+`shellcheck` is optional and only used by `scripts/*.sh` linting.
+
+A cross compiler is auto-detected (`aarch64-linux-gnu-gcc` is preferred); set
+`CROSS_COMPILE=/path/to/prefix-` (trailing dash) to override. Building the
+kernel or U-Boot with a host-only compiler is rejected.
+
+### One command
+
+```sh
+mainline/scripts/build-all.sh            # fetch, apply, kernel, u-boot
+mainline/scripts/build-all.sh --dry-run  # print the plan, build nothing
+mainline/scripts/build-all.sh --skip-uboot -j 8
+```
+
+Every step is idempotent, so re-running after a failure only redoes what is
+missing. A full build has not been run in this repository yet (sources are
+downloaded on demand); the scripts themselves are linted (`bash -n`,
+`shellcheck`) on every change.
+
+### Steps
+
+| Script | What it does |
+|---|---|
+| `scripts/fetch-sources.sh` | Linux 7.3 tarball from kernel.org (sha256 + size pinned, resumable) and U-Boot v2026.10 via `git clone --depth 1` (the release tarballs omit `dts/upstream`, which `CONFIG_OF_UPSTREAM=y` boards need) |
+| `scripts/apply.sh` | board DTS + non-upstream drivers + `patches/linux/*.patch` into the kernel tree; defconfig, board DTS (`dts/upstream/src/arm64/...`) and `board/` into the U-Boot tree; patches already applied are detected and skipped |
+| `scripts/build-kernel.sh` | `defconfig` + `configs/atrios.config`, `make Image.gz dtbs modules`, artifacts in `out/linux/` |
+| `scripts/build-uboot.sh` | board defconfig + `make`, `out/uboot/u-boot.bin` |
+| `scripts/build-all.sh` | runs the four in order and prints artifacts with sha256 |
+
+Useful individual runs:
+
+```sh
+mainline/scripts/fetch-sources.sh --dry-run
+mainline/scripts/apply.sh --kernel-only
+mainline/scripts/build-kernel.sh -j "$(nproc)" --strict
+mainline/scripts/build-uboot.sh --dry-run
+```
+
+`apply.sh` also wires the non-upstream drivers that upstream Kconfig/Makefiles
+cannot know about (today: `LEDS_TRIGGER_RINGFB`). Other copied drivers are
+reported as warnings until their Kconfig entry exists. Applied patches are
+recorded in `<tree>/.atrios-mainline-patches`, which is what makes re-runs
+idempotent for patches that create files; delete that file only after
+resetting the tree. A patch that no longer applies aborts the step without
+touching the tree (`PATCH_SKIP=0002-*` is the documented escape hatch while a
+patch is being refreshed).
+
+### Output
+
+```
+mainline/out/linux/Image.gz
+mainline/out/linux/meson-sm1-yandex-station-max.dtb
+mainline/out/linux/modules.tar
+mainline/out/uboot/u-boot.bin (+ u-boot.dtb, u-boot-nodtb.bin)
+```
+
+The Amlogic FIP (BL2/BL31 packaging) is built separately and is not part of
+these scripts.
+
+### Environment variables
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `SRC_DIR` | `/home/leftymods/mainline-src` | tarballs and unpacked trees |
+| `OUT_DIR` | `mainline/out` | artifacts |
+| `KVER` | `7.3` | kernel version |
+| `UBOOT_VER` | `2026.10` | U-Boot version |
+| `CROSS_COMPILE` | auto | toolchain prefix |
+| `JOBS` | `nproc` | parallel jobs |
+| `LINUX_SHA256` | pinned in `fetch-sources.sh` | kernel tarball hash (kernel.org) |
+| `UBOOT_SHA256` | empty | pin the U-Boot source hash; `--strict` requires it |
+| `UBOOT_USE_TARBALL` | `0` | `1` = tarball instead of git clone (needs `dts/upstream`) |
+| `PATCH_FUZZ` | `0` | fuzz levels for `patch(1)` when offsets move |
+| `PATCH_SKIP` | empty | space-separated patch names/globs to skip (e.g. `0002-*`) |
+| `LINUX_DIR` / `UBOOT_DIR` | `$SRC_DIR/...` | override the trees directly |
+| `BOARD_DTB` | `meson-sm1-yandex-station-max.dtb` | expected kernel DTB |
+| `DEPMOD` | `depmod` (or `true`) | depmod binary used by `modules_install` |
+| `BL31` | unset | passed to U-Boot when set |
+
+### Notes
+
+- The kernel tarball is verified against the kernel.org `sha256sums.asc`
+  value (`87363c24…4953`). U-Boot publishes no hash for the GitHub tag, so
+  the computed sha256 is printed; pin it in `UBOOT_SHA256` for a fully
+  reproducible build.
+- The board defconfig targets `dts/upstream/src/arm64/amlogic/`, so the U-Boot
+  tree must be a git checkout (or an archive that contains `dts/upstream`).
+- `configs/atrios.config` lists the symbol names that actually exist in Linux
+  7.3; comment lines record the ones that do not (`GPIO_MESON`,
+  `MMC_SDHCI_MESON`, `IIO_LTRF216A`, `MESON_DW_HDMI`, `BT_HCIUART_MESON`,
+  `INPUT_ROTARY_VOLUME`).

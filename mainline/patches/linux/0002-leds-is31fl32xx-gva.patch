@@ -1,0 +1,67 @@
+--- a/drivers/leds/leds-is31fl32xx.c
++++ b/drivers/leds/leds-is31fl32xx.c
+@@ -61,6 +61,7 @@
+ 	const struct is31fl32xx_chipdef *cdef;
+ 	struct i2c_client *client;
+ 	unsigned int num_leds;
++	u32 max_brightness_scale;
+ 	struct is31fl32xx_led_data leds[];
+ };
+ 
+@@ -386,6 +387,9 @@
+ 	u32 reg;
+ 
+ 	ret = of_property_read_u32(child, "reg", &reg);
++	if (ret)
++		ret = of_property_read_u32(child, "reg_offset", &reg);
++
+ 	if (ret || reg < 1 || reg > led_data->priv->cdef->channels) {
+ 		dev_err(dev,
+ 			"Child node %pOF does not have a valid reg property\n",
+@@ -419,6 +423,7 @@
+ 			       struct is31fl32xx_priv *priv)
+ {
+ 	const struct is31fl32xx_chipdef *cdef = priv->cdef;
++	u32 max_brightness_scale = 0;
+ 	int ret = 0;
+ 
+ 	if ((cdef->output_frequency_setting_reg != IS31FL32XX_REG_NONE) &&
+@@ -433,6 +438,20 @@
+ 		}
+ 	}
+ 
++	/*
++	 * Optional vendor property limiting the maximum brightness of every
++	 * channel. Chips without a brightness_steps description (0) use the
++	 * full 8-bit range.
++	 */
++	priv->max_brightness_scale = cdef->brightness_steps ?
++				     cdef->brightness_steps - 1 : 255;
++
++	if (!of_property_read_u32(dev_of_node(dev), "max-brightness-scale",
++				  &max_brightness_scale) &&
++	    max_brightness_scale > 0 &&
++	    max_brightness_scale <= priv->max_brightness_scale)
++		priv->max_brightness_scale = max_brightness_scale;
++
+ 	for_each_available_child_of_node_scoped(dev_of_node(dev), child) {
+ 		struct led_init_data init_data = {};
+ 		struct is31fl32xx_led_data *led_data =
+@@ -440,7 +459,7 @@
+ 		const struct is31fl32xx_led_data *other_led_data;
+ 
+ 		led_data->priv = priv;
+-		led_data->cdev.max_brightness = priv->cdef->brightness_steps - 1;
++		led_data->cdev.max_brightness = priv->max_brightness_scale;
+ 
+ 		ret = is31fl32xx_parse_child_dt(dev, child, led_data);
+ 		if (ret)
+@@ -556,6 +575,8 @@
+ 	{ .compatible = "issi,is31fl3293",  .data = &is31fl3293_cdef, },
+ 	{ .compatible = "issi,is31fl3236",  .data = &is31fl3236_cdef, },
+ 	{ .compatible = "issi,is31fl3236a", .data = &is31fl3236a_cdef, },
++	{ .compatible = "issi,is31fl3236,gva",
++	  .data = &is31fl3236a_cdef, },
+ 	{ .compatible = "issi,is31fl3235",  .data = &is31fl3235_cdef, },
+ 	{ .compatible = "issi,is31fl3218",  .data = &is31fl3218_cdef, },
+ 	{ .compatible = "si-en,sn3218",     .data = &is31fl3218_cdef, },

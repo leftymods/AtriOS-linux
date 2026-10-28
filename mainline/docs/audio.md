@@ -1,0 +1,418 @@
+# Audio: TDM-B, PDM, codecs (Linux 7.3)
+
+Audio is item 7 of the porting plan (`docs/porting-plan.md`).  There are
+three independent problems and they must not be mixed up:
+
+1. **SoC side (TDM-B / PDM / audio clocks)** - works in mainline 7.3,
+   nothing needs to be written, only DTS.
+2. **Codec drivers** - `es7210`, `es8156` and `sy6045s` do **not** exist
+   in mainline.  The first two must be ported, `sy6045s` must be written
+   from scratch (there is no other board using it).
+3. **Userspace contract** - control names, PCM numbers and one
+   `/dev/mem` hack in `/etc/init.d/S03amplifiers` that must be dropped.
+
+Verified against `torvalds/linux` master, which is **v7.3.0** right now
+(`Makefile`: `VERSION = 7`, `PATCHLEVEL = 3`, `NAME = "Baby Opossum
+Posse"`), date of this document 2026-10-28.
+
+The DTS to merge is `docs/audio-dts-fragment.dts`.
+Vendor reference: `tools/fw_builder/overlay/dts/sm1_s905x3_yandex.dts`
+(line numbers below refer to the decompiled copy).
+
+## Status table
+
+| Block | Vendor (4.9.113) | Mainline 7.3 driver | Status |
+|---|---|---|---|
+| TDM-B controller (`tdm@1`, `amlogic,sm1-snd-tdmb`) | built into the vendor kernel | `sound/soc/meson/axg-tdmin.c` (`amlogic,sm1-tdmin`, :243), `axg-tdmout.c` (:322), `axg-tdm-interface.c` (:522, `amlogic,axg-tdm-iface`) | **supported**, DTS only |
+| Audio clock block + pad routing (`audio_clocks`, `MST_PAD_CTRL0/1`) | `amlogic,sm1-audio-clocks` | `drivers/clk/meson/axg-audio.c` (`amlogic,sm1-audio-clkc`), SM1 pad offsets at :71-72 | **supported**; vendor needed a userspace `/dev/mem` workaround (see below) |
+| FIFOs (FRDDR/TODDR) | `amlogic,sm1-snd-tdma*` | `axg-frddr.c`, `axg-toddr.c` via `meson-sm1.dtsi` | **supported** |
+| ASoC card (`auge_sound`) | `amlogic,tl1-sound-card` (vendor driver) | `sound/soc/meson/axg-card.c` (`amlogic,axg-sound-card`) | **supported**, different link model (DPCM) |
+| PDM controller | `amlogic,sm1-snd-pdm` | `sound/soc/meson/axg-pdm.c` via `meson-sm1.dtsi:496` (`amlogic,sm1-pdm` -> `amlogic,axg-pdm`) | **present in DTS, unverified on SM1** |
+| PDM DC offset control `PDM HCIC shift gain (~ 6dB * value)` | vendor PDM driver, default `2` | absent (AXG filter constants are hardcoded, `axg-pdm.c:540`) | **gap** (level/response may differ) |
+| `es8156` headphone DAC (I2C 0x08) | `snd-soc-es8156.ko` | **none** | **write/port driver** |
+| `es7210` mic ADC (I2C 0x40, vendor used `es7210_2ch`) | `snd-soc-es7210.ko` | **none** | **write/port driver** |
+| `sy6045s` amps (I2C 0x2a tweeters, 0x2b woofer PBTL) | `snd-soc-sy6045s.ko` | **none** | **new driver** (biggest item) |
+| TDM-C -> HDMI (`tdm@2` / `i2s2hdmi`) | vendor | `g12a-tohdmitx.c` (`amlogic,sm1-tohdmitx`, `meson-sm1.dtsi:455`) | supported, not wired on this board yet |
+| SPDIF-B out (`spdif@1`) | vendor | `axg-spdifout.c` | supported, optional |
+| `pcm1774`, `tas5825m`, `tlv320adc3101` modules | shipped in the image | none of them are upstream (`tas5825m` is **not** in 7.3; only `tas5805m.c` is); they are not in the vendor DT either | ignore |
+
+## 1. What mainline 7.3 confirms
+
+* **SM1 is a G12A-family audio block.** `meson-sm1.dtsi` has the whole
+  bus: `audio: bus@60000` (:179) with `clkc_audio` (:186), 3 TODDRs,
+  3 FRDDRs (+TODDR_D), `tdmin_a/b/c` + `tdmin_lb` (:313-358),
+  `tdmout_a/b/c` (:400-430), `toacodec` (:445), `tohdmitx` (:455),
+  `pdm` (:496), and the three `tdmif_a/b/c` pads at root (:16-44).
+  Everything is `status = "disabled"`, the board has to enable it.
+* **TDM-B pads are on the AO bank in mainline.** The vendor muxes
+  `tdmb_sclk_ao / tdmb_fs_ao / tdmb_dout2_ao / tdmb_din0_ao / mclk0_ao`
+  (vendor DTS:1342 for PDM, and tdm@1 `pinctrl-0 = <0x122 0x123 0x124>`
+  at :2435).  Mainline has exactly these groups under `ao_pinctrl`:
+  `tdm_ao_b_sclk` = GPIOAO_8, `_fs` = AO_7, `_dout2` = AO_6,
+  `_din0` = AO_4, `mclk0_ao` = AO_9
+  (`drivers/pinctrl/meson/pinctrl-meson-g12a.c:867-880`, pin nodes in
+  `meson-g12-common.dtsi:1774+`).
+  Note AO_4 carries *both* `tdm_ao_b_din0` (mux 6) and `tdm_ao_b_dout0`
+  (mux 5); the board uses AO_4 as **input** and AO_6 as **output**.
+* **PDM pins** `pdm_din0_c..pdm_din3_c` = GPIOC_0..3 and `pdm_dclk_c` =
+  GPIOC_4 exist in mainline (`pinctrl-meson-g12a.c:353-357`, pin nodes
+  `meson-g12-common.dtsi:627-780`), and the PDM block is modelled as
+  `amlogic,sm1-pdm` with the AXG driver.  GPIOZ/AO are not involved.
+* **The pad-clock workaround is obsolete.** `/etc/init.d/S03amplifiers`
+  pokes `0xff660024 = 0x01110111` and `0xff660020 = 0x00000011` through
+  `/dev/mem` because *on the vendor kernel* only the MCLK pad got routed
+  to `mst_b` and SCLK/LRCLK stayed on `mst_a`.  Mainline models
+  `MST_PAD_CTRL0/1` as clock muxes with SM1-specific offsets
+  (`drivers/clk/meson/axg-audio.c:71-72`, SM1 pad clocks at :867-881), so
+  `tdmif_b` with `sclk`/`lrclk`/`mclk` (`meson-sm1.dtsi:27-37`) routes
+  the pads by itself.  **The S03 poke must be removed/disabled on
+  mainline.**
+* **Card model.** `axg-card.c` is a DPCM card: `frddr`/`toddr` links
+  become front-ends with real PCM devices (`meson-card-utils.c`,
+  `meson_card_set_fe_link`), any other link (tdmif, pdm, spdif) is a
+  backend with `no_pcm = 1` (`axg-card.c:346`).  TDM slot masks are per
+  lane: `dai-tdm-slot-tx-mask-<lane>` / `-rx-mask-<lane>` parsed at
+  `axg-card.c:175`.  This is the single most important difference from
+  the vendor card, where one dai-link *was* the PCM.
+* **No SM1-specific card/clock driver is needed** - `sound/soc/meson/Makefile`
+  has no `sm1-*` object; SM1 support rides on the AXG/G12A ones.
+
+## 2. What is missing (and how bad it is)
+
+| Driver | Upstream? | Work |
+|---|---|---|
+| `es8156` (hp DAC, 0x08) | no (`sound/soc/codecs/` has no `es8156.c`; `Kconfig` has no `SND_SOC_ES8156`) | small regmap codec, ~600 lines |
+| `es7210` (mic ADC, 0x40) | no (no `es7210.c`, no `SND_SOC_ES7210`; only `es7134`, `es7241`, `es8311/16/23/26/28/75/89` exist) | small regmap codec, TDM-ish capture DAI |
+| `sy6045s` (amps, 0x2a/0x2b) | no | new amp driver + settings-file parser (see §3) |
+
+`porting-plan.md` claims "mainline has es7210 and es8156 drivers" - that
+is **wrong for 7.3** and must be corrected.  The closest upstream
+reference for an I2C amplifier is `sound/soc/codecs/tas5805m.c`
+("Master Playback Volume", `ti,dsp-config-name` + `request_firmware`,
+`tas5805m-amplifier` DAI, S32_LE, 2ch); `tas5825m` does not exist
+upstream either.
+
+For the two Everest chips there is a huge help: the vendor modules are
+built **with full DWARF**, so the original structure/layout/line
+information is intact (see §5).
+
+## 3. `sy6045s` plan
+
+Everything below was read out of
+`board/yandex/station2/rootfs_overlay/lib/modules/4.9.113/snd-soc-sy6045s.ko`
+(`strings`, `nm`, `pahole`, `objdump -d`).
+
+### 3.1 Shape of the driver
+
+```
+soc_codec_dev_sy6045s, DAI "sy6045s-hifi"
+sy6045s_dai_ops: set_dai_fmt, hw_params, trigger
+sy6045s_probe / i2c_probe / remove
+sy6045s_reset_chip.isra.2, sy6045s_save_regs, sy6045s_restore_regs
+sy6045s_load_firmware, sy6045s_apply_settings, sy6045s_spk_on_work,
+sy6045s_spk_off_work, sy6045s_set_sby_mode_on
+dev_attr_settings / settings_file / default_settings (sysfs)
+```
+
+Private state (`pahole -C sy6045s_priv`):
+
+```c
+struct sy6045s_priv {
+	struct regmap *regmap;		/* 0 */
+	struct snd_soc_codec *codec;	/* 8 */
+	struct i2c_client *i2c;		/* 16 */
+	unsigned int format;		/* 24 */
+	const char *default_fw_name;	/* 32 */
+	char last_fw_name[256];		/* 40 */
+	u8 fw_md5[16];			/* 296 */
+	u32 fw_crc;			/* 312 */
+	struct gpio_desc *reset_gpio;	/* 320 (optional) */
+	struct gpio_desc *fault_gpio;	/* 328 (optional, sysfs attr) */
+	struct work_struct spk_off_work, spk_on_work;	/* 336, 368 */
+	struct regulator_bulk_data supplies[2];	/* 400: vddio, pvdd */
+	struct mutex io_lock;		/* 448 */
+	bool is_pbtl;			/* 488 */
+	struct sy6045s_reg *restore_regs;	/* 496 */
+	int restore_reg_size;		/* 504 */
+};
+```
+
+No DAPM widgets at all (no `*_dapm_widgets`/`*_audio_map` symbols) - the
+amp is a dumb I2C DAC with kcontrols, exactly like `tas5805m`.
+
+### 3.2 Register map
+
+`regmap_config`: `reg_bits = 8`, `val_bits = 32`, `max_register = 0xff`
+(read out of `.data`; `.data` also has `volatile_reg = sy6045s_reg_volatile`).
+Transfers are done by hand: single writes `i2c_smbus_write_byte_data`,
+multi-byte reads/writes with `i2c_smbus_read/write_i2c_block_data`, using
+the per-register width table `sy6045s_reg_size[]` (`.rodata`, one byte
+per register):
+
+| Register range | Width (bytes) |
+|---|---|
+| 0x00-0x2B | 1 |
+| 0x2C-0x2D | 2 |
+| 0x2E | 1 |
+| 0x2F-0x40 | 20 |
+| 0x41-0x46 | 12 |
+| 0x47-0x56 | 20 |
+| 0x57 | 12 |
+| 0x58-0x5C | 1 |
+| 0x5D-0x5E | 18 |
+| 0x5F-0x60 | 4 |
+| 0x61-0x6E | 3 |
+| 0x6F, 0x72 | 2 |
+| 0x70, 0x73-0x77, 0x7A-0x7B, 0x7F, 0x83-0x84, 0x87-0x8D, 0xA1-0xAF, 0xB1-0xCC, 0xCE, 0xD0-0xF7, 0xFA | 1 |
+| 0x71, 0x79, 0x7C-0x7E, 0x82, 0x85-0x86, 0x94-0x96, 0x9A-0x9C, 0xF8-0xF9, 0xFB-0xFF | 4 |
+| 0x78, 0x80-0x81, 0x8E-0x93, 0x98-0x99, 0x9D-0xA0, 0xB0 | 3 |
+| 0x97, 0xCF | 6 |
+| 0xCD | 2 |
+
+A plain `max_register`-based regmap cannot express this; the new driver
+should keep a `u8 reg_size[256]` table and do block transfers itself (or
+use `regmap_bulk_write` with the width table).
+
+### 3.3 Settings file format (`/lib/firmware/sy6045s-*.txt`)
+
+Both files are 153 lines, `w`-commands, e.g.
+`w 54 1B BD` = write 0xBD to register 0x1B of the amp whose *8-bit* I2C
+address is 0x54 (0x2a << 1; the woofer file uses 0x56 = 0x2b << 1).
+
+The parser (`sy6045s_apply_settings`, disassembly) is **strict**:
+
+* line starts with `#` or `d` -> comment; blank line -> skipped;
+* `w` line: `line[1]` **must** be a single space, `line[2..3]` must be
+  two hex digits (the address), then tokens of exactly two hex digits
+  separated by exactly one space; a token of length 4 (or 5 with `\r`)
+  is accepted, anything else is `"Error parsing settings at line %d"`;
+* the **address token is only validated as hex, never compared** with
+  the device address - the two files differ only in content, so they must
+  be selected by DT (`firmware-name`), not by address;
+* total bytes per `i2c_smbus_write_i2c_block_data` <= 32;
+* `>` lines continue a byte blob (multi-byte DSP writes);
+* after writing everything, the file's **MD5** (`crypto_alloc_shash`,
+  `"md5"`) and the **CRC32** (`crc32_le`) are stored in
+  `fw_md5`/`fw_crc`/`last_fw_name`; the `# compatible: sy6045s` marker is
+  looked up with `strstr` (`"Settings are not compatible with
+  amplifier"` otherwise).  The hash is used by the sysfs attributes
+  (`settings`, `settings_file`, `default_settings`) to re-apply or
+  compare; `/usr/lib/atrios/audio` only reads `settings_file`.
+
+Ordering inside the file is the init sequence: `# reset` -> `w xx 0F 01`
+(reset), then the "Inner Setting Export Result From GUI setting" block
+(PLL/clock, EQ/DRC coefficient writes to 0x2F-0x56, 0x8E-0x96, 0xB0...),
+then `# Unmute` -> `w xx 22 00`, `w xx 06 00`.
+
+`restore-regs = <0x07 0x01 0xff 0x06 0x01 0x08>` is a list of
+`struct sy6045s_reg { u32 addr; u32 size; u32 mask; u32 last_value; }`
+triplets: save-before-reset/restore-after-reset of reg 0x07 (all bits)
+and reg 0x06 bit 3.  New binding: `silergy,restore-regs`.
+
+### 3.4 Controls (must match userspace, see §6)
+
+`Master Playback Volume/Switch`, `Ch1 ...`, `Ch2 ...`, `EQ Switch`,
+`DRC Switch` (all `snd_soc_info/get/put_volsw`).  Two TLVs:
+
+* `sy6045s_vol_tlv` = DB_SCALE(min -7950 = -79.5 dB, step 50 = 0.5 dB,
+  mute) -> Ch1/Ch2;
+* `sy6045s_vol_tlv_m` = DB_SCALE(min -12750 = -127.5 dB, step 0.5 dB,
+  mute) -> Master.
+
+With `sound-name-prefix` these become `Woofer Master Playback Volume`,
+`Tweeters Master Playback Volume`, ... which is exactly what
+`var/lib/alsa/asound.state` and `/usr/lib/atrios/audio` use.
+
+### 3.5 DAI / formats
+
+`sy6045s_hw_params` reads the fmt + slot width and programs register
+0x60 and the clock registers (16/24/32-bit slots); `sy6045s_set_dai_fmt`
+stores the format **without validation** (returns 0 always).  `trigger`
+starts/stops `spk_on_work`/`spk_off_work` (speaker enable GPIO, strings
+`SPK ON (gpio)`, `SPK OFF (queue work)`), which is a no-op when no GPIO
+is described - the board has none, so keep the properties optional.
+
+## 4. `es7210` / `es8156` plan
+
+Vendor modules: `everest,es7210_2ch` / `everest,es7210_4ch`
+(`#sound-dai-cells = <0>`, DAI `ES7210 ADC 2/4CH`, controls
+`ADC1..ADC4_MUTE`/`ADC1..ADC4_MAX_GAIN`) and `everest,es8156`
+(DAI `ES8156 HiFi`, controls `DAC Playback Volume`, `Headphone Switch`,
+DT properties `everest,mclk-multiplier`, `everest,sclk-as-mclk`,
+`everest,dll-enable`, `hp-det-gpio`, jack detect via IRQ +
+`es8156_headset_detect`).
+
+* Port them as normal regmap codecs (`sound/soc/codecs/es7210.c`,
+  `es8156.c`), compatibles `everest,es7210` + `everest,es7210_2ch`
+  (2-channel limit used by this board) and `everest,es8156`.
+* Keep the vendor control names, otherwise `amixer cset name=...` in
+  `/usr/lib/atrios/audio` silently stops working.
+* es8156 volume max is **191** on this board (0 dB point); the userspace
+  volume curve assumes it.  sy6045s master max is 255.
+* Jack detect: mainline's `axg-card` has no hp-detect glue, so put
+  `hp-det-gpios` in the es8156 node and handle it in the driver (like the
+  vendor did).  Vendor GPIO cell was `<0x18 0x4d 0>` = vendor pin 77 =
+  **GPIOX_11** on mainline (see the numbering note below).
+* es7210 in the vendor DT is `es7210_2ch` on the *same* I2S bus, in
+  capture direction only (SDOUT -> TDM-B `din0`).  A second chip at 0x43
+  is mentioned in `/usr/lib/atrios/audio` but is **not** in the vendor
+  DT - check with `i2cdetect` on the vendor kernel before believing it.
+
+## 5. GPIO numbering trap (affects amp rail, hp-detect, keys)
+
+The vendor `dt-bindings/gpio/meson-g12a-gpio.h` starts the periphs bank
+with a virtual pin (`GPIOV_0 = 0`, `GPIOZ_0 = 1`), mainline starts at
+`GPIOZ_0 = 0`.  So
+
+```
+mainline_periphs_pin = vendor_pin - 1      (AO bank: identical)
+```
+
+Cross-checked against the v7.3 header (`include/dt-bindings/gpio/meson-g12a-gpio.h`:
+`GPIOA_0 = 49`, `GPIOX_0 = 65`, `GPIOX_10 = 75`) and the vendor header
+(`GPIOA_0 = 50`, `GPIOX_0 = 66`, `GPIOX_10 = 76`).
+
+Consequences: 20V_AMPL = vendor 75 -> **GPIOX_9** (already used as
+`&reg_20v_amp` in `mainline/dts/meson-sm1-yandex-station-max.dts:42` -
+correct), hp-det = vendor 77 -> **GPIOX_11**, vendor 0x41/0x40 ->
+GPIOA_15/GPIOA_14 (matches the existing gpio-keys node), rotary 0x31 ->
+GPIOC_7 (matches), screen pins unchanged.
+
+## 6. Userspace contract (what the new drivers must keep)
+
+From `var/lib/alsa/asound.state` (vendor card state) and
+`usr/lib/atrios/{audio,check_audio.sh}`:
+
+* card short name **`AMLAUGESOUND`** (`amixer -c AMLAUGESOUND`,
+  `plughw:AMLAUGESOUND,0`) - achieved by `model = "AML-AUGESOUND"`.
+* control names (exact): `Woofer Master Playback Volume/Switch`,
+  `Tweeters Master Playback Volume/Switch`, `Headphone DAC Playback
+  Volume`, `Headphone Headphone Switch`, plus `*_Ch1/Ch2_*`, `EQ`
+  and `DRC` switches, and `Loopback ADC1/ADC2_MAX_GAIN`.
+  Not reproducible on mainline: `SPK mute` and `Audio Power Save` (both
+  came from the vendor card driver).  `check_audio.sh:367` skips
+  `SPK mute` when the control is absent and `audio` uses `|| true`.
+* **volume is userspace-only**: `/usr/lib/atrios/audio` maps 0..100 to raw
+  values (0 dB = 255 for the amps, 191 for the hp DAC) and drives the
+  ALSA controls; nothing in the kernel should implement a "virtual
+  master".  Keep the ALSA controls with the same max values, and note
+  that the new drivers must not add a software attenuation of their own.
+* **PCM numbering changes** (unavoidable, DPCM): vendor had
+  dev 0 = TDM-B multicodec, 1 = PDM, 2 = SPDIF-B, 3 = TDM-C.  Mainline
+  creates PCMs only for the DMA front-ends, in DAI-link order, so with
+  `docs/audio-dts-fragment.dts`:
+
+  | dev | mainline | vendor |
+  |---|---|---|
+  | 0 | playback -> TDM-B (FRDDR_A) | TDM-B (both directions) |
+  | 1 | capture <- TDM-B/es7210 (TODDR_A) | PDM |
+  | 2 | capture <- PDM (TODDR_B) | SPDIF-B |
+
+  `/etc/asound.conf` currently has `capture.pcm "plughw:AMLAUGESOUND,0"`
+  and the *test* loop in `usr/lib/atrios/audio` tries devices `0 3 1` -
+  both need to be updated (dev 0 is playback-only now, capture is 1/2).
+  This is userspace work, not part of the driver port, but it must be
+  tracked or the mic test will report "no capture" on a working system.
+
+## 7. Bring-up order
+
+Each stage is verifiable on its own; don't skip ahead (a broken clock
+looks exactly like a broken codec).
+
+0. **Config**: `SND_SOC_MESON_AXG_SOUND_CARD`, `..._AXG_TDM_INTERFACE`,
+   `..._AXG_TDM_FORMATTER`, `..._AXG_TDMIN`, `..._AXG_TDMOUT`,
+   `..._AXG_PDM`, `..._AXG_FIFO`, `..._AXG_FRDDR`, `..._AXG_TODDR`,
+   `SND_SOC_DMIC`, `COMMON_CLK_AXG_AUDIO`, `I2C_MESON`
+   (`sound/soc/meson/Makefile`, `sound/soc/codecs/Kconfig:1262`,
+   `drivers/clk/meson/Kconfig:99`).
+1. **PDM only** (no new drivers): enable `&pdm`, `&toddr_b`, the card with
+   just the PDM link.  Proves audio clkc, DMA, DAPM routes and the card
+   model.  Expect `/proc/asound/cards`, and
+   `arecord -D hw:0,0 -c 4 -r 48000 -f S32_LE` returning data
+   (4 mics, upper channels flat).
+2. **es8156** (headphones) on TDM-B: simplest playback path, validates
+   the AO pads (`dout2`), `mclk0_ao`, `dai-tdm-slot-tx-mask-2` and the
+   `TDM_B` DAPM graph.  `aplay -D hw:0,0`, then
+   `amixer -c 0 cset name='Headphone DAC Playback Volume' 191`.
+3. **es7210** (capture on `din0`): validates `dai-tdm-slot-rx-mask-0`,
+   the second direction on the same TDM bus and the `TDMIN_B -> TODDR_A`
+   route.
+4. **sy6045s** (speakers): settings file parser + md5 first, then
+   kcontrols, then trigger/GPIO.  Verify with
+   `aplay -D hw:0,0`, `amixer -c 0 cset name='Woofer Master Playback Switch' 1`.
+   Watch the 20V rail: `reg_20v_amp` is always-on (GPIOX_9), so the amps
+   are powered before probe; keep the codec's own mute/reset sequence to
+   avoid a pop.
+5. Optional: SPDIF-B and TDM-C/tohdmitx (HDMI audio).
+
+## 8. Risks / open questions
+
+1. **TDM-B slot masks.**  Vendor semantics are "lane-slot" masks
+   (`dai-tdm-lane-slot-mask-in = <1 0 0 0>`, `-out = <0 0 1 0>`,
+   vendor DTS:2429-2430; AO-pad `pinctrl-0` at :2435) while mainline uses
+   one property per lane with a slot bitmask (`axg-card.c:175`, and `axg-card.c:200-215` rejects
+   `dai-tdm-slot-num` < `fls(mask)`).  The fragment translates them to
+   `tx-mask-2 = <1 1>` / `rx-mask-0 = <1 1>` with `dai-tdm-slot-num = <2>`,
+   `dai-tdm-slot-width = <32>`.  If the first bring-up plays garbage,
+   try single-slot masks (`<1>`) and/or lane 0 for output; nothing else
+   in the path can be wrong at that point.
+2. **MCLK frequency.**  Vendor card: `mclk-fs = 256`,
+   `system-clock-frequency = 0x1770000` (24.576 MHz), i.e. 512x at 48 kHz.
+   Mainline derives MCLK = `mclk-fs * rate` = 12.288 MHz at 48 kHz
+   (`meson-card-utils.c: meson_card_i2s_set_sysclk`).  The sy6045s
+   settings files encode PLL/clock registers tuned for the vendor setup;
+   if the amps stay silent, check MCLK with a scope before touching the
+   settings files.
+3. **PDM on SM1 is untested upstream.**  The compatible fallback
+   (`amlogic,sm1-pdm` -> `amlogic,axg-pdm`) exists since the SM1 DTS was
+   added, but no mainline SM1 board enables PDM, and the vendor used a
+   `filter_mode = <1>` property plus a user-visible HCIC shift gain that
+   mainline hardcodes (`axg-pdm.c:540`, hcic.shift = 0x15).  Expect a
+   different noise floor/gain; the mic array may also be wired with only
+   4 of 8 channels.
+4. **`sy6045s` is the real cost.**  Text-format firmware, per-register
+   widths, reset+restore semantics, md5/crc bookkeeping, a speaker
+   workqueue and three sysfs attributes.  All of it is readable from
+   DWARF (see below) but it is a ~1000-line driver.
+5. **Userspace assumptions** (§6): control names, PCM numbers,
+   `asound.conf` and the `S03amplifiers` `/dev/mem` poke.  Audio can look
+   "broken" while the kernel side is fine.
+6. **8-channel mic array**: 2x es7210 (0x40 + 0x43) is claimed by the
+   userspace header comment but absent from the vendor DT; verify with
+   `i2cdetect -y 2` on the vendor kernel.
+7. **`porting-plan.md` correction**: "mainline has es7210 and es8156
+   drivers" is false; `tas5825m` is not upstream either (only `tas5805m`).
+
+## 9. Reverse-engineering notes (why this port is realistic)
+
+All three vendor modules carry **full DWARF** (`.debug_info`,
+`.debug_line`, `.debug_str`, `.debug_loc`), built with `-g -O2` and
+paths like
+`/place/sandbox-data/.../obj/vendor_modules/sy6045s/sy6045s.c`.
+Practical commands (used for this document):
+
+```sh
+pahole -C sy6045s_priv snd-soc-sy6045s.ko
+aarch64-linux-gnu-objdump --dwarf=info snd-soc-sy6045s.ko | less
+aarch64-linux-gnu-objdump -dr --disassemble=sy6045s_apply_settings \
+        snd-soc-sy6045s.ko
+aarch64-linux-gnu-addr2line -f -e snd-soc-sy6045s.ko 0xfb0
+        # -> sy6045s_apply_settings, sy6045s.c:527
+```
+
+So struct layouts, static table names (`sy6045s_reg_size`,
+`sy6045s_snd_controls`, `sy6045s_supply_names`, `soc_codec_dev_sy6045s`)
+and even source line numbers of the vendors' drivers are available - no
+decompiler is needed, just `objdump`/`pahole`.
+
+## 10. Verification quick list (mainline target)
+
+```sh
+cat /proc/asound/cards                 # AML-AUGESOUND
+aplay -l; arecord -l                   # devices 0 (p), 1 (c), 2 (c)
+amixer -c AMLAUGESOUND contents        # 20 controls, see §6
+cat /sys/kernel/debug/clk/clk_summary | grep -i -E "mst_b|pdm"
+aplay -D hw:0,0 -c 2 -r 48000 -f S32_LE /usr/share/sounds/alsa/Front_Center.wav
+arecord -D hw:0,1 -c 2 -r 48000 -f S32_LE -d 3 /tmp/mic.wav   # es7210
+arecord -D hw:0,2 -c 4 -r 48000 -f S32_LE -d 3 /tmp/pdm.wav   # PDM
+```

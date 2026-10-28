@@ -14,8 +14,9 @@
  * is what the vendor driver enforced as well.
  */
 
-#include <linux/delay.h>
 #include <linux/fb.h>
+#include <linux/jiffies.h>
+#include <linux/kstrtox.h>
 #include <linux/leds.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
@@ -84,21 +85,18 @@ struct ringfb {
 	bool running;
 };
 
-static void ringfb_push(struct ringfb *ring)
+/* Called with ring->lock held. */
+static void ringfb_push_locked(struct ringfb *ring)
 {
 	struct fb_info *info = ring->info;
 	unsigned int i;
 
-	mutex_lock(&ring->lock);
-	if (!ring->running) {
-		mutex_unlock(&ring->lock);
-		return;
-	}
-
 	memcpy(ring->shadow, info->screen_buffer, RINGFB_SIZE);
-	for (i = 0; i < ring->nchannels; i++)
+	for (i = 0; i < RINGFB_CHANNELS; i++) {
+		if (!ring->channels[i])
+			continue;
 		led_set_brightness(ring->channels[i], ring->shadow[i]);
-	mutex_unlock(&ring->lock);
+	}
 }
 
 static void ringfb_refresh_work(struct work_struct *work)
@@ -106,20 +104,26 @@ static void ringfb_refresh_work(struct work_struct *work)
 	struct ringfb *ring = container_of(to_delayed_work(work),
 					   struct ringfb, refresh);
 
-	if (!ring->running)
+	mutex_lock(&ring->lock);
+	if (!ring->running) {
+		mutex_unlock(&ring->lock);
 		return;
+	}
 
 	if (memcmp(ring->shadow, ring->info->screen_buffer, RINGFB_SIZE))
-		ringfb_push(ring);
+		ringfb_push_locked(ring);
 
-	schedule_delayed_work(&ring->refresh,
-			      msecs_to_jiffies(RINGFB_REFRESH_MS));
+	/* Re-check under the lock so deactivate() cannot race the requeue. */
+	if (ring->running)
+		schedule_delayed_work(&ring->refresh,
+				      msecs_to_jiffies(RINGFB_REFRESH_MS));
+	mutex_unlock(&ring->lock);
 }
 
 static int ringfb_trigger_activate(struct led_classdev *led)
 {
 	struct ringfb *ring = container_of(led->trigger, struct ringfb, trigger);
-	unsigned int key, pos, i;
+	unsigned int key;
 	int ret;
 
 	if (led->max_brightness != RINGFB_MAX_BRIGHTNESS) {
@@ -136,25 +140,22 @@ static int ringfb_trigger_activate(struct led_classdev *led)
 	}
 
 	mutex_lock(&ring->lock);
-	if (key >= RINGFB_CHANNELS || ring->channels[key]) {
+	if (ring->channels[key]) {
 		mutex_unlock(&ring->lock);
+		dev_warn(led->dev, "duplicate ring channel %u\n", key);
 		return -EBUSY;
 	}
 
-	/* Keep the array dense in channel order for the buffer mapping. */
-	for (i = 0; i < key; i++) {
-		if (!ring->channels[i]) {
-			mutex_unlock(&ring->lock);
-			dev_warn(led->dev, "ring channel %u missing\n", i);
-			return -ENODEV;
-		}
-	}
-
 	ring->channels[key] = led;
-	if (key + 1 > ring->nchannels)
-		ring->nchannels = key + 1;
+	ring->nchannels++;
 
-	if (!ring->running && ring->nchannels == RINGFB_CHANNELS) {
+	/*
+	 * The I2C controllers probe in arbitrary order, so the individual
+	 * channels may be activated in any order.  The channel index is
+	 * derived from the label, hence only start pushing once the whole
+	 * ring is present.
+	 */
+	if (ring->nchannels == RINGFB_CHANNELS && !ring->running) {
 		ring->running = true;
 		schedule_delayed_work(&ring->refresh, 0);
 	}
@@ -171,20 +172,20 @@ static void ringfb_trigger_deactivate(struct led_classdev *led)
 
 	mutex_lock(&ring->lock);
 	for (i = 0; i < RINGFB_CHANNELS; i++) {
-		if (ring->channels[i] == led) {
-			ring->channels[i] = NULL;
-			led_set_brightness(led, 0);
-			break;
-		}
+		if (ring->channels[i] != led)
+			continue;
+
+		ring->channels[i] = NULL;
+		if (ring->nchannels)
+			ring->nchannels--;
+		break;
 	}
-	ring->nchannels = 0;
-	for (i = RINGFB_CHANNELS; i > 0; i--) {
-		if (ring->channels[i - 1]) {
-			ring->nchannels = i;
-			break;
-		}
-	}
-	if (!ring->nchannels) {
+
+	/*
+	 * Keep running only while the full ring is present: the refresh work
+	 * pushes the shadow buffer to all RINGFB_CHANNELS entries.
+	 */
+	if (ring->nchannels < RINGFB_CHANNELS) {
 		ring->running = false;
 		cancel_delayed_work(&ring->refresh);
 	}
@@ -206,6 +207,7 @@ static int ringfb_check_var(struct fb_var_screeninfo *var, struct fb_info *info)
 	var->green.length = 8;
 	var->blue.offset = 0;
 	var->blue.length = 8;
+	var->transp.offset = 0;
 	var->transp.length = 0;
 	return 0;
 }
@@ -220,9 +222,9 @@ static const struct fb_ops ringfb_ops = {
 	.owner		= THIS_MODULE,
 	.fb_check_var	= ringfb_check_var,
 	.fb_set_par	= ringfb_set_par,
-	.fb_fillrect	= fb_sys_fillrect,
-	.fb_copyarea	= fb_sys_copyarea,
-	.fb_imageblit	= fb_sys_imageblit,
+	.fb_fillrect	= sys_fillrect,
+	.fb_copyarea	= sys_copyarea,
+	.fb_imageblit	= sys_imageblit,
 	.fb_read	= fb_sys_read,
 	.fb_write	= fb_sys_write,
 };
@@ -249,13 +251,16 @@ static int ringfb_probe(struct platform_device *pdev)
 		ret = -ENOMEM;
 		goto err_free_fb;
 	}
+	info->screen_size = RINGFB_SIZE;
 
 	info->fbops = &ringfb_ops;
 	info->flags = FBINFO_VIRTFB;
+	strscpy(info->fix.id, "led-ring-fb", sizeof(info->fix.id));
 	info->fix.smem_len = RINGFB_SIZE;
 	info->fix.type = FB_TYPE_PACKED_PIXELS;
 	info->fix.visual = FB_VISUAL_TRUECOLOR;
 	info->fix.line_length = RINGFB_WIDTH * 3;
+	info->fix.accel = FB_ACCEL_NONE;
 	info->var.xres = RINGFB_WIDTH;
 	info->var.yres = RINGFB_HEIGHT;
 	info->var.xres_virtual = RINGFB_WIDTH;

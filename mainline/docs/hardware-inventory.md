@@ -10,18 +10,19 @@ Sources of truth:
 ## SoC / board
 
 - Amlogic S905X3 (SM1, G12A family), 4x Cortex-A53, Mali-G31
-- 2 GiB LPDDR4, 14.6 GiB eMMC (AJTD4R), SD slot, RTL8822ES Wi-Fi/BT combo
+- 2 GiB LPDDR4, 14.6 GiB eMMC (AJTD4R), RTL8822ES Wi-Fi/BT combo (the SD slot is
+  not usable: its CMD/CD pins are shared with the ring I2C bus)
 - PMIC-less design: always-on rails, `20V_AMPL` fixed regulator on a GPIO
 - Boot: eMMC, Android partition table, `system` = ext4 rootfs
 
 ## Displays / LEDs (I2C + SPI)
 
-`i2c@1f000` (vendor bus, `clock-frequency = 100000`):
+`i2c@1f000` (vendor bus, `clock-frequency = 400000`):
 
 | Device | Address | Compatible |
 |---|---|---|
 | EEPROM | 0x56 | `24c01` |
-| Ambient light | 0x53 | `lite-on,ltr308als01` |
+| Ambient light | 0x53 | `liteon,ltr308` (upstream `ltrf216a` driver) |
 | LED ring left (LED 1-12) | 0x3c | `issi,is31fl3236,gva` |
 | LED ring right (LED 13-24) | 0x3f | `issi,is31fl3236,gva` |
 
@@ -29,7 +30,7 @@ Sources of truth:
 
 | Device | Compatible | Notes |
 |---|---|---|
-| Front matrix 25x16 | `ya,led_screen`, `atri,led-panel` | Gowin FPGA, JTAG reconfig, SPI framing |
+| Front matrix 25x16 | `ya,led_screen` (binds `gowin_led_device`), `atri,led-panel` | Gowin FPGA, JTAG reconfig, 400-byte frames |
 
 GPIOs used by the panel (vendor numbering, decoded in `docs/screen.md`):
 reset, JTAG TCK/TDI/TDO/TMS, JTAG reconfig, JTAG select, plus an SPI CS that is
@@ -39,8 +40,8 @@ shared with the JTAG TMS line.
 
 | Device | Compatible | Data |
 |---|---|---|
-| Rotary volume | `rotary-volume` | 2 GPIOs, emits `KEY_VOLUMEUP`/`KEY_VOLUMEDOWN` (0x73/0x72) |
-| Buttons / mic mute | `gpio-keys` | `micmute` GPIO, `function` key |
+| Rotary volume | `rotary-volume` | 2 GPIOs, emits `KEY_PAGEUP`/`KEY_PAGEDOWN` (104/109) |
+| Buttons / mic mute | `amlogic,gpio_keypad` | `yandex,gpio-keypad`, GPIOA_15/GPIOA_14, codes 582/248 |
 | IR receiver | `amlogic,meson-ir` | NEC, vendor keymap |
 
 ## Wireless

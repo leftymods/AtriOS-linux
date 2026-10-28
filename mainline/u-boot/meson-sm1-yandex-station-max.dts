@@ -1,0 +1,120 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * Yandex Station Max (Amlogic S905X3 / SM1) - U-Boot device tree
+ *
+ * Derived from arch/arm64/boot/dts/amlogic/meson-sm1-odroid.dtsi
+ * (Copyright (c) 2020 Dongjin Kim <tobetter@gmail.com>).
+ *
+ * This tree is *only* for U-Boot.  The kernel tree lives in
+ * mainline/dts/meson-sm1-yandex-station-max.dts and keeps the full
+ * peripheral description (LED ring, SPI panel, audio, ...).
+ *
+ * Verified against: u-boot v2026.10, dts/upstream/src/arm64/amlogic/
+ */
+
+/dts-v1/;
+
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/gpio/meson-g12a-gpio.h>
+#include <dt-bindings/input/input.h>
+#include "meson-sm1.dtsi"
+
+/ {
+	model = "Yandex Station Max";
+	compatible = "yandex,station-max", "amlogic,sm1";
+
+	aliases {
+		serial0 = &uart_AO;
+		serial1 = &uart_A;
+		/* keep the kernel numbering: eMMC first, then the SD slot */
+		mmc0 = &sd_emmc_c;
+		mmc1 = &sd_emmc_b;
+	};
+
+	chosen {
+		stdout-path = "serial0:115200n8";
+	};
+
+	memory@0 {
+		device_type = "memory";
+		reg = <0x0 0x0 0x0 0x80000000>;	/* 2 GiB LPDDR4 */
+	};
+
+	gpio-keys {
+		compatible = "gpio-keys";
+
+		key-micmute {
+			label = "micmute";
+			linux,code = <KEY_MICMUTE>;
+			gpios = <&gpio GPIOA_14 GPIO_ACTIVE_LOW>;
+		};
+
+		key-function {
+			label = "function";
+			linux,code = <KEY_VOICECOMMAND>;	/* vendor key_code 0x246 */
+			gpios = <&gpio GPIOA_15 GPIO_ACTIVE_LOW>;
+		};
+	};
+
+	/*
+	 * Not modelled on purpose (see mainline/docs/uboot.md):
+	 *  - 20V_AMPL enable on GPIOX_9 - U-Boot must not switch the
+	 *    speaker rail, the kernel regulator does that.
+	 *  - BT reset on GPIOX_17 - left alone, the kernel/bt driver owns it.
+	 * If a hook is ever needed, add e.g.
+	 *
+	 *	gpio-hog {
+	 *		gpios = <&gpio GPIOX_17 GPIO_ACTIVE_HIGH>;
+	 *		output-high;
+	 *		line-name = "bt-reset";
+	 *	};
+	 */
+};
+
+/* UART_AO: debug console, 115200n8 */
+&uart_AO {
+	status = "okay";
+	pinctrl-0 = <&uart_ao_a_pins>;
+	pinctrl-names = "default";
+};
+
+/* UART_A: Bluetooth (RTL8822ES, H5, 3-wire), not used by U-Boot */
+&uart_A {
+	status = "okay";
+	pinctrl-0 = <&uart_a_pins>;
+	pinctrl-names = "default";
+};
+
+/* eMMC (sd_emmc_c) - the Android user area + boot0/boot1 */
+&sd_emmc_c {
+	status = "okay";
+	/*
+	 * "amlogic,meson-sm1-mmc" is a U-Boot-only compatible: it makes
+	 * drivers/mmc/meson_gx_mmc.c use CLK_CO_PHASE_270, which is the
+	 * stable setting on SM1 above 50 MHz.  Do not copy this into the
+	 * kernel DTS (the Linux driver has no such compatible).
+	 */
+	compatible = "amlogic,meson-sm1-mmc", "amlogic,meson-axg-mmc";
+	pinctrl-0 = <&emmc_ctrl_pins>, <&emmc_data_8b_pins>, <&emmc_ds_pins>;
+	pinctrl-1 = <&emmc_clk_gate_pins>;
+	pinctrl-names = "default", "clk-gate";
+	bus-width = <8>;
+	max-frequency = <200000000>;
+	non-removable;
+	disable-wp;
+	cap-mmc-highspeed;
+	mmc-hs200-1_8v;
+};
+
+/* microSD (sd_emmc_b) */
+&sd_emmc_b {
+	status = "okay";
+	compatible = "amlogic,meson-sm1-mmc", "amlogic,meson-axg-mmc";
+	pinctrl-0 = <&sdcard_c_pins>;
+	pinctrl-1 = <&sdcard_clk_gate_c_pins>;
+	pinctrl-names = "default", "clk-gate";
+	bus-width = <4>;
+	cap-sd-highspeed;
+	disable-wp;
+	max-frequency = <100000000>;
+};

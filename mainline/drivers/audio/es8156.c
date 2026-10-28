@@ -1,0 +1,641 @@
+// SPDX-License-Identifier: GPL-2.0-only
+//
+// es8156.c -- Everest Semiconductor ES8156 headphone DAC
+//
+// The ES8156 is the 3.5 mm jack DAC of the Yandex Station Max (Amlogic
+// S905X3 / SM1, I2C address 0x08).  There is no upstream driver.  This one
+// is a port of the vendor 4.9.113 module (snd-soc-es8156.ko), which was
+// shipped with full DWARF, so the register writes, control ranges and the
+// jack-detect state machine below are read straight out of the binary.
+// Register *names* are behaviour-derived; the datasheet was not available.
+//
+// The codec is a playback-only I2S slave of TDM-B on this board.  It has no
+// register for the sample rate: the rate is derived from MCLK/LRCK, only
+// the MCLK multiplier (DT "everest,mclk-multiplier") and the "SCLK as MCLK"
+// mode are programmable.
+
+#include <linux/bitfield.h>
+#include <linux/bits.h>
+#include <linux/clk.h>
+#include <linux/gpio/consumer.h>
+#include <linux/i2c.h>
+#include <linux/input.h>
+#include <linux/interrupt.h>
+#include <linux/log2.h>
+#include <linux/module.h>
+#include <linux/property.h>
+#include <linux/regmap.h>
+#include <linux/workqueue.h>
+#include <sound/jack.h>
+#include <sound/pcm_params.h>
+#include <sound/soc.h>
+#include <sound/tlv.h>
+
+#define ES8156_REG_RESET		0x00
+#define ES8156_REG_CLOCK		0x01
+#define ES8156_REG_MISC			0x02
+#define ES8156_REG_CLOCK_OFF		0x03
+#define ES8156_REG_ANALOG_04		0x04
+#define ES8156_REG_CHANNEL		0x05
+#define ES8156_REG_ANALOG_06		0x06
+#define ES8156_REG_ANALOG_07		0x07
+#define ES8156_REG_ANALOG_08		0x08
+#define ES8156_REG_DLL			0x09
+#define ES8156_REG_VOICE_BASE_2		0x0a
+#define ES8156_REG_VOICE_BASE_1		0x0b
+#define ES8156_REG_VOICE_BASE_0		0x0c
+#define ES8156_REG_SOFT_RAMP		0x0d
+#define ES8156_REG_ANALOG_0F		0x0f
+#define ES8156_REG_ANALOG_10		0x10
+#define ES8156_REG_SDP			0x11
+#define ES8156_REG_ANALOG_12		0x12
+#define ES8156_REG_DAC_MUTE		0x13
+#define ES8156_REG_DAC_VOLUME		0x14
+#define ES8156_REG_ANALOG_15		0x15
+#define ES8156_REG_ANALOG_16		0x16
+#define ES8156_REG_ANALOG_17		0x17
+#define ES8156_REG_ANALOG_18		0x18
+#define ES8156_REG_ANALOG_19		0x19
+#define ES8156_REG_ANALOG_1A		0x1a
+#define ES8156_REG_ANALOG_20		0x20
+#define ES8156_REG_ANALOG_21		0x21
+#define ES8156_REG_ANALOG_22		0x22
+#define ES8156_REG_ANALOG_23		0x23
+#define ES8156_REG_ANALOG_24		0x24
+#define ES8156_REG_ANALOG_25		0x25
+
+/* SDP: bits 2:0 format, bit 3 output enable (active low), bits 6:4 width */
+#define ES8156_SDP_FMT_MASK		GENMASK(2, 0)
+#define ES8156_SDP_FMT_I2S		0x0
+#define ES8156_SDP_FMT_RIGHT_J		0x1
+#define ES8156_SDP_FMT_DSP_A		0x3
+#define ES8156_SDP_FMT_DSP_B		0x7
+#define ES8156_SDP_HP_SWITCH		BIT(3)
+#define ES8156_SDP_WIDTH_MASK		GENMASK(6, 4)
+#define ES8156_SDP_WIDTH_24		0x00
+#define ES8156_SDP_WIDTH_16		0x30
+#define ES8156_SDP_WIDTH_32		0x40
+
+/* MISC bit 0 is the master/slave select, bit 7 routes SCLK to MCLK */
+#define ES8156_MISC_MASTER		BIT(0)
+#define ES8156_MISC_SCLK_AS_MCLK	BIT(7)
+
+/* DAC mute, bit 3 */
+#define ES8156_DAC_MUTE_BIT		BIT(3)
+
+/* Clock manager: bits 7:6 hold log2(mclk multiplier), keep bit 0 set */
+#define ES8156_CLOCK_MCLK_MULT_MASK	GENMASK(7, 6)
+#define ES8156_CLOCK_BASE		0x21
+
+#define ES8156_HP_DEBOUNCE_MS		200
+
+struct es8156_priv {
+	struct device *dev;
+	struct regmap *regmap;
+	struct clk *mclk;
+	struct snd_soc_component *component;
+
+	struct gpio_desc *hp_det_gpio;
+	struct input_dev *input;
+	struct snd_soc_jack *jack;
+	struct delayed_work hp_work;
+	bool hp_inserted;
+
+	unsigned int mclk_mult;
+	bool sclk_as_mclk;
+	bool dll_enable;
+};
+
+/*
+ * Register defaults read out of the vendor module's .rodata
+ * (es8156_reg_defaults, 36 entries).  The vendor table lists 0x10 twice;
+ * the first entry is assumed to be 0x0f, which is the only gap in an
+ * otherwise complete 0x00..0x1a, 0x20..0x25, 0xfc..0xff range and has the
+ * same 0x40 default as 0x10 in every other ES8156 driver seen so far.
+ */
+static const struct reg_default es8156_reg_defaults[] = {
+	{ 0x00, 0x1c }, { 0x01, 0x20 }, { 0x02, 0x00 }, { 0x03, 0x01 },
+	{ 0x04, 0x00 }, { 0x05, 0x04 }, { 0x06, 0x11 }, { 0x07, 0x00 },
+	{ 0x08, 0x06 }, { 0x09, 0x00 }, { 0x0a, 0x50 }, { 0x0b, 0x50 },
+	{ 0x0c, 0x00 }, { 0x0d, 0x10 }, { 0x0f, 0x40 }, { 0x10, 0x40 },
+	{ 0x11, 0x00 }, { 0x12, 0x04 }, { 0x13, 0x11 }, { 0x14, 0xbf },
+	{ 0x15, 0x00 }, { 0x16, 0x00 }, { 0x17, 0xf7 }, { 0x18, 0x00 },
+	{ 0x19, 0x20 }, { 0x1a, 0x00 }, { 0x20, 0x16 }, { 0x21, 0x7f },
+	{ 0x22, 0x00 }, { 0x23, 0x86 }, { 0x24, 0x00 }, { 0x25, 0x07 },
+	{ 0xfc, 0x00 }, { 0xfd, 0x81 }, { 0xfe, 0x55 }, { 0xff, 0x10 },
+};
+
+static const struct regmap_config es8156_regmap_config = {
+	.reg_bits = 8,
+	.val_bits = 8,
+	.max_register = 0xff,
+	.reg_defaults = es8156_reg_defaults,
+	.num_reg_defaults = ARRAY_SIZE(es8156_reg_defaults),
+	.cache_type = REGCACHE_RBTREE,
+};
+
+/*
+ * Vendor TLV: -95.50 dB .. +32.00 dB in 0.5 dB steps, no mute bit.
+ * Raw 191 (0xbf) is the 0 dB point and is also the reset value; the
+ * userspace volume curve never writes more than 191.
+ */
+static const SNDRV_CTL_TLVD_DECLARE_DB_SCALE(es8156_dac_tlv, -9550, 50, 0);
+
+static const struct snd_kcontrol_new es8156_snd_controls[] = {
+	SOC_SINGLE_TLV("DAC Playback Volume", ES8156_REG_DAC_VOLUME, 0, 0xff,
+		       0, es8156_dac_tlv),
+	SOC_SINGLE("Headphone Switch", ES8156_REG_SDP, 3, 1, 1),
+};
+
+static const struct snd_soc_dapm_widget es8156_dapm_widgets[] = {
+	SND_SOC_DAPM_DAC("DACL", "Playback", SND_SOC_NOPM, 0, 0),
+	SND_SOC_DAPM_DAC("DACR", "Playback", SND_SOC_NOPM, 0, 0),
+	SND_SOC_DAPM_OUTPUT("LOUT"),
+	SND_SOC_DAPM_OUTPUT("ROUT"),
+};
+
+static const struct snd_soc_dapm_route es8156_dapm_routes[] = {
+	{ "DACL", NULL, "Playback" },
+	{ "DACR", NULL, "Playback" },
+	{ "LOUT", NULL, "DACL" },
+	{ "ROUT", NULL, "DACR" },
+};
+
+static int es8156_reset(struct es8156_priv *priv)
+{
+	int ret;
+
+	ret = regmap_write(priv->regmap, ES8156_REG_RESET, 0x1c);
+	if (ret)
+		return ret;
+	usleep_range(5000, 5500);
+
+	ret = regmap_write(priv->regmap, ES8156_REG_RESET, 0x03);
+	if (ret)
+		return ret;
+	ret = regmap_write(priv->regmap, ES8156_REG_RESET, 0x3c);
+	if (ret)
+		return ret;
+	usleep_range(10000, 15000);
+
+	return regmap_write(priv->regmap, ES8156_REG_RESET, 0x1c);
+}
+
+/* Exact write sequence from es8156_set_bias_level(STANDBY) in the vendor. */
+static int es8156_init(struct es8156_priv *priv)
+{
+	struct regmap *map = priv->regmap;
+	unsigned int misc;
+	int ret;
+
+	misc = 0x04;	/* bit 2 always set, bit 0 = I2S slave on init */
+	if (priv->sclk_as_mclk)
+		misc |= ES8156_MISC_SCLK_AS_MCLK;
+
+	ret = regmap_write(map, ES8156_REG_MISC, misc);
+	if (ret)
+		return ret;
+	ret = regmap_write(map, ES8156_REG_ANALOG_20, 0x2a);
+	if (ret)
+		return ret;
+	ret = regmap_write(map, ES8156_REG_ANALOG_21, 0x3c);
+	if (ret)
+		return ret;
+	ret = regmap_write(map, ES8156_REG_ANALOG_22, 0x08);
+	if (ret)
+		return ret;
+	ret = regmap_write(map, ES8156_REG_ANALOG_24, 0x07);
+	if (ret)
+		return ret;
+	ret = regmap_write(map, ES8156_REG_ANALOG_23, 0x00);
+	if (ret)
+		return ret;
+	ret = regmap_write(map, ES8156_REG_VOICE_BASE_2, 0x01);
+	if (ret)
+		return ret;
+	ret = regmap_write(map, ES8156_REG_VOICE_BASE_1, 0x01);
+	if (ret)
+		return ret;
+	ret = regmap_write(map, ES8156_REG_DAC_VOLUME, 0xbe);
+	if (ret)
+		return ret;
+	ret = regmap_write(map, ES8156_REG_CLOCK,
+			   ES8156_CLOCK_BASE |
+			   FIELD_PREP(ES8156_CLOCK_MCLK_MULT_MASK,
+				      priv->mclk_mult));
+	if (ret)
+		return ret;
+	ret = regmap_write(map, ES8156_REG_DLL, priv->dll_enable ? 0x02 : 0x00);
+	if (ret)
+		return ret;
+	ret = regmap_write(map, ES8156_REG_SOFT_RAMP, 0x14);
+	if (ret)
+		return ret;
+	ret = regmap_write(map, ES8156_REG_ANALOG_18, 0x00);
+	if (ret)
+		return ret;
+	ret = regmap_write(map, ES8156_REG_ANALOG_08, 0x3f);
+	if (ret)
+		return ret;
+	ret = regmap_write(map, ES8156_REG_RESET, 0x02);
+	if (ret)
+		return ret;
+	ret = regmap_write(map, ES8156_REG_RESET, 0x03);
+	if (ret)
+		return ret;
+
+	return regmap_write(map, ES8156_REG_ANALOG_25, 0x20);
+}
+
+/* Exact write sequence from es8156_set_bias_level(OFF) in the vendor. */
+static int es8156_power_down(struct es8156_priv *priv)
+{
+	struct regmap *map = priv->regmap;
+	int ret;
+
+	ret = regmap_write(map, ES8156_REG_DAC_VOLUME, 0x00);
+	if (ret)
+		return ret;
+	ret = regmap_write(map, ES8156_REG_ANALOG_19, 0x02);
+	if (ret)
+		return ret;
+	ret = regmap_write(map, ES8156_REG_ANALOG_21, 0x1f);
+	if (ret)
+		return ret;
+	ret = regmap_write(map, ES8156_REG_ANALOG_22, 0x02);
+	if (ret)
+		return ret;
+	ret = regmap_write(map, ES8156_REG_ANALOG_25, 0x21);
+	if (ret)
+		return ret;
+	ret = regmap_write(map, ES8156_REG_ANALOG_25, 0x01);
+	if (ret)
+		return ret;
+	ret = regmap_write(map, ES8156_REG_ANALOG_25, 0x87);
+	if (ret)
+		return ret;
+	ret = regmap_write(map, ES8156_REG_ANALOG_18, 0x01);
+	if (ret)
+		return ret;
+	ret = regmap_write(map, ES8156_REG_DLL, 0x02);
+	if (ret)
+		return ret;
+	ret = regmap_write(map, ES8156_REG_DLL, 0x01);
+	if (ret)
+		return ret;
+
+	return regmap_write(map, ES8156_REG_ANALOG_08, 0x00);
+}
+
+static int es8156_set_dai_fmt(struct snd_soc_dai *dai, unsigned int fmt)
+{
+	struct snd_soc_component *component = dai->component;
+	struct es8156_priv *priv = snd_soc_component_get_drvdata(component);
+	unsigned int format;
+	bool master = false;
+	int ret;
+
+	switch (fmt & SND_SOC_DAIFMT_CLOCK_PROVIDER_MASK) {
+	case SND_SOC_DAIFMT_CBP_CFP:
+		master = true;
+		break;
+	case SND_SOC_DAIFMT_CBC_CFC:
+		master = false;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	switch (fmt & SND_SOC_DAIFMT_FORMAT_MASK) {
+	case SND_SOC_DAIFMT_I2S:
+		format = ES8156_SDP_FMT_I2S;
+		break;
+	case SND_SOC_DAIFMT_RIGHT_J:
+		format = ES8156_SDP_FMT_RIGHT_J;
+		break;
+	case SND_SOC_DAIFMT_DSP_A:
+		format = ES8156_SDP_FMT_DSP_A;
+		break;
+	case SND_SOC_DAIFMT_DSP_B:
+		format = ES8156_SDP_FMT_DSP_B;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	/* The vendor never implemented clock inversion; reject it. */
+	if ((fmt & SND_SOC_DAIFMT_INV_MASK) != SND_SOC_DAIFMT_NB_NF)
+		return -EINVAL;
+
+	ret = regmap_update_bits(priv->regmap, ES8156_REG_SDP,
+				 ES8156_SDP_FMT_MASK, format);
+	if (ret)
+		return ret;
+
+	return regmap_update_bits(priv->regmap, ES8156_REG_MISC,
+				  ES8156_MISC_MASTER,
+				  master ? ES8156_MISC_MASTER : 0);
+}
+
+static int es8156_hw_params(struct snd_pcm_substream *substream,
+			    struct snd_pcm_hw_params *params,
+			    struct snd_soc_dai *dai)
+{
+	struct snd_soc_component *component = dai->component;
+	struct es8156_priv *priv = snd_soc_component_get_drvdata(component);
+	unsigned int width;
+
+	switch (params_format(params)) {
+	case SNDRV_PCM_FORMAT_S16_LE:
+		width = ES8156_SDP_WIDTH_16;
+		break;
+	case SNDRV_PCM_FORMAT_S24_LE:
+		width = ES8156_SDP_WIDTH_24;
+		break;
+	case SNDRV_PCM_FORMAT_S32_LE:
+		width = ES8156_SDP_WIDTH_32;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	return regmap_update_bits(priv->regmap, ES8156_REG_SDP,
+				  ES8156_SDP_WIDTH_MASK, width);
+}
+
+static int es8156_mute_stream(struct snd_soc_dai *dai, int mute, int stream)
+{
+	struct snd_soc_component *component = dai->component;
+	struct es8156_priv *priv = snd_soc_component_get_drvdata(component);
+
+	return regmap_update_bits(priv->regmap, ES8156_REG_DAC_MUTE,
+				  ES8156_DAC_MUTE_BIT,
+				  mute ? ES8156_DAC_MUTE_BIT : 0);
+}
+
+static const struct snd_soc_dai_ops es8156_dai_ops = {
+	.set_fmt	= es8156_set_dai_fmt,
+	.hw_params	= es8156_hw_params,
+	.mute_stream	= es8156_mute_stream,
+};
+
+#define ES8156_FORMATS	(SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FMTBIT_S24_LE | \
+			 SNDRV_PCM_FMTBIT_S32_LE)
+
+static struct snd_soc_dai_driver es8156_dai = {
+	.name = "es8156",
+	.playback = {
+		.stream_name	= "Playback",
+		.channels_min	= 1,
+		.channels_max	= 2,
+		.rates		= SNDRV_PCM_RATE_8000_96000,
+		.formats	= ES8156_FORMATS,
+	},
+	.ops = &es8156_dai_ops,
+	.symmetric_rate = 1,
+};
+
+static void es8156_report_jack(struct es8156_priv *priv)
+{
+	int state;
+
+	state = gpiod_get_value_cansleep(priv->hp_det_gpio);
+	if (state < 0)
+		return;
+
+	priv->hp_inserted = state;
+
+	if (priv->jack)
+		snd_soc_jack_report(priv->jack,
+				    priv->hp_inserted ? SND_JACK_HEADPHONE : 0,
+				    SND_JACK_HEADPHONE);
+
+	if (priv->input) {
+		input_report_switch(priv->input, SW_HEADPHONE_INSERT,
+				    priv->hp_inserted);
+		input_sync(priv->input);
+	}
+}
+
+static void es8156_hp_work(struct work_struct *work)
+{
+	struct es8156_priv *priv = container_of(work, struct es8156_priv,
+						hp_work.work);
+
+	if (priv->hp_det_gpio)
+		es8156_report_jack(priv);
+}
+
+static irqreturn_t es8156_hp_irq(int irq, void *data)
+{
+	struct es8156_priv *priv = data;
+
+	mod_delayed_work(system_dfl_wq, &priv->hp_work,
+			 msecs_to_jiffies(ES8156_HP_DEBOUNCE_MS));
+
+	return IRQ_HANDLED;
+}
+
+static int es8156_set_jack(struct snd_soc_component *component,
+			   struct snd_soc_jack *jack, void *data)
+{
+	struct es8156_priv *priv = snd_soc_component_get_drvdata(component);
+
+	if (!jack && priv->hp_det_gpio)
+		cancel_delayed_work_sync(&priv->hp_work);
+
+	priv->jack = jack;
+	if (jack && priv->hp_det_gpio)
+		queue_delayed_work(system_dfl_wq, &priv->hp_work, 0);
+
+	return 0;
+}
+
+static void es8156_component_remove(struct snd_soc_component *component)
+{
+	struct es8156_priv *priv = snd_soc_component_get_drvdata(component);
+
+	es8156_power_down(priv);
+}
+
+static void es8156_cancel_hp_work(void *data)
+{
+	struct es8156_priv *priv = data;
+
+	cancel_delayed_work_sync(&priv->hp_work);
+}
+
+static int es8156_jack_init(struct es8156_priv *priv)
+{
+	struct device *dev = priv->dev;
+	int irq, ret;
+
+	priv->hp_det_gpio = devm_gpiod_get_optional(dev, "hp-det", GPIOD_IN);
+	if (IS_ERR(priv->hp_det_gpio))
+		return dev_err_probe(dev, PTR_ERR(priv->hp_det_gpio),
+				     "failed to get hp-det GPIO\n");
+	if (!priv->hp_det_gpio)
+		return 0;
+
+	priv->input = devm_input_allocate_device(dev);
+	if (!priv->input)
+		return -ENOMEM;
+
+	priv->input->name = "es8156 Headphone Jack";
+	priv->input->phys = "es8156-hp/input0";
+	input_set_capability(priv->input, EV_SW, SW_HEADPHONE_INSERT);
+
+	ret = input_register_device(priv->input);
+	if (ret)
+		return dev_err_probe(dev, ret, "failed to register jack input\n");
+
+	INIT_DELAYED_WORK(&priv->hp_work, es8156_hp_work);
+	ret = devm_add_action_or_reset(dev, es8156_cancel_hp_work, priv);
+	if (ret)
+		return ret;
+
+	queue_delayed_work(system_dfl_wq, &priv->hp_work, 0);
+
+	irq = gpiod_to_irq(priv->hp_det_gpio);
+	if (irq < 0) {
+		dev_warn(dev, "hp-det GPIO has no IRQ, jack state is static\n");
+		return 0;
+	}
+
+	ret = devm_request_threaded_irq(dev, irq, NULL, es8156_hp_irq,
+					IRQF_TRIGGER_RISING |
+					IRQF_TRIGGER_FALLING | IRQF_ONESHOT,
+					"es8156-hp-det", priv);
+	if (ret)
+		dev_warn(dev, "failed to request hp-det IRQ: %d\n", ret);
+
+	return 0;
+}
+
+static const struct snd_soc_component_driver es8156_component_driver = {
+	.controls		= es8156_snd_controls,
+	.num_controls		= ARRAY_SIZE(es8156_snd_controls),
+	.dapm_widgets		= es8156_dapm_widgets,
+	.num_dapm_widgets	= ARRAY_SIZE(es8156_dapm_widgets),
+	.dapm_routes		= es8156_dapm_routes,
+	.num_dapm_routes	= ARRAY_SIZE(es8156_dapm_routes),
+	.set_jack		= es8156_set_jack,
+	.remove			= es8156_component_remove,
+	.use_pmdown_time	= 1,
+	.endianness		= 1,
+};
+
+static void es8156_disable_clk(void *data)
+{
+	struct es8156_priv *priv = data;
+
+	clk_disable_unprepare(priv->mclk);
+}
+
+static int es8156_parse_dt(struct es8156_priv *priv)
+{
+	struct device *dev = priv->dev;
+	u32 mult = 1;
+	int ret;
+
+	ret = device_property_read_u32(dev, "everest,mclk-multiplier", &mult);
+	if (ret && ret != -EINVAL)
+		return dev_err_probe(dev, ret,
+				     "failed to read everest,mclk-multiplier\n");
+
+	switch (mult) {
+	case 1:
+	case 2:
+	case 4:
+	case 8:
+		priv->mclk_mult = ilog2(mult);
+		break;
+	default:
+		return dev_err_probe(dev, -EINVAL,
+				     "invalid everest,mclk-multiplier %u\n",
+				     mult);
+	}
+
+	priv->sclk_as_mclk = device_property_read_bool(dev,
+						       "everest,sclk-as-mclk");
+	priv->dll_enable = device_property_read_bool(dev, "everest,dll-enable");
+
+	return 0;
+}
+
+static int es8156_i2c_probe(struct i2c_client *i2c)
+{
+	struct device *dev = &i2c->dev;
+	struct es8156_priv *priv;
+	int ret;
+
+	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
+	if (!priv)
+		return -ENOMEM;
+
+	priv->dev = dev;
+	i2c_set_clientdata(i2c, priv);
+
+	ret = es8156_parse_dt(priv);
+	if (ret)
+		return ret;
+
+	priv->regmap = devm_regmap_init_i2c(i2c, &es8156_regmap_config);
+	if (IS_ERR(priv->regmap))
+		return dev_err_probe(dev, PTR_ERR(priv->regmap),
+				     "failed to init regmap\n");
+
+	priv->mclk = devm_clk_get_optional(dev, "mclk");
+	if (IS_ERR(priv->mclk))
+		return dev_err_probe(dev, PTR_ERR(priv->mclk),
+				     "failed to get mclk\n");
+
+	ret = clk_prepare_enable(priv->mclk);
+	if (ret)
+		return dev_err_probe(dev, ret, "failed to enable mclk\n");
+
+	ret = devm_add_action_or_reset(dev, es8156_disable_clk, priv);
+	if (ret)
+		return ret;
+
+	ret = es8156_reset(priv);
+	if (ret)
+		return dev_err_probe(dev, ret, "failed to reset codec\n");
+
+	ret = es8156_init(priv);
+	if (ret)
+		return dev_err_probe(dev, ret, "failed to init codec\n");
+
+	ret = es8156_jack_init(priv);
+	if (ret)
+		return ret;
+
+	return devm_snd_soc_register_component(dev, &es8156_component_driver,
+					       &es8156_dai, 1);
+}
+
+static const struct of_device_id es8156_of_match[] = {
+	{ .compatible = "everest,es8156" },
+	{ }
+};
+MODULE_DEVICE_TABLE(of, es8156_of_match);
+
+static const struct i2c_device_id es8156_i2c_id[] = {
+	{ "es8156", 0 },
+	{ }
+};
+MODULE_DEVICE_TABLE(i2c, es8156_i2c_id);
+
+static struct i2c_driver es8156_i2c_driver = {
+	.driver = {
+		.name = "es8156",
+		.of_match_table = es8156_of_match,
+	},
+	.probe = es8156_i2c_probe,
+	.id_table = es8156_i2c_id,
+};
+module_i2c_driver(es8156_i2c_driver);
+
+MODULE_DESCRIPTION("Everest Semiconductor ES8156 DAC");
+MODULE_AUTHOR("AtriOS");
+MODULE_LICENSE("GPL");

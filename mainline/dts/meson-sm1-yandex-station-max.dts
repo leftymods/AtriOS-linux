@@ -1,0 +1,641 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * Yandex Station Max - Amlogic S905X3 (SM1)
+ *
+ * GENERATED FILE - do not edit.  Change gen-ring-nodes.py and re-run it.
+ *
+ * Mainline port; the LED ring nodes at the end of &i2c0 are generated.
+ * GPIO/pin/data references:
+ *   vendor DTB  AtriOS-linux/common/arch/arm64/boot/dts/amlogic/
+ *               sm1_s905x3_yandex.dts (decompiled, phandle numbering is
+ *               off by one for the periphs bank: vendor = mainline + 1)
+ *   details      mainline/docs/dts-review.md
+ */
+
+/dts-v1/;
+
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/gpio/meson-g12a-gpio.h>
+#include <dt-bindings/input/input.h>
+#include <dt-bindings/interrupt-controller/irq.h>
+#include "meson-sm1.dtsi"
+
+/ {
+	model = "Yandex Station Max";
+	compatible = "yandex,station-max", "amlogic,sm1";
+
+	aliases {
+		serial0 = &uart_AO;
+		serial1 = &uart_A;
+		/* the board boots from eMMC, keep it as mmcblk0 */
+		mmc0 = &sd_emmc_c;
+		mmc1 = &sd_emmc_b;
+		mmc2 = &sd_emmc_a;
+		ethernet0 = &ethmac;
+	};
+
+	chosen {
+		stdout-path = "serial0:115200n8";
+	};
+
+	memory@0 {
+		device_type = "memory";
+		reg = <0x0 0x0 0x0 0x80000000>;
+	};
+
+	/*
+	 * PMIC-less board: every rail is a fixed, always-on regulator and is
+	 * only described so that the consumers below have a supply to point at.
+	 * Names follow the vendor DT (fixedregulator-3v3d / -1v8d / -20v-amp).
+	 */
+	reg_3v3_d: regulator-3v3-d {
+		compatible = "regulator-fixed";
+		regulator-name = "3V3_D";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		regulator-always-on;
+	};
+
+	reg_1v8_d: regulator-1v8-d {
+		compatible = "regulator-fixed";
+		regulator-name = "1V8_D";
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <1800000>;
+		regulator-always-on;
+	};
+
+	reg_20v_amp: regulator-20v-amp {
+		compatible = "regulator-fixed";
+		regulator-name = "20V_AMPL";
+		regulator-min-microvolt = <20000000>;
+		regulator-max-microvolt = <20000000>;
+		gpios = <&gpio GPIOX_9 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		regulator-boot-on;
+		regulator-always-on;
+	};
+
+	/* Vendor emmc node: hw_reset = <&gpio BOOT_12 ...> */
+	emmc_pwrseq: emmc-pwrseq {
+		compatible = "mmc-pwrseq-emmc";
+		reset-gpios = <&gpio BOOT_12 GPIO_ACTIVE_LOW>;
+	};
+
+	/* drivers/leds/trigger/ledtrig-ringfb.c */
+	led-ring-fb {
+		compatible = "yandex,led-ring-fb";
+	};
+
+	/*
+	 * Vendor DT: compatible = "rotary-volume", gpios = <GPIOC_7>, <GPIOAO_10>,
+	 * key-codes = <0x68 0x6d>; the vendor userspace (/usr/lib/atrios/rotaryd)
+	 * listens for KEY_PAGEUP/KEY_PAGEDOWN, so the codes must not be changed
+	 * to KEY_VOLUMEUP/KEY_VOLUMEDOWN without touching userspace.
+	 */
+	rotary-volume {
+		compatible = "yandex,rotary-volume";
+		gpios = <&gpio GPIOC_7 GPIO_ACTIVE_HIGH>,
+			<&gpio_ao GPIOAO_10 GPIO_ACTIVE_HIGH>;
+		key-codes = <KEY_PAGEUP KEY_PAGEDOWN>;
+	};
+
+	/* Vendor gpio_keypad: key_name = "function", "micmute";
+	 * key_code = <0x246 0xf8>; key-gpios = GPIOA_15, GPIOA_14 (active low).
+	 */
+	keypad {
+		compatible = "yandex,gpio-keypad";
+		key_num = <2>;
+		key-names = "function", "micmute";
+		key-codes = <KEY_VOICECOMMAND KEY_MICMUTE>;
+		key-gpios = <&gpio GPIOA_15 GPIO_ACTIVE_LOW>,
+			    <&gpio GPIOA_14 GPIO_ACTIVE_LOW>;
+		scan_period = <20>;
+		detect_mode = <0>;
+	};
+};
+
+/* AO UART, the 4-pin debug header (GPIOAO_0/GPIOAO_1). */
+&uart_AO {
+	status = "okay";
+	pinctrl-0 = <&uart_ao_a_pins>;
+	pinctrl-names = "default";
+};
+
+/*
+ * UART_A drives the RTL8822CS Bluetooth module (vendor: uart_tx_a/rx_a/
+ * cts_a/rts_a and bt-dev gpio_reset = GPIOX_17).
+ */
+&uart_A {
+	status = "okay";
+	pinctrl-0 = <&uart_a_pins>, <&uart_a_cts_rts_pins>;
+	pinctrl-names = "default";
+	uart-has-rtscts;
+
+	bluetooth {
+		compatible = "realtek,rtl8822cs-bt";
+		enable-gpios = <&gpio GPIOX_17 GPIO_ACTIVE_HIGH>;
+	};
+};
+
+/* eMMC.  Vendor: bus-width 8, 200 MHz, non-removable, MMC_CAP2_HS200. */
+&sd_emmc_c {
+	status = "okay";
+	pinctrl-0 = <&emmc_ctrl_pins>, <&emmc_data_8b_pins>, <&emmc_ds_pins>;
+	pinctrl-1 = <&emmc_clk_gate_pins>;
+	pinctrl-names = "default", "clk-gate";
+	bus-width = <8>;
+	max-frequency = <200000000>;
+	non-removable;
+	disable-wp;
+	cap-mmc-highspeed;
+	mmc-hs200-1_8v;
+	mmc-pwrseq = <&emmc_pwrseq>;
+	vmmc-supply = <&reg_3v3_d>;
+	vqmmc-supply = <&reg_1v8_d>;
+};
+
+/*
+ * SD slot.  The vendor DT ships sd@ffe05000 with status = "disabled" and it
+ * cannot be enabled here either: sdcard_cmd_c and i2c0_sda_c are the same pad
+ * (GPIOC_5) and i2c0 carries the LED ring / EEPROM / light sensor, while
+ * i2c0_sck_c (GPIOC_6) would take the card-detect line.  Kept for reference.
+ */
+&sd_emmc_b {
+	status = "disabled";
+	pinctrl-0 = <&sdcard_c_pins>;
+	pinctrl-1 = <&sdcard_clk_gate_c_pins>;
+	pinctrl-names = "default", "clk-gate";
+	bus-width = <4>;
+	cap-sd-highspeed;
+	disable-wp;
+	max-frequency = <100000000>;
+};
+
+/*
+ * 10/100 Ethernet.  Vendor: internal_phy = <1>, i.e. the on-SoC PHY reached
+ * through the mdio multiplexer (int_mdio/internal_ephy), not an external
+ * RGMII PHY.  GPIOZ_14/15 carry the link/activity LEDs.
+ */
+&ethmac {
+	status = "okay";
+	phy-mode = "rmii";
+	phy-handle = <&internal_ephy>;
+	pinctrl-0 = <&eth_leds_pins>;
+	pinctrl-names = "default";
+};
+
+/*
+ * Vendor bus: i2c@1f000 on GPIOC_5/GPIOC_6 at 400 kHz.
+ */
+&i2c0 {
+	status = "okay";
+	pinctrl-0 = <&i2c0_sda_c_pins>, <&i2c0_sck_c_pins>;
+	pinctrl-names = "default";
+	clock-frequency = <400000>;
+
+	/* Vendor: compatible = "24c01", PCBA ids EEPROM. */
+	eeprom@56 {
+		compatible = "atmel,24c01";
+		reg = <0x56>;
+		pagesize = <8>;
+	};
+
+	/*
+	 * Vendor: compatible = "lite-on,ltr308als01".  The part is an
+	 * LTR-308ALS-01, which upstream binds as "liteon,ltr308"
+	 * (drivers/iio/light/ltrf216a.c) - use the upstream id so no driver
+	 * patch is needed.
+	 */
+	light-sensor@53 {
+		compatible = "liteon,ltr308";
+		reg = <0x53>;
+	};
+
+	/*
+	 * IS31FL3236A LED ring controllers.  The "gva" compatible,
+	 * reg_offset fallback and max-brightness-scale are vendor
+	 * extensions carried by patches/linux/0002-leds-is31fl32xx-gva.patch.
+	 */
+	led-controller@3c {
+		compatible = "issi,is31fl3236a";
+		reg = <0x3c>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+		max-brightness-scale = <200>;
+
+		led@1 {
+			reg = <1>;
+			label = "station2:red:ring1";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@2 {
+			reg = <2>;
+			label = "station2:green:ring1";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@3 {
+			reg = <3>;
+			label = "station2:blue:ring1";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@4 {
+			reg = <4>;
+			label = "station2:red:ring2";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@5 {
+			reg = <5>;
+			label = "station2:green:ring2";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@6 {
+			reg = <6>;
+			label = "station2:blue:ring2";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@7 {
+			reg = <7>;
+			label = "station2:red:ring3";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@8 {
+			reg = <8>;
+			label = "station2:green:ring3";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@9 {
+			reg = <9>;
+			label = "station2:blue:ring3";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@10 {
+			reg = <10>;
+			label = "station2:red:ring4";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@11 {
+			reg = <11>;
+			label = "station2:green:ring4";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@12 {
+			reg = <12>;
+			label = "station2:blue:ring4";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@13 {
+			reg = <13>;
+			label = "station2:red:ring5";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@14 {
+			reg = <14>;
+			label = "station2:green:ring5";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@15 {
+			reg = <15>;
+			label = "station2:blue:ring5";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@16 {
+			reg = <16>;
+			label = "station2:red:ring6";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@17 {
+			reg = <17>;
+			label = "station2:green:ring6";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@18 {
+			reg = <18>;
+			label = "station2:blue:ring6";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@19 {
+			reg = <19>;
+			label = "station2:red:ring7";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@20 {
+			reg = <20>;
+			label = "station2:green:ring7";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@21 {
+			reg = <21>;
+			label = "station2:blue:ring7";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@22 {
+			reg = <22>;
+			label = "station2:red:ring8";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@23 {
+			reg = <23>;
+			label = "station2:green:ring8";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@24 {
+			reg = <24>;
+			label = "station2:blue:ring8";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@25 {
+			reg = <25>;
+			label = "station2:red:ring9";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@26 {
+			reg = <26>;
+			label = "station2:green:ring9";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@27 {
+			reg = <27>;
+			label = "station2:blue:ring9";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@28 {
+			reg = <28>;
+			label = "station2:red:ring10";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@29 {
+			reg = <29>;
+			label = "station2:green:ring10";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@30 {
+			reg = <30>;
+			label = "station2:blue:ring10";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@31 {
+			reg = <31>;
+			label = "station2:red:ring11";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@32 {
+			reg = <32>;
+			label = "station2:green:ring11";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@33 {
+			reg = <33>;
+			label = "station2:blue:ring11";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@34 {
+			reg = <34>;
+			label = "station2:red:ring12";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@35 {
+			reg = <35>;
+			label = "station2:green:ring12";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@36 {
+			reg = <36>;
+			label = "station2:blue:ring12";
+			linux,default-trigger = "led_ring_fb";
+		};
+	};
+
+	led-controller@3f {
+		compatible = "issi,is31fl3236a";
+		reg = <0x3f>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+		max-brightness-scale = <200>;
+
+		led@1 {
+			reg = <1>;
+			label = "station2:red:ring13";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@2 {
+			reg = <2>;
+			label = "station2:green:ring13";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@3 {
+			reg = <3>;
+			label = "station2:blue:ring13";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@4 {
+			reg = <4>;
+			label = "station2:red:ring14";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@5 {
+			reg = <5>;
+			label = "station2:green:ring14";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@6 {
+			reg = <6>;
+			label = "station2:blue:ring14";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@7 {
+			reg = <7>;
+			label = "station2:red:ring15";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@8 {
+			reg = <8>;
+			label = "station2:green:ring15";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@9 {
+			reg = <9>;
+			label = "station2:blue:ring15";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@10 {
+			reg = <10>;
+			label = "station2:red:ring16";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@11 {
+			reg = <11>;
+			label = "station2:green:ring16";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@12 {
+			reg = <12>;
+			label = "station2:blue:ring16";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@13 {
+			reg = <13>;
+			label = "station2:red:ring17";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@14 {
+			reg = <14>;
+			label = "station2:green:ring17";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@15 {
+			reg = <15>;
+			label = "station2:blue:ring17";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@16 {
+			reg = <16>;
+			label = "station2:red:ring18";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@17 {
+			reg = <17>;
+			label = "station2:green:ring18";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@18 {
+			reg = <18>;
+			label = "station2:blue:ring18";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@19 {
+			reg = <19>;
+			label = "station2:red:ring19";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@20 {
+			reg = <20>;
+			label = "station2:green:ring19";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@21 {
+			reg = <21>;
+			label = "station2:blue:ring19";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@22 {
+			reg = <22>;
+			label = "station2:red:ring20";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@23 {
+			reg = <23>;
+			label = "station2:green:ring20";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@24 {
+			reg = <24>;
+			label = "station2:blue:ring20";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@25 {
+			reg = <25>;
+			label = "station2:red:ring21";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@26 {
+			reg = <26>;
+			label = "station2:green:ring21";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@27 {
+			reg = <27>;
+			label = "station2:blue:ring21";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@28 {
+			reg = <28>;
+			label = "station2:red:ring22";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@29 {
+			reg = <29>;
+			label = "station2:green:ring22";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@30 {
+			reg = <30>;
+			label = "station2:blue:ring22";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@31 {
+			reg = <31>;
+			label = "station2:red:ring23";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@32 {
+			reg = <32>;
+			label = "station2:green:ring23";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@33 {
+			reg = <33>;
+			label = "station2:blue:ring23";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@34 {
+			reg = <34>;
+			label = "station2:red:ring24";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@35 {
+			reg = <35>;
+			label = "station2:green:ring24";
+			linux,default-trigger = "led_ring_fb";
+		};
+		led@36 {
+			reg = <36>;
+			label = "station2:blue:ring24";
+			linux,default-trigger = "led_ring_fb";
+		};
+	};
+};
+
+/*
+ * Front matrix panel (25x16 RGB888, Gowin FPGA) on spicc1.
+ *
+ * NOTE: the panel shares its pads with the FPGA JTAG lines, so those GPIOs
+ * cannot simply be requested next to spicc1:
+ *   spi1_mosi = GPIOH_4 = jtag-tdi-gpios
+ *   spi1_miso = GPIOH_5 = jtag-tdo-gpios
+ *   spi1_clk  = GPIOH_7 = jtag-tck-gpios
+ *   spi1_ss0  = GPIOH_6 = cs-gpios and jtag-tms-gpios
+ * spicc1_pins muxes H_4/H_5/H_7 to the SPI function and the SPI core owns
+ * the H_6 chip select, so the panel driver has to do a pinctrl handoff
+ * before it can drive the JTAG lines (see docs/dts-review.md).
+ */
+&spicc1 {
+	status = "okay";
+	pinctrl-0 = <&spicc1_pins>;
+	pinctrl-names = "default";
+	cs-gpios = <&gpio GPIOH_6 GPIO_ACTIVE_LOW>;
+	num-cs = <1>;
+
+	panel@0 {
+		compatible = "yandex,led-screen", "atri,led-panel";
+		reg = <0>;
+		spi-max-frequency = <4000000>;
+		max-brightness = <200>;
+		reset-gpios = <&gpio GPIOX_8 GPIO_ACTIVE_LOW>;
+		jtag-tck-gpios = <&gpio GPIOH_7 GPIO_ACTIVE_HIGH>;
+		jtag-tdi-gpios = <&gpio GPIOH_4 GPIO_ACTIVE_HIGH>;
+		jtag-tdo-gpios = <&gpio GPIOH_5 GPIO_ACTIVE_HIGH>;
+		jtag-tms-gpios = <&gpio GPIOH_6 GPIO_ACTIVE_HIGH>;
+		jtag-reconfig-gpios = <&gpio GPIOH_8 GPIO_ACTIVE_LOW>;
+		jtag-sel-gpios = <&gpio_ao GPIOE_2 GPIO_ACTIVE_HIGH>;
+	};
+};
+
+/*
+ * IR receiver (vendor: rc@0xff808040, remote_ao_input on GPIOAO_5).
+ * The vendor NEC keymap is not upstream yet, so no linux,rc-map-name here.
+ */
+&ir {
+	status = "okay";
+	pinctrl-0 = <&remote_input_ao_pins>;
+	pinctrl-names = "default";
+};

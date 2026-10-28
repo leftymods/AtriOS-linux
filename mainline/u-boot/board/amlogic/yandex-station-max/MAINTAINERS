@@ -1,0 +1,7 @@
+YANDEX-STATION-MAX BOARD
+M:	AtriOS mainline port
+S:	Maintained
+F:	board/amlogic/yandex-station-max/
+F:	configs/yandex-station-max_defconfig
+F:	arch/arm/dts/meson-sm1-yandex-station-max.dts
+F:	dts/upstream/src/arm64/amlogic/meson-sm1-yandex-station-max.dts

@@ -1,0 +1,728 @@
+// SPDX-License-Identifier: GPL-2.0-only
+//
+// es7210.c -- Everest Semiconductor ES7210 4-channel microphone ADC
+//
+// The Yandex Station Max (Amlogic S905X3 / SM1) carries an ES7210 microphone
+// array on I2C address 0x40, capturing from TDM-B lane 0 (din0).  Linux 7.3
+// has no driver for this chip, so this one is a port of the vendor 4.9.113
+// module (snd-soc-es7210.ko).  The vendor module shipped with full DWARF,
+// therefore every register write, control range, TLV and DAI property below
+// was read out of the binary (see docs/codec-es7210.md for the offsets,
+// arrays and line numbers).
+//
+// Register names are the ones used by the Everest BSP header "es7210.h";
+// the datasheet itself was not available, so bit-level meanings that the
+// vendor driver does not prove directly are marked "inferred".
+//
+// The codec is a capture-only I2S/TDM consumer on this board: TDM-B is the
+// bit clock and frame provider, 2 slots x 32 bit, and the chip is muted
+// until the first stream is prepared.
+
+#include <linux/bits.h>
+#include <linux/clk.h>
+#include <linux/delay.h>
+#include <linux/gpio/consumer.h>
+#include <linux/i2c.h>
+#include <linux/module.h>
+#include <linux/regmap.h>
+#include <sound/pcm_params.h>
+#include <sound/soc.h>
+#include <sound/tlv.h>
+
+/* ------------------------------------------------------------------ */
+/* Register map                                                        */
+/* ------------------------------------------------------------------ */
+#define ES7210_RESET_CTL		0x00
+#define ES7210_CLK_ON_OFF		0x01
+#define ES7210_MCLK_CTL			0x02
+#define ES7210_MST_CLK_CTL		0x03
+#define ES7210_MST_LRCDIVH		0x04
+#define ES7210_MST_LRCDIVL		0x05
+#define ES7210_DIGITAL_PDN		0x06
+#define ES7210_ADC_OSR			0x07
+#define ES7210_MODE_CFG			0x08
+#define ES7210_TCT0_CHPINI		0x09
+#define ES7210_TCT1_CHPINI		0x0a
+#define ES7210_CHIP_STA			0x0b
+#define ES7210_IRQ_CTL			0x0c
+#define ES7210_MISC_CTL			0x0d
+#define ES7210_DMIC_CTL			0x10
+#define ES7210_SDP_CFG1			0x11
+#define ES7210_SDP_CFG2			0x12
+#define ES7210_ADC_AUTOMUTE		0x13
+#define ES7210_ADC34_MUTE		0x14
+#define ES7210_ADC12_MUTE		0x15
+#define ES7210_ALC_SEL			0x16
+#define ES7210_ALC_COM_CFG1		0x17
+#define ES7210_ALC34_LVL		0x18
+#define ES7210_ALC12_LVL		0x19
+#define ES7210_ALC_COM_CFG2		0x1a
+#define ES7210_ALC4_MAX_GAIN		0x1b
+#define ES7210_ALC3_MAX_GAIN		0x1c
+#define ES7210_ALC2_MAX_GAIN		0x1d
+#define ES7210_ALC1_MAX_GAIN		0x1e
+#define ES7210_ADC34_HPF2		0x20
+#define ES7210_ADC34_HPF1		0x21
+#define ES7210_ADC12_HPF2		0x22
+#define ES7210_ADC12_HPF1		0x23
+#define ES7210_CHIP_ID1			0x3d
+#define ES7210_CHIP_ID0			0x3e
+#define ES7210_CHIP_VER			0x3f
+#define ES7210_ANALOG_SYS		0x40
+#define ES7210_MICBIAS12		0x41
+#define ES7210_MICBIAS34		0x42
+#define ES7210_MIC1_GAIN		0x43
+#define ES7210_MIC2_GAIN		0x44
+#define ES7210_MIC3_GAIN		0x45
+#define ES7210_MIC4_GAIN		0x46
+#define ES7210_MIC1_LP			0x47
+#define ES7210_MIC2_LP			0x48
+#define ES7210_MIC3_LP			0x49
+#define ES7210_MIC4_LP			0x4a
+#define ES7210_MIC12_PDN		0x4b
+#define ES7210_MIC34_PDN		0x4c
+
+/* MODE_CFG: active channels / 2 in [7:4], see es7210_channel_cfg() */
+#define ES7210_MODE_CH_MASK		GENMASK(7, 4)
+/* MODE_CFG bit 3: BCLK edge select (inferred from the vendor set_fmt) */
+#define ES7210_MODE_BCLK_INV		BIT(3)
+/* MODE_CFG bit 0: the codec is the frame provider (inferred) */
+#define ES7210_MODE_FRAME_MASTER	BIT(0)
+
+/* SDP_CFG1: word length in [7:5], serial format in [4:0] */
+#define ES7210_SDP_WIDTH_MASK		GENMASK(7, 5)
+/* 0x00/0x20 (24/20 bit in 3 bytes) are not used: the DAI is 16/24/32 bit */
+#define ES7210_SDP_WIDTH_16		0x60
+#define ES7210_SDP_WIDTH_24_32		0x80	/* 24 or 32 bit in 4 bytes */
+
+#define ES7210_SDP_FMT_MASK		GENMASK(4, 0)
+#define ES7210_SDP_FMT_I2S		0x00
+#define ES7210_SDP_FMT_LEFT_J		0x01
+#define ES7210_SDP_FMT_DSP_A		0x03
+#define ES7210_SDP_FMT_DSP_B		0x13
+
+/* MCLK_CTL: MCLK/LRCK ratio, values taken from the vendor TDM setup */
+#define ES7210_MCLK_RATIO_128		0x01
+#define ES7210_MCLK_RATIO_64		0x41
+#define ES7210_MCLK_RATIO_256		0xc1
+#define ES7210_MCLK_RATIO_768		0xc3
+
+/* ADC12_MUTE/ADC34_MUTE: one bit per ADC of the pair */
+#define ES7210_ADC12_MUTE_MASK		GENMASK(1, 0)
+#define ES7210_ADC34_MUTE_MASK		GENMASK(1, 0)
+
+struct es7210_chip {
+	unsigned int channels;
+};
+
+struct es7210_priv {
+	struct device *dev;
+	struct regmap *regmap;
+	struct clk *mclk;
+	struct gpio_desc *reset_gpio;
+	unsigned int channels;
+	unsigned int tdm_slots;
+	unsigned int tdm_slot_width;
+};
+
+/*
+ * Power-on register image, written by the vendor i2c_probe() as 52 explicit
+ * regmap_write() calls (es7210_reg_defaults[], .rodata+0x118 in the module).
+ * The same table is handed to regmap as the cache default.
+ */
+static const struct reg_default es7210_reg_defaults[] = {
+	{ ES7210_RESET_CTL,	0x32 },
+	{ ES7210_CLK_ON_OFF,	0x20 },
+	{ ES7210_MCLK_CTL,	0x02 },
+	{ ES7210_MST_CLK_CTL,	0x04 },
+	{ ES7210_MST_LRCDIVH,	0x01 },
+	{ ES7210_MST_LRCDIVL,	0x00 },
+	{ ES7210_DIGITAL_PDN,	0x00 },
+	{ ES7210_ADC_OSR,	0x20 },
+	{ ES7210_MODE_CFG,	0x10 },
+	{ ES7210_TCT0_CHPINI,	0x40 },
+	{ ES7210_TCT1_CHPINI,	0x40 },
+	{ ES7210_CHIP_STA,	0x00 },
+	{ ES7210_IRQ_CTL,	0x00 },
+	{ ES7210_MISC_CTL,	0x09 },
+	{ 0x0e,			0x00 },
+	{ 0x0f,			0x00 },
+	{ ES7210_DMIC_CTL,	0x00 },
+	{ ES7210_SDP_CFG1,	0x00 },
+	{ ES7210_SDP_CFG2,	0x00 },
+	{ ES7210_ADC_AUTOMUTE,	0x00 },
+	{ ES7210_ADC34_MUTE,	0x00 },
+	{ ES7210_ADC12_MUTE,	0x00 },
+	{ ES7210_ALC_SEL,	0x00 },
+	{ ES7210_ALC_COM_CFG1,	0x00 },
+	{ ES7210_ALC34_LVL,	0xf7 },
+	{ ES7210_ALC12_LVL,	0xf7 },
+	{ ES7210_ALC_COM_CFG2,	0x00 },
+	{ ES7210_ALC4_MAX_GAIN,	0xbf },
+	{ ES7210_ALC3_MAX_GAIN,	0xbf },
+	{ ES7210_ALC2_MAX_GAIN,	0xbf },
+	{ ES7210_ALC1_MAX_GAIN,	0xbf },
+	{ 0x1f,			0x00 },
+	{ ES7210_ADC34_HPF2,	0x26 },
+	{ ES7210_ADC34_HPF1,	0x26 },
+	{ ES7210_ADC12_HPF2,	0x06 },
+	{ ES7210_ADC12_HPF1,	0x26 },
+	{ ES7210_CHIP_ID1,	0x72 },
+	{ ES7210_CHIP_ID0,	0x10 },
+	{ ES7210_CHIP_VER,	0x00 },
+	{ ES7210_ANALOG_SYS,	0x80 },
+	{ ES7210_MICBIAS12,	0x71 },
+	{ ES7210_MICBIAS34,	0x71 },
+	{ ES7210_MIC1_GAIN,	0x00 },
+	{ ES7210_MIC2_GAIN,	0x00 },
+	{ ES7210_MIC3_GAIN,	0x00 },
+	{ ES7210_MIC4_GAIN,	0x00 },
+	{ ES7210_MIC1_LP,	0x00 },
+	{ ES7210_MIC2_LP,	0x00 },
+	{ ES7210_MIC3_LP,	0x00 },
+	{ ES7210_MIC4_LP,	0x00 },
+	{ ES7210_MIC12_PDN,	0xff },
+	{ ES7210_MIC34_PDN,	0xff },
+};
+
+struct es7210_reg_val {
+	u8 reg;
+	u8 val;
+};
+
+/*
+ * TDM/clock/analog setup, written after the defaults by the vendor
+ * component probe (es7210_tdm_reg_common_cfg[], .rodata+0x190, 21 writes).
+ * It enables the analog part (MICn_GAIN = 0x10: PGA on, 0 dB) and selects
+ * the 256 fs MCLK/LRCK ratio; MIC12/34_PDN is programmed separately by
+ * es7210_set_channels().
+ */
+static const struct es7210_reg_val es7210_init_regs[] = {
+	{ ES7210_RESET_CTL,	0x41 },
+	{ ES7210_MCLK_CTL,	ES7210_MCLK_RATIO_256 },
+	{ ES7210_DIGITAL_PDN,	0x04 },
+	{ ES7210_ADC_OSR,	0x20 },
+	{ ES7210_TCT0_CHPINI,	0x30 },
+	{ ES7210_TCT1_CHPINI,	0x30 },
+	{ ES7210_ADC12_HPF1,	0x26 },
+	{ ES7210_ADC12_HPF2,	0x06 },
+	{ ES7210_ADC34_HPF1,	0x26 },
+	{ ES7210_ADC34_HPF2,	0x26 },
+	{ ES7210_ANALOG_SYS,	0xc3 },
+	{ ES7210_MICBIAS12,	0x70 },
+	{ ES7210_MICBIAS34,	0x70 },
+	{ ES7210_MIC1_GAIN,	0x10 },
+	{ ES7210_MIC2_GAIN,	0x10 },
+	{ ES7210_MIC3_GAIN,	0x10 },
+	{ ES7210_MIC4_GAIN,	0x10 },
+	{ ES7210_MIC1_LP,	0x08 },
+	{ ES7210_MIC2_LP,	0x08 },
+	{ ES7210_MIC3_LP,	0x08 },
+	{ ES7210_MIC4_LP,	0x08 },
+};
+
+/*
+ * Vendor TLVs, read from adc_gain_tlv (.rodata+0x838) and mic_boost_tlv
+ * (.rodata+0x848): {1, 8, -9500, 50} and {1, 8, 0, 300}.
+ *
+ *   ADCn_MAX_GAIN: -95.00 dB .. +32.50 dB in 0.5 dB steps, raw 0..255
+ *   PGAn_setting:    0.00 dB .. +45.00 dB in 3.0 dB steps, raw 0..15
+ *
+ * Neither has a mute bit; the userspace volume curve owns the gain.
+ */
+static const SNDRV_CTL_TLVD_DECLARE_DB_SCALE(es7210_adc_gain_tlv, -9500, 50, 0);
+static const SNDRV_CTL_TLVD_DECLARE_DB_SCALE(es7210_mic_boost_tlv, 0, 300, 0);
+
+/* Names, registers, shifts and ranges are exactly the vendor ones. */
+static const struct snd_kcontrol_new es7210_snd_controls[] = {
+	SOC_SINGLE_TLV("PGA1_setting", ES7210_MIC1_GAIN, 0, 0x0f,
+		       0, es7210_mic_boost_tlv),
+	SOC_SINGLE_TLV("PGA2_setting", ES7210_MIC2_GAIN, 0, 0x0f,
+		       0, es7210_mic_boost_tlv),
+	SOC_SINGLE_TLV("PGA3_setting", ES7210_MIC3_GAIN, 0, 0x0f,
+		       0, es7210_mic_boost_tlv),
+	SOC_SINGLE_TLV("PGA4_setting", ES7210_MIC4_GAIN, 0, 0x0f,
+		       0, es7210_mic_boost_tlv),
+	SOC_SINGLE("ADC1_MUTE", ES7210_ADC12_MUTE, 0, 1, 0),
+	SOC_SINGLE("ADC2_MUTE", ES7210_ADC12_MUTE, 1, 1, 0),
+	SOC_SINGLE("ADC3_MUTE", ES7210_ADC34_MUTE, 0, 1, 0),
+	SOC_SINGLE("ADC4_MUTE", ES7210_ADC34_MUTE, 1, 1, 0),
+	SOC_SINGLE_TLV("ADC1_MAX_GAIN", ES7210_ALC1_MAX_GAIN, 0, 0xff,
+		       0, es7210_adc_gain_tlv),
+	SOC_SINGLE_TLV("ADC2_MAX_GAIN", ES7210_ALC2_MAX_GAIN, 0, 0xff,
+		       0, es7210_adc_gain_tlv),
+	SOC_SINGLE_TLV("ADC3_MAX_GAIN", ES7210_ALC3_MAX_GAIN, 0, 0xff,
+		       0, es7210_adc_gain_tlv),
+	SOC_SINGLE_TLV("ADC4_MAX_GAIN", ES7210_ALC4_MAX_GAIN, 0, 0xff,
+		       0, es7210_adc_gain_tlv),
+};
+
+static const struct snd_soc_dapm_widget es7210_dapm_widgets[] = {
+	SND_SOC_DAPM_INPUT("MIC1"),
+	SND_SOC_DAPM_INPUT("MIC2"),
+	SND_SOC_DAPM_INPUT("MIC3"),
+	SND_SOC_DAPM_INPUT("MIC4"),
+	/* no register bit: the ADCs are powered by es7210_init_regs[] */
+	SND_SOC_DAPM_ADC("ADC", "Capture", SND_SOC_NOPM, 0, 0),
+};
+
+static const struct snd_soc_dapm_route es7210_dapm_routes[] = {
+	{ "ADC", NULL, "MIC1" },
+	{ "ADC", NULL, "MIC2" },
+	{ "ADC", NULL, "MIC3" },
+	{ "ADC", NULL, "MIC4" },
+};
+
+static const struct regmap_config es7210_regmap_config = {
+	.reg_bits	= 8,
+	.val_bits	= 8,
+	.max_register	= ES7210_MIC34_PDN,
+	.reg_defaults	= es7210_reg_defaults,
+	.num_reg_defaults = ARRAY_SIZE(es7210_reg_defaults),
+	.cache_type	= REGCACHE_RBTREE,
+};
+
+/* MODE_CFG[7:4] = number of active channels / 2 (2ch -> 0x10, 4ch -> 0x20) */
+static unsigned int es7210_channel_cfg(unsigned int channels)
+{
+	return (channels / 2) << 4;
+}
+
+/*
+ * Vendor channel setup (es7210_probe, lines 269-293): the 2-channel variant
+ * powers ADC3/4 down, the 4-channel variant keeps all four ADCs on.
+ */
+static int es7210_set_channels(struct es7210_priv *priv, unsigned int channels)
+{
+	struct regmap *map = priv->regmap;
+	int ret;
+
+	ret = regmap_update_bits(map, ES7210_MODE_CFG, ES7210_MODE_CH_MASK,
+				 es7210_channel_cfg(channels));
+	if (ret)
+		return ret;
+
+	ret = regmap_write(map, ES7210_MIC12_PDN, 0x00);
+	if (ret)
+		return ret;
+
+	return regmap_write(map, ES7210_MIC34_PDN, channels == 2 ? 0xff : 0x00);
+}
+
+static int es7210_write_table(struct es7210_priv *priv,
+			      const struct es7210_reg_val *regs,
+			      unsigned int num)
+{
+	unsigned int i;
+	int ret;
+
+	for (i = 0; i < num; i++) {
+		ret = regmap_write(priv->regmap, regs[i].reg, regs[i].val);
+		if (ret) {
+			dev_err(priv->dev, "can't write reg 0x%02x: %d\n",
+				regs[i].reg, ret);
+			return ret;
+		}
+	}
+
+	return 0;
+}
+
+/* Vendor bring-up order: defaults, TDM/analog setup, channels, mute all. */
+static int es7210_init(struct es7210_priv *priv)
+{
+	struct regmap *map = priv->regmap;
+	unsigned int i;
+	int ret;
+
+	for (i = 0; i < ARRAY_SIZE(es7210_reg_defaults); i++) {
+		ret = regmap_write(map, es7210_reg_defaults[i].reg,
+				   es7210_reg_defaults[i].def);
+		if (ret) {
+			dev_err(priv->dev, "can't write reg 0x%02x: %d\n",
+				es7210_reg_defaults[i].reg, ret);
+			return ret;
+		}
+	}
+
+	ret = es7210_write_table(priv, es7210_init_regs,
+				 ARRAY_SIZE(es7210_init_regs));
+	if (ret)
+		return ret;
+
+	ret = es7210_set_channels(priv, priv->channels);
+	if (ret)
+		return ret;
+
+	/* Both ADC pairs stay muted until the first stream is prepared. */
+	ret = regmap_update_bits(map, ES7210_ADC12_MUTE,
+				 ES7210_ADC12_MUTE_MASK,
+				 ES7210_ADC12_MUTE_MASK);
+	if (ret)
+		return ret;
+
+	return regmap_update_bits(map, ES7210_ADC34_MUTE,
+				  ES7210_ADC34_MUTE_MASK,
+				  ES7210_ADC34_MUTE_MASK);
+}
+
+/*
+ * The vendor driver programs the MCLK/LRCK ratio once, for a fixed
+ * 12.288 MHz MCLK (256 fs at 48 kHz).  Only touch it when the DT describes
+ * an MCLK; otherwise the 256 fs value from es7210_init_regs[] stands.
+ */
+static int es7210_set_mclk_ratio(struct es7210_priv *priv, unsigned int rate)
+{
+	unsigned long mclk_rate;
+	unsigned int ratio;
+	u8 val;
+
+	if (!priv->mclk)
+		return 0;
+
+	mclk_rate = clk_get_rate(priv->mclk);
+	if (!mclk_rate || mclk_rate % rate) {
+		dev_warn(priv->dev, "MCLK %lu is not a multiple of %u Hz\n",
+			 mclk_rate, rate);
+		return 0;
+	}
+
+	ratio = mclk_rate / rate;
+	switch (ratio) {
+	case 64:
+		val = ES7210_MCLK_RATIO_64;
+		break;
+	case 128:
+		val = ES7210_MCLK_RATIO_128;
+		break;
+	case 256:
+		val = ES7210_MCLK_RATIO_256;
+		break;
+	case 768:
+		val = ES7210_MCLK_RATIO_768;
+		break;
+	default:
+		dev_warn(priv->dev, "unsupported MCLK/LRCK ratio %u\n", ratio);
+		return 0;
+	}
+
+	return regmap_write(priv->regmap, ES7210_MCLK_CTL, val);
+}
+
+static int es7210_set_dai_fmt(struct snd_soc_dai *dai, unsigned int fmt)
+{
+	struct snd_soc_component *component = dai->component;
+	struct es7210_priv *priv = snd_soc_component_get_drvdata(component);
+	unsigned int sdp1, sdp2, inv;
+	bool frame_master;
+	int ret;
+
+	/*
+	 * The chip has a single clock-provider bit.  The vendor set it for the
+	 * "codec provides the frame clock" case only; treat any frame provider
+	 * as master and everything else as slave.
+	 */
+	switch (fmt & SND_SOC_DAIFMT_CLOCK_PROVIDER_MASK) {
+	case SND_SOC_DAIFMT_CBP_CFP:
+	case SND_SOC_DAIFMT_CBC_CFP:
+		frame_master = true;
+		break;
+	case SND_SOC_DAIFMT_CBP_CFC:
+	case SND_SOC_DAIFMT_CBC_CFC:
+		frame_master = false;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	/* SDP_CFG1[4:0] and SDP_CFG2, values taken from the vendor set_fmt. */
+	switch (fmt & SND_SOC_DAIFMT_FORMAT_MASK) {
+	case SND_SOC_DAIFMT_I2S:
+		sdp1 = ES7210_SDP_FMT_I2S;
+		sdp2 = 0x02;
+		break;
+	case SND_SOC_DAIFMT_LEFT_J:
+		sdp1 = ES7210_SDP_FMT_LEFT_J;
+		sdp2 = 0x02;
+		break;
+	case SND_SOC_DAIFMT_DSP_A:
+		sdp1 = ES7210_SDP_FMT_DSP_A;
+		sdp2 = 0x02;
+		break;
+	case SND_SOC_DAIFMT_DSP_B:
+		sdp1 = ES7210_SDP_FMT_DSP_B;
+		sdp2 = 0x01;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	ret = regmap_update_bits(priv->regmap, ES7210_SDP_CFG1,
+				 ES7210_SDP_FMT_MASK, sdp1);
+	if (ret)
+		return ret;
+
+	ret = regmap_write(priv->regmap, ES7210_SDP_CFG2, sdp2);
+	if (ret)
+		return ret;
+
+	ret = regmap_update_bits(priv->regmap, ES7210_MODE_CFG,
+				 ES7210_MODE_FRAME_MASTER,
+				 frame_master ? ES7210_MODE_FRAME_MASTER : 0);
+	if (ret)
+		return ret;
+
+	/*
+	 * The vendor only ever inverts the bit clock; there is no frame-clock
+	 * inversion bit, so NB_IF behaves like NB_NF (same as the vendor).
+	 */
+	switch (fmt & SND_SOC_DAIFMT_INV_MASK) {
+	case SND_SOC_DAIFMT_IB_NF:
+	case SND_SOC_DAIFMT_IB_IF:
+		inv = ES7210_MODE_BCLK_INV;
+		break;
+	case SND_SOC_DAIFMT_NB_IF:
+	case SND_SOC_DAIFMT_NB_NF:
+		inv = 0;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	return regmap_update_bits(priv->regmap, ES7210_MODE_CFG,
+				  ES7210_MODE_BCLK_INV, inv);
+}
+
+/*
+ * The ES7210 has no slot-count register: TDM framing follows BCLK/LRCK and
+ * the chip only needs to know how many of its ADCs are active, which comes
+ * from the PCM channel count in hw_params().  Keep the vendor supported
+ * layouts (2, 4 and 8 slots, cf. the multi-chip TDM setup) validated here.
+ */
+static int es7210_set_tdm_slot(struct snd_soc_dai *dai, unsigned int tx_mask,
+			       unsigned int rx_mask, int slots, int slot_width)
+{
+	struct snd_soc_component *component = dai->component;
+	struct es7210_priv *priv = snd_soc_component_get_drvdata(component);
+
+	switch (slots) {
+	case 2:
+	case 4:
+	case 8:
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	switch (slot_width) {
+	case 0:
+	case 16:
+	case 24:
+	case 32:
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	priv->tdm_slots = slots;
+	priv->tdm_slot_width = slot_width;
+
+	return 0;
+}
+
+static int es7210_hw_params(struct snd_pcm_substream *substream,
+			    struct snd_pcm_hw_params *params,
+			    struct snd_soc_dai *dai)
+{
+	struct snd_soc_component *component = dai->component;
+	struct es7210_priv *priv = snd_soc_component_get_drvdata(component);
+	unsigned int width, channels;
+	int ret;
+
+	switch (params_format(params)) {
+	case SNDRV_PCM_FORMAT_S16_LE:
+		width = ES7210_SDP_WIDTH_16;
+		break;
+	case SNDRV_PCM_FORMAT_S24_LE:
+		width = ES7210_SDP_WIDTH_24_32;
+		break;
+	case SNDRV_PCM_FORMAT_S32_LE:
+		width = ES7210_SDP_WIDTH_24_32;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	channels = params_channels(params);
+	if (channels != 2 && channels != 4)
+		return -EINVAL;
+
+	/* With dai-tdm-slot-num set, refuse more channels than slots. */
+	if (priv->tdm_slots && channels > priv->tdm_slots)
+		return -EINVAL;
+
+	ret = regmap_update_bits(priv->regmap, ES7210_SDP_CFG1,
+				 ES7210_SDP_WIDTH_MASK, width);
+	if (ret)
+		return ret;
+
+	ret = es7210_set_channels(priv, channels);
+	if (ret)
+		return ret;
+
+	return es7210_set_mclk_ratio(priv, params_rate(params));
+}
+
+static int es7210_mute_stream(struct snd_soc_dai *dai, int mute, int stream)
+{
+	struct snd_soc_component *component = dai->component;
+	struct es7210_priv *priv = snd_soc_component_get_drvdata(component);
+	unsigned int val = mute ? ES7210_ADC12_MUTE_MASK : 0;
+	int ret;
+
+	if (stream != SNDRV_PCM_STREAM_CAPTURE)
+		return 0;
+
+	ret = regmap_update_bits(priv->regmap, ES7210_ADC12_MUTE,
+				 ES7210_ADC12_MUTE_MASK, val);
+	if (ret)
+		return ret;
+
+	return regmap_update_bits(priv->regmap, ES7210_ADC34_MUTE,
+				  ES7210_ADC34_MUTE_MASK, val);
+}
+
+static const struct snd_soc_dai_ops es7210_dai_ops = {
+	.set_fmt	= es7210_set_dai_fmt,
+	.set_tdm_slot	= es7210_set_tdm_slot,
+	.hw_params	= es7210_hw_params,
+	.mute_stream	= es7210_mute_stream,
+};
+
+#define ES7210_FORMATS	(SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FMTBIT_S24_LE | \
+			 SNDRV_PCM_FMTBIT_S32_LE)
+
+static struct snd_soc_dai_driver es7210_dai = {
+	.name = "es7210",
+	.capture = {
+		.stream_name	= "Capture",
+		.channels_min	= 2,
+		.channels_max	= 4,
+		.rates		= SNDRV_PCM_RATE_8000_48000,
+		.formats	= ES7210_FORMATS,
+	},
+	.ops = &es7210_dai_ops,
+	.symmetric_rate = 1,
+};
+
+static const struct snd_soc_component_driver es7210_component_driver = {
+	.controls		= es7210_snd_controls,
+	.num_controls		= ARRAY_SIZE(es7210_snd_controls),
+	.dapm_widgets		= es7210_dapm_widgets,
+	.num_dapm_widgets	= ARRAY_SIZE(es7210_dapm_widgets),
+	.dapm_routes		= es7210_dapm_routes,
+	.num_dapm_routes	= ARRAY_SIZE(es7210_dapm_routes),
+};
+
+static void es7210_disable_clk(void *data)
+{
+	struct es7210_priv *priv = data;
+
+	clk_disable_unprepare(priv->mclk);
+}
+
+static int es7210_i2c_probe(struct i2c_client *client)
+{
+	struct device *dev = &client->dev;
+	const struct es7210_chip *chip;
+	struct es7210_priv *priv;
+	int ret;
+
+	chip = i2c_get_match_data(client);
+	if (!chip)
+		return dev_err_probe(dev, -ENODEV, "unknown chip variant\n");
+
+	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
+	if (!priv)
+		return -ENOMEM;
+
+	priv->dev = dev;
+	priv->channels = chip->channels;
+	i2c_set_clientdata(client, priv);
+
+	/* Optional reset line: asserted on probe, released after 10 ms. */
+	priv->reset_gpio = devm_gpiod_get_optional(dev, "reset", GPIOD_OUT_HIGH);
+	if (IS_ERR(priv->reset_gpio))
+		return dev_err_probe(dev, PTR_ERR(priv->reset_gpio),
+				     "failed to get reset gpio\n");
+	if (priv->reset_gpio) {
+		usleep_range(1000, 2000);
+		gpiod_set_value_cansleep(priv->reset_gpio, 0);
+		usleep_range(10000, 11000);
+	}
+
+	priv->regmap = devm_regmap_init_i2c(client, &es7210_regmap_config);
+	if (IS_ERR(priv->regmap))
+		return dev_err_probe(dev, PTR_ERR(priv->regmap),
+				     "failed to init regmap\n");
+
+	priv->mclk = devm_clk_get_optional(dev, "mclk");
+	if (IS_ERR(priv->mclk))
+		return dev_err_probe(dev, PTR_ERR(priv->mclk),
+				     "failed to get mclk\n");
+	if (!priv->mclk)
+		dev_warn(dev, "no mclk, assuming a static 256 fs clock\n");
+
+	ret = clk_prepare_enable(priv->mclk);
+	if (ret)
+		return dev_err_probe(dev, ret, "failed to enable mclk\n");
+
+	ret = devm_add_action_or_reset(dev, es7210_disable_clk, priv);
+	if (ret)
+		return ret;
+
+	ret = es7210_init(priv);
+	if (ret)
+		return dev_err_probe(dev, ret, "failed to init codec\n");
+
+	return devm_snd_soc_register_component(dev, &es7210_component_driver,
+					       &es7210_dai, 1);
+}
+
+static const struct es7210_chip es7210_chip_2ch = {
+	.channels = 2,
+};
+
+static const struct es7210_chip es7210_chip_4ch = {
+	.channels = 4,
+};
+
+static const struct of_device_id es7210_of_match[] = {
+	{ .compatible = "everest,es7210",	.data = &es7210_chip_4ch },
+	{ .compatible = "everest,es7210_2ch",	.data = &es7210_chip_2ch },
+	{ .compatible = "everest,es7210_4ch",	.data = &es7210_chip_4ch },
+	{ }
+};
+MODULE_DEVICE_TABLE(of, es7210_of_match);
+
+static const struct i2c_device_id es7210_i2c_id[] = {
+	{ "es7210", (kernel_ulong_t)&es7210_chip_4ch },
+	{ "es7210_2ch", (kernel_ulong_t)&es7210_chip_2ch },
+	{ "es7210_4ch", (kernel_ulong_t)&es7210_chip_4ch },
+	{ }
+};
+MODULE_DEVICE_TABLE(i2c, es7210_i2c_id);
+
+static struct i2c_driver es7210_i2c_driver = {
+	.driver = {
+		.name = "es7210",
+		.of_match_table = es7210_of_match,
+	},
+	.probe = es7210_i2c_probe,
+	.id_table = es7210_i2c_id,
+};
+module_i2c_driver(es7210_i2c_driver);
+
+MODULE_DESCRIPTION("Everest Semiconductor ES7210 ADC");
+MODULE_AUTHOR("AtriOS");
+MODULE_LICENSE("GPL");

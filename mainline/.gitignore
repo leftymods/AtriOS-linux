@@ -1,0 +1,6 @@
+out/
+*.o
+*.ko
+*.dtb
+*.img
+__pycache__/
