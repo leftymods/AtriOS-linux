@@ -324,9 +324,23 @@ The driver exposes the vendor attributes on the I2C device:
 * `make O=/tmp/kbuild-sy ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
    M=/tmp/sy-mod sy6045s.o` against a 7.3 tree: **compiles with no
   warnings**.
+* Kconfig/Makefile integration: with `CONFIG_SND_SOC_SY6045S=m`,
+  `make O=/tmp/kbuild-sy ARCH=arm64 ... \
+   sound/soc/codecs/snd-soc-sy6045s.ko` compiled and linked the module.
+  The tree was only `modules_prepare`d, so modpost could not resolve core
+  symbols; `KBUILD_MODPOST_WARN=1` was used to finish the `.ko`.  The
+  unresolved symbols are an artefact of the partial build tree, not of the
+  driver.
+* The parser was replayed over both shipped settings files (153 lines,
+  117 block writes each, maximum payload 21 bytes = register + 20-byte
+  coefficient block); no line was rejected.
 * `git apply --check` and `patch --dry-run -p1` of
-  `patches/linux/0009-soc-sy6045s.patch` against
-  `/home/leftymods/mainline-src/linux-7.3`: **OK**.
+  `patches/linux/0009-soc-sy6045s.patch` against a pristine copy of the
+  7.3 `sound/soc/codecs/Kconfig`, `Makefile` and an empty
+  `sy6045s.c` path: **OK**.  The shared
+  `/home/leftymods/mainline-src/linux-7.3` tree already had the patch
+  applied by the integration process while this work was in progress; it
+  was not modified or reverted here.
 * `scripts/checkpatch.pl --no-tree --terse 0009-soc-sy6045s.patch`:
   **0 errors, 1 warning**.  The warning is `CONST_STRUCT` on the
   per-device `struct regmap_config` copy, which is non-const because

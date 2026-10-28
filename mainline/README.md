@@ -37,7 +37,7 @@ Porting order (agreed): everything else first, Wi-Fi last.
 | Ambient light | `ltr308als01` | upstream `ltrf216a` (`liteon,ltr308`) | no driver work needed |
 | PCBA ids | `quasar_pcba_ids` | nvmem/at24 + userspace | planned |
 | Zigbee | `zigbee-control` | new serdev driver | planned |
-| Audio | AML auge + es7210/es8156/sy6045s | ASoC meson + three ported codecs | codecs in progress |
+| Audio | AML auge + es7210/es8156/sy6045s | ASoC meson + three ported codecs | codecs built; card node still to merge |
 | Bluetooth | `bt-dev` + vendor H5 | `btrtl` + `hci_h5` | plan + DTS/CONFIG ready; firmware project-id blocker |
 | Wi-Fi | `88x2es` (RTL8822ES) | rtw88 `rtw8822e` stage (a)/(b) | **last**, dossier ready |
 
@@ -93,14 +93,37 @@ mainline/scripts/build-kernel.sh -j "$(nproc)" --strict
 mainline/scripts/build-uboot.sh --dry-run
 ```
 
-`apply.sh` also wires the non-upstream drivers that upstream Kconfig/Makefiles
-cannot know about (today: `LEDS_TRIGGER_RINGFB`). Other copied drivers are
-reported as warnings until their Kconfig entry exists. Applied patches are
-recorded in `<tree>/.atrios-mainline-patches`, which is what makes re-runs
-idempotent for patches that create files; delete that file only after
-resetting the tree. A patch that no longer applies aborts the step without
-touching the tree (`PATCH_SKIP=0002-*` is the documented escape hatch while a
-patch is being refreshed).
+`apply.sh` also covers what upstream Kconfig/Makefiles cannot know about:
+
+- patches 0004-0006 add their own Kconfig/Makefile entries for the input and
+  fbdev drivers;
+- codec sources under `mainline/drivers/audio/` are copied to
+  `sound/soc/codecs/` (their Kconfig entries come from patches 0007-0009);
+- a copied board DTS is added to `arch/arm64/boot/dts/amlogic/Makefile`,
+  otherwise `make dtbs` silently never builds it;
+- a copied driver with no Kconfig/Makefile reference is reported as a warning.
+
+Applied patches are recorded in `<tree>/.atrios-mainline-patches`, which is
+what makes re-runs idempotent for patches that create files; delete that file
+only after resetting the tree. A patch that no longer applies aborts the step
+without touching the tree (`PATCH_SKIP=0002-*` is the documented escape hatch
+while a patch is being refreshed).
+
+### Verified on the build host
+
+Checked against a clean Linux 7.3 tree (not just patch dry-runs):
+
+- all nine patches apply in order and are detected on a second run;
+- `Image.gz` (15 MB), `dtbs` and `modules` build, exit 0;
+- `meson-sm1-yandex-station-max.dtb` carries 72 ring channels, the keypad
+  node `GPIOA_15/A_14`, rotary `GPIOC_7`/`GPIOAO_10` with codes 104/109,
+  Bluetooth `GPIOX_17`, panel reset `GPIOX_8`, i2c0 at 400 kHz;
+- `fdtget` confirms numeric properties in the packed DTB (dtc 1.7.2 prints a
+  bogus string list for `spi-max-frequency` when decompiling, the blob itself
+  holds `0x3d0900`);
+- `snd-soc-es7210.ko`, `snd-soc-es8156.ko`, `snd-soc-sy6045s.ko` link;
+- the four board drivers are built into the image (`ringfb_*`,
+  `atrios_keypad`, `rotary_volume_*`, `ledpanel_*` in `System.map`).
 
 ### Output
 
