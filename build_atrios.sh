@@ -30,6 +30,7 @@ SYSTEM_PARTITION_SIZE=1551892480
 
 VERSION_NUM=""
 BUILD_ROOTFS=1
+JOBS=""
 
 usage() {
     cat <<EOF
@@ -37,6 +38,7 @@ Usage: $0 [VERSION_NUM] [options]
 
 Options:
   -n, --version NUM    Firmware version number (default: contents of ./VERSION)
+  -j, --jobs N         Parallel build jobs (default: min(nproc, 6))
       --no-buildroot   Reuse the existing Buildroot rootfs.tar instead of rebuilding
   -h, --help           Show this help
 
@@ -52,6 +54,9 @@ while [ $# -gt 0 ]; do
         -n|--version)
             [ -n "${2:-}" ] || { echo "[!] --version requires a number"; exit 2; }
             VERSION_NUM="$2"; shift 2 ;;
+        -j|--jobs)
+            [ -n "${2:-}" ] || { echo "[!] --jobs requires a number"; exit 2; }
+            JOBS="$2"; shift 2 ;;
         --no-buildroot)
             BUILD_ROOTFS=0; shift ;;
         -h|--help)
@@ -101,7 +106,14 @@ if [ -z "${HOSTCXX:-}" ]; then
     fi
 fi
 export HOSTCC HOSTCXX
-echo "[0/6] Host compiler: $HOSTCC ($("$HOSTCC" -dumpversion)) / $HOSTCXX"
+
+# A full Buildroot build peaks at roughly 1 GB per compiler job; capping the
+# default keeps 8 GB machines from swapping while still using them fully.
+if [ -z "$JOBS" ]; then
+    JOBS="$(nproc)"
+    [ "$JOBS" -gt 6 ] && JOBS=6
+fi
+echo "[0/6] Host compiler: $HOSTCC ($("$HOSTCC" -dumpversion)) / $HOSTCXX, jobs: $JOBS"
 
 # ---------------------------------------------------------------------------
 # [1/6] Tools and inputs
@@ -164,7 +176,7 @@ if [ "$BUILD_ROOTFS" -eq 1 ]; then
     (
         cd "$BUILDROOT_DIR"
         make yandex_station2_defconfig
-        make -j"$(nproc)" HOSTCC="$HOSTCC" HOSTCXX="$HOSTCXX"
+        make -j"$JOBS" HOSTCC="$HOSTCC" HOSTCXX="$HOSTCXX"
     )
 
     if [ ! -s "$ROOTFS_TAR" ]; then
