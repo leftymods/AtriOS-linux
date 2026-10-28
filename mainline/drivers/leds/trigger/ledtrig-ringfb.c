@@ -1,0 +1,336 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/*
+ * ledtrig-ringfb.c - framebuffer-backed LED trigger for the Yandex Station Max
+ * 24x RGB ring (two IS31FL3236A controllers, 72 channels).
+ *
+ * Vendor userspace (/usr/lib/atrios/light) writes 72 bytes of RGB888 to
+ * /dev/fb5: ring1.r, ring1.g, ring1.b, ring2.r, ... Channel order therefore is
+ * the registration order of the 72 LED class devices.  This driver exposes the
+ * framebuffer, registers the "led_ring_fb" trigger and pushes the buffer to the
+ * LEDs whenever it changes.
+ *
+ * The LEDs are expected to carry the trigger through their DT property
+ * linux,default-trigger = "led_ring_fb" and to use max_brightness 200, which
+ * is what the vendor driver enforced as well.
+ */
+
+#include <linux/delay.h>
+#include <linux/fb.h>
+#include <linux/leds.h>
+#include <linux/module.h>
+#include <linux/mutex.h>
+#include <linux/of.h>
+#include <linux/platform_device.h>
+#include <linux/slab.h>
+#include <linux/string.h>
+#include <linux/vmalloc.h>
+#include <linux/workqueue.h>
+
+#define RINGFB_CHANNELS			72
+#define RINGFB_WIDTH			24
+#define RINGFB_HEIGHT			1
+#define RINGFB_BPP			24
+#define RINGFB_SIZE			(RINGFB_WIDTH * RINGFB_HEIGHT * 3)
+#define RINGFB_MAX_BRIGHTNESS		200
+#define RINGFB_REFRESH_MS		20
+
+/*
+ * Channel order is derived from the LED label: "station2:<colour>:ring<N>".
+ * Sorting by (N, colour) makes the buffer layout independent of I2C probe
+ * order, which is otherwise not guaranteed for the two controllers.
+ */
+static int ringfb_led_key(struct led_classdev *led, unsigned int *key)
+{
+	const char *label = led->name;
+	const char *colour, *ring;
+	unsigned int n, c;
+
+	colour = strchr(label, ':');
+	if (!colour)
+		return -EINVAL;
+	colour++;
+
+	ring = strstr(colour, ":ring");
+	if (!ring)
+		return -EINVAL;
+
+	if (kstrtouint(ring + strlen(":ring"), 10, &n))
+		return -EINVAL;
+
+	if (!strncmp(colour, "red:", 4))
+		c = 0;
+	else if (!strncmp(colour, "green:", 6))
+		c = 1;
+	else if (!strncmp(colour, "blue:", 5))
+		c = 2;
+	else
+		return -EINVAL;
+
+	if (n == 0 || n > RINGFB_WIDTH)
+		return -EINVAL;
+
+	*key = (n - 1) * 3 + c;
+	return 0;
+}
+
+struct ringfb {
+	struct fb_info *info;
+	struct led_trigger trigger;
+	struct led_classdev *channels[RINGFB_CHANNELS];
+	unsigned int nchannels;
+	struct mutex lock;
+	struct delayed_work refresh;
+	u8 shadow[RINGFB_SIZE];
+	bool running;
+};
+
+static void ringfb_push(struct ringfb *ring)
+{
+	struct fb_info *info = ring->info;
+	unsigned int i;
+
+	mutex_lock(&ring->lock);
+	if (!ring->running) {
+		mutex_unlock(&ring->lock);
+		return;
+	}
+
+	memcpy(ring->shadow, info->screen_buffer, RINGFB_SIZE);
+	for (i = 0; i < ring->nchannels; i++)
+		led_set_brightness(ring->channels[i], ring->shadow[i]);
+	mutex_unlock(&ring->lock);
+}
+
+static void ringfb_refresh_work(struct work_struct *work)
+{
+	struct ringfb *ring = container_of(to_delayed_work(work),
+					   struct ringfb, refresh);
+
+	if (!ring->running)
+		return;
+
+	if (memcmp(ring->shadow, ring->info->screen_buffer, RINGFB_SIZE))
+		ringfb_push(ring);
+
+	schedule_delayed_work(&ring->refresh,
+			      msecs_to_jiffies(RINGFB_REFRESH_MS));
+}
+
+static int ringfb_trigger_activate(struct led_classdev *led)
+{
+	struct ringfb *ring = container_of(led->trigger, struct ringfb, trigger);
+	unsigned int key, pos, i;
+	int ret;
+
+	if (led->max_brightness != RINGFB_MAX_BRIGHTNESS) {
+		dev_warn(led->dev,
+			 "cannot activate led_ring_fb trigger for led with max_brightness != %d\n",
+			 RINGFB_MAX_BRIGHTNESS);
+		return -EINVAL;
+	}
+
+	ret = ringfb_led_key(led, &key);
+	if (ret) {
+		dev_warn(led->dev, "unexpected ring LED name '%s'\n", led->name);
+		return ret;
+	}
+
+	mutex_lock(&ring->lock);
+	if (key >= RINGFB_CHANNELS || ring->channels[key]) {
+		mutex_unlock(&ring->lock);
+		return -EBUSY;
+	}
+
+	/* Keep the array dense in channel order for the buffer mapping. */
+	for (i = 0; i < key; i++) {
+		if (!ring->channels[i]) {
+			mutex_unlock(&ring->lock);
+			dev_warn(led->dev, "ring channel %u missing\n", i);
+			return -ENODEV;
+		}
+	}
+
+	ring->channels[key] = led;
+	if (key + 1 > ring->nchannels)
+		ring->nchannels = key + 1;
+
+	if (!ring->running && ring->nchannels == RINGFB_CHANNELS) {
+		ring->running = true;
+		schedule_delayed_work(&ring->refresh, 0);
+	}
+	mutex_unlock(&ring->lock);
+
+	dev_info(led->dev, "led_ring_fb: channel %u activated\n", key);
+	return 0;
+}
+
+static void ringfb_trigger_deactivate(struct led_classdev *led)
+{
+	struct ringfb *ring = container_of(led->trigger, struct ringfb, trigger);
+	unsigned int i;
+
+	mutex_lock(&ring->lock);
+	for (i = 0; i < RINGFB_CHANNELS; i++) {
+		if (ring->channels[i] == led) {
+			ring->channels[i] = NULL;
+			led_set_brightness(led, 0);
+			break;
+		}
+	}
+	ring->nchannels = 0;
+	for (i = RINGFB_CHANNELS; i > 0; i--) {
+		if (ring->channels[i - 1]) {
+			ring->nchannels = i;
+			break;
+		}
+	}
+	if (!ring->nchannels) {
+		ring->running = false;
+		cancel_delayed_work(&ring->refresh);
+	}
+	mutex_unlock(&ring->lock);
+}
+
+static int ringfb_check_var(struct fb_var_screeninfo *var, struct fb_info *info)
+{
+	if (var->xres != RINGFB_WIDTH || var->yres != RINGFB_HEIGHT)
+		return -EINVAL;
+	if (var->bits_per_pixel != RINGFB_BPP)
+		return -EINVAL;
+
+	var->xres_virtual = RINGFB_WIDTH;
+	var->yres_virtual = RINGFB_HEIGHT;
+	var->red.offset = 16;
+	var->red.length = 8;
+	var->green.offset = 8;
+	var->green.length = 8;
+	var->blue.offset = 0;
+	var->blue.length = 8;
+	var->transp.length = 0;
+	return 0;
+}
+
+static int ringfb_set_par(struct fb_info *info)
+{
+	info->fix.line_length = RINGFB_WIDTH * 3;
+	return 0;
+}
+
+static const struct fb_ops ringfb_ops = {
+	.owner		= THIS_MODULE,
+	.fb_check_var	= ringfb_check_var,
+	.fb_set_par	= ringfb_set_par,
+	.fb_fillrect	= fb_sys_fillrect,
+	.fb_copyarea	= fb_sys_copyarea,
+	.fb_imageblit	= fb_sys_imageblit,
+	.fb_read	= fb_sys_read,
+	.fb_write	= fb_sys_write,
+};
+
+static int ringfb_probe(struct platform_device *pdev)
+{
+	struct fb_info *info;
+	struct ringfb *ring;
+	int ret;
+
+	ring = devm_kzalloc(&pdev->dev, sizeof(*ring), GFP_KERNEL);
+	if (!ring)
+		return -ENOMEM;
+
+	mutex_init(&ring->lock);
+	INIT_DELAYED_WORK(&ring->refresh, ringfb_refresh_work);
+
+	info = framebuffer_alloc(0, &pdev->dev);
+	if (!info)
+		return -ENOMEM;
+
+	info->screen_buffer = vzalloc(RINGFB_SIZE);
+	if (!info->screen_buffer) {
+		ret = -ENOMEM;
+		goto err_free_fb;
+	}
+
+	info->fbops = &ringfb_ops;
+	info->flags = FBINFO_VIRTFB;
+	info->fix.smem_len = RINGFB_SIZE;
+	info->fix.type = FB_TYPE_PACKED_PIXELS;
+	info->fix.visual = FB_VISUAL_TRUECOLOR;
+	info->fix.line_length = RINGFB_WIDTH * 3;
+	info->var.xres = RINGFB_WIDTH;
+	info->var.yres = RINGFB_HEIGHT;
+	info->var.xres_virtual = RINGFB_WIDTH;
+	info->var.yres_virtual = RINGFB_HEIGHT;
+	info->var.bits_per_pixel = RINGFB_BPP;
+	info->var.red.offset = 16;
+	info->var.red.length = 8;
+	info->var.green.offset = 8;
+	info->var.green.length = 8;
+	info->var.blue.offset = 0;
+	info->var.blue.length = 8;
+
+	ret = fb_alloc_cmap(&info->cmap, 256, 0);
+	if (ret)
+		goto err_free_screen;
+
+	ret = register_framebuffer(info);
+	if (ret)
+		goto err_free_cmap;
+
+	ring->info = info;
+	platform_set_drvdata(pdev, ring);
+
+	ring->trigger.name = "led_ring_fb";
+	ring->trigger.activate = ringfb_trigger_activate;
+	ring->trigger.deactivate = ringfb_trigger_deactivate;
+	ret = led_trigger_register(&ring->trigger);
+	if (ret) {
+		dev_err(&pdev->dev, "failed to register LED trigger: %d\n", ret);
+		goto err_unregister_fb;
+	}
+
+	dev_info(&pdev->dev, "%dx%d RGB888 framebuffer '%s'\n",
+		 RINGFB_WIDTH, RINGFB_HEIGHT, info->fix.id);
+	return 0;
+
+err_unregister_fb:
+	unregister_framebuffer(info);
+err_free_cmap:
+	fb_dealloc_cmap(&info->cmap);
+err_free_screen:
+	vfree(info->screen_buffer);
+err_free_fb:
+	framebuffer_release(info);
+	return ret;
+}
+
+static void ringfb_remove(struct platform_device *pdev)
+{
+	struct ringfb *ring = platform_get_drvdata(pdev);
+	struct fb_info *info = ring->info;
+
+	led_trigger_unregister(&ring->trigger);
+	cancel_delayed_work_sync(&ring->refresh);
+	unregister_framebuffer(info);
+	fb_dealloc_cmap(&info->cmap);
+	vfree(info->screen_buffer);
+	framebuffer_release(info);
+}
+
+static const struct of_device_id ringfb_of_match[] = {
+	{ .compatible = "yandex,led-ring-fb" },
+	{ }
+};
+MODULE_DEVICE_TABLE(of, ringfb_of_match);
+
+static struct platform_driver ringfb_driver = {
+	.probe = ringfb_probe,
+	.remove = ringfb_remove,
+	.driver = {
+		.name = "led-ring-fb",
+		.of_match_table = ringfb_of_match,
+	},
+};
+module_platform_driver(ringfb_driver);
+
+MODULE_DESCRIPTION("LED ring framebuffer trigger for Yandex Station Max");
+MODULE_LICENSE("GPL");
