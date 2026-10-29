@@ -67,6 +67,8 @@ while [ $# -gt 0 ]; do
 		-j|--jobs)
 			[ -n "${2:-}" ] || die "--jobs requires a number"
 			JOBS=$2; shift 2 ;;
+		-j[0-9]*)
+			JOBS=${1#-j}; shift ;;
 		--dry-run) DRY_RUN=1; shift ;;
 		--strict) STRICT=1; shift ;;
 		-h|--help) usage; exit 0 ;;
@@ -89,6 +91,8 @@ check_fragment() {
 	while IFS= read -r line; do
 		sym=${line%%=*}
 		want=${line#*=}
+		want=${want%%#*}
+		want=$(printf '%s' "$want" | tr -d '[:space:]')
 		case "$want" in
 			n)
 				got=$(grep -m1 "^# $sym is not set$" "$BUILD_DIR/.config" || true)
@@ -99,8 +103,9 @@ check_fragment() {
 				if [ -z "$got" ]; then
 					warn "not set after olddefconfig: $line"
 					missing=1
-				elif [ "$got" != "$line" ]; then
-					warn "value differs: wanted $line, got $got"
+				elif [ "$got" != "$sym=$want" ]; then
+					warn "value differs: wanted $sym=$want, got $got"
+					[ "$STRICT" = 1 ] && missing=1
 				fi
 				;;
 		esac

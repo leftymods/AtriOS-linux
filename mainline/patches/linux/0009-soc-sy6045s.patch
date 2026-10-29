@@ -63,9 +63,8 @@ diff -Naur a/sound/soc/codecs/Makefile b/sound/soc/codecs/Makefile
  obj-$(CONFIG_SND_SOC_TAC5XX2_SDW)	+= snd-soc-tac5xx2-sdw.o
  obj-$(CONFIG_SND_SOC_TAS2552)	+= snd-soc-tas2552.o
  obj-$(CONFIG_SND_SOC_TAS2562)	+= snd-soc-tas2562.o
-diff -Naur a/sound/soc/codecs/sy6045s.c b/sound/soc/codecs/sy6045s.c
---- a/sound/soc/codecs/sy6045s.c	1970-01-01 03:00:00.000000000 +0300
-+++ b/sound/soc/codecs/sy6045s.c	2026-10-28 19:54:03.213153157 +0300
+--- a/sound/soc/codecs/sy6045s.c
++++ b/sound/soc/codecs/sy6045s.c
 @@ -0,0 +1,1143 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
