@@ -522,7 +522,7 @@ static const struct snd_soc_component_driver es8156_component_driver = {
 	.set_jack		= es8156_set_jack,
 	.remove			= es8156_component_remove,
 	.use_pmdown_time	= 1,
-	.endianness		= 1,
+	.endianness		= 0,	/* LE-only codec */
 };
 
 static void es8156_disable_clk(void *data)

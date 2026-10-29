@@ -18,7 +18,7 @@ DRY_RUN=0
 SKIP_FETCH=0
 SKIP_UBOOT=0
 # A missing U-Boot board port must not block a kernel-only build.
-ALLOW_UBOOT_FAIL="${ALLOW_UBOOT_FAIL:-1}"
+ALLOW_UBOOT_FAIL="${ALLOW_UBOOT_FAIL:-0}"
 
 usage() {
 	cat <<EOF

@@ -11,7 +11,7 @@
  *   state 00 / 11                      -> no event
  *
  * Every accepted event is reported as a complete key press and release, so
- * one mechanical detent produces one KEY_VOLUMEUP/KEY_VOLUMEDOWN click.  The
+ * one mechanical detent produces one KEY_PAGEUP/KEY_PAGEDOWN click.  The
  * vendor driver has no debounce and no autorepeat.
  *
  * This driver keeps the same event mapping but reads the lines from a
@@ -141,8 +141,8 @@ static int rotary_volume_probe(struct platform_device *pdev)
 		return -EINVAL;
 	}
 
-	rv->keycodes[0] = KEY_VOLUMEUP;
-	rv->keycodes[1] = KEY_VOLUMEDOWN;
+	rv->keycodes[0] = KEY_PAGEUP;	/* what /usr/lib/atrios/rotaryd reads */
+	rv->keycodes[1] = KEY_PAGEDOWN;
 
 	if (device_property_present(dev, "key-codes")) {
 		ret = device_property_count_u32(dev, "key-codes");
