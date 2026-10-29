@@ -21,7 +21,9 @@ Loaded modules:
   - backlight ops
   - LED trigger **`led_ring_fb`**
   - activation is refused for an LED whose `max_brightness != 200`
-    (`cannot activate led_ring_fb trigger for led with max_brightness != %d`)
+    (`cannot activate led_ring_fb trigger for led with max_brightness != %d`);
+    note that the vendor LED class device actually has `max_brightness = 255`
+    and the `max-brightness-scale = 200` is applied inside `brightness_set`
 
 DT shape (per chip, 36 children):
 
@@ -61,8 +63,10 @@ Two pieces:
    - fbdev 24×1, 24 bpp (72 bytes) with deferred IO
    - on buffer update: `led_set_brightness()` for the 72 channels, sorted by
      label so the flat order does not depend on I2C probe order
-   - registers the `led_ring_fb` trigger; activation collects ring channels
-     (`max_brightness == 200`), deactivation clears them
+   - registers the `led_ring_fb` trigger; activation collects ring channels,
+     deactivation clears them.  The frame byte is scaled by
+     `max_brightness/255` in software, which reproduces the vendor curve
+     (0..255 frame -> 0..200 register) without depending on a fixed value
    - a `backlight` device is not needed: `/usr/lib/atrios/light` only writes
      the framebuffer
 
