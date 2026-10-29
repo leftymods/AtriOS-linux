@@ -1,0 +1,5 @@
+NAME="AtriOS Mainline"
+TARGET="Yandex Station Max (Amlogic S905X3 / SM1)"
+KERNEL="Linux 7.3"
+BOOTLOADER="U-Boot v2026.10 (BL33 inside the vendor FIP)"
+HARDWARE="not tested on hardware"

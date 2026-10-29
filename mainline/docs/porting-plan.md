@@ -1,4 +1,7 @@
-# Porting plan
+# AtriOS Mainline — porting plan
+
+> Nothing here has been tested on hardware.
+
 
 Targets: **Linux 7.3**, **U-Boot v2026.10**. Order agreed with the maintainer:
 everything else first, Wi-Fi last.

@@ -1,4 +1,7 @@
-# AtriOS mainline port
+# AtriOS Mainline
+
+**AtriOS Mainline** — upstream port of the Yandex Station Max to Linux 7.3 and
+U-Boot v2026.10.
 
 Goal: run the Yandex Station Max (Amlogic S905X3 / SM1) on **upstream**
 software instead of the vendor Android 9 / kernel 4.9.113 stack.
@@ -34,26 +37,26 @@ mainline/
 
 ## Status
 
-Porting order (agreed): everything else first, Wi-Fi last. Wi-Fi stage (a)
-is already in the tree (`patches/linux/0010-rtw88-8822e.patch`), but nothing
-below has been run on the device yet - every "written/built" state means
-"builds on the host".
+> **Nothing in this branch has been tested on hardware.**
+> Every device below is marked `not tested` regardless of how complete its
+> code is: "written", "built" and "verified" only mean "compiles on the build
+> host". The first boot will decide what actually works.
 
-| Block | Vendor driver | Mainline plan | State |
-|---|---|---|---|
-| LED ring (24 RGB) | `leds-is31fl32xx` + `quasar_led_ring` | upstream `leds-is31fl32xx` patch + `ledtrig-ringfb` | driver written, patches apply to v7.3, built into `Image.gz`; not on hardware |
-| Front LED matrix 25x16 | `gowin_led_device` + `quasar_led_screen` | new SPI fbdev driver, dual PA/SA backend | driver written and built in; SPI/JTAG pinctrl handoff and FPGA bitstream not ported; needs hardware test |
-| Buttons / mic mute | `amlogic,gpio_keypad` | `atrios-keypad` (polled, debounce) | driver written and built in; `checkpatch`: 0 errors (one MAINTAINERS warning); the DTS carries only this key model |
-| Rotary volume | `rotary-volume` | `rotary-volume` input driver | driver written, patch applies, built in; encoder polarity unverified on hardware |
-| Ambient light | `ltr308als01` | upstream `ltrf216a` (`liteon,ltr308`) | no driver work needed, DTS uses the upstream ID, driver built in; not on hardware |
-| PCBA ids | `quasar_pcba_ids` | nvmem/at24 + userspace | planned (EEPROM node present, no userspace yet) |
-| Zigbee | `zigbee-control` | new serdev driver | planned |
-| Audio | AML auge + es7210/es8156/sy6045s | ASoC meson + three ported codecs | codecs built as modules; card merged into the board DTS (5 dai-links, DTB builds); not on hardware |
-| Bluetooth | `bt-dev` + vendor H5 | `btrtl` + `hci_h5` | plan + DTS/CONFIG ready; firmware project-id blocker (7.3 `btrtl` rejects vendor id 33); not on hardware |
-| Wi-Fi | `88x2es` (RTL8822ES) | rtw88 `rtw8822e` (a + real 8822E tables) | `rtw88_8822es.ko` in `modules.tar`, SDIO host enabled; not on hardware |
-| U-Boot | U-Boot 2015.01 (BL33) | U-Boot v2026.10 | `u-boot.bin` 837 232 B; FIP with our BL33 built (BL2/BL30/BL31 stay vendor); not on hardware |
-| USB burn | vendor `v2_burning` | `aml_burn` gadget on the mainline gadget framework | implemented in `patches/uboot/0001`, compiled into `u-boot.bin` (`CONFIG_AML_USB_BURN=y`); not verified on hardware |
-| Image | `aml_upgrade_package` | `make-image.sh` / `make-final-image.sh` | test image (vendor BL33) and **final image** (our BL33) built; see below |
+| Block | Vendor driver | Mainline plan | Implementation | Hardware |
+|---|---|---|---|---|
+| LED ring (24 RGB) | `leds-is31fl32xx` + `quasar_led_ring` | upstream `leds-is31fl32xx` patch + `ledtrig-ringfb` | driver written, patches apply to v7.3, built into `Image.gz` | **not tested** |
+| Front LED matrix 25x16 | `gowin_led_device` + `quasar_led_screen` | new SPI fbdev driver, dual PA/SA backend | driver written and built in; JTAG/FPGA bitstream not ported | **not tested** |
+| Buttons / mic mute | `amlogic,gpio_keypad` | `atrios-keypad` (polled, debounce) | driver written and built in; checkpatch clean | **not tested** |
+| Rotary volume | `rotary-volume` | `rotary-volume` input driver | driver written, patch applies, built in | **not tested** |
+| Ambient light | `ltr308als01` | upstream `ltrf216a` (`liteon,ltr308`) | no driver work needed, driver built in | **not tested** |
+| PCBA ids | `quasar_pcba_ids` | nvmem/at24 + userspace | not implemented | **not tested** |
+| Zigbee | `zigbee-control` | new serdev driver | not implemented | **not tested** |
+| Audio | AML auge + es7210/es8156/sy6045s | ASoC meson + three ported codecs | codecs built as modules, card in DTS (5 dai-links) | **not tested** |
+| Bluetooth | `bt-dev` + vendor H5 | `btrtl` + `hci_h5` | DTS/CONFIG ready; vendor firmware project id 33 is rejected by 7.3 `btrtl` | **not tested** |
+| Wi-Fi | `88x2es` (RTL8822ES) | rtw88 `rtw8822e` + real 8822E tables | `rtw88_8822es.ko` in `modules.tar`, SDIO host enabled | **not tested** |
+| U-Boot | U-Boot 2015.01 (BL33) | U-Boot v2026.10 | `u-boot.bin` 837 232 B; FIP with our BL33 built (BL2/BL30/BL31 vendor) | **not tested** |
+| USB burn | vendor `v2_burning` | `aml_burn` gadget on the mainline gadget framework | implemented, compiled into `u-boot.bin` | **not tested** |
+| Image | `aml_upgrade_package` | `make-image.sh` / `make-final-image.sh` | test image (vendor BL33) and final image (our BL33) built | **not tested** |
 
 ## Quick start
 

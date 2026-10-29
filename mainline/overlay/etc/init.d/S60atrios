@@ -10,7 +10,7 @@
 
 case "$1" in
   start)
-    echo "[AtriOS] Starting user interface daemons..."
+    echo "[AtriOS Mainline] Starting user interface daemons (hardware not tested)..."
     mkdir -p /var/log
     # fbdev numbering is dynamic; userspace expects fb4 (panel) and fb5 (ring).
     for _fb in /sys/class/graphics/fb*; do

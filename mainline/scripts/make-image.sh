@@ -485,10 +485,11 @@ build_rootfs() {
 	fi
 
 	cat > "$tree/etc/atrios-test-image" <<EOF
-AtriOS intermediate TEST image
+AtriOS Mainline
 kernel:     Linux $KREL (mainline) + $(basename "$BOARD_DTB")
 bootloader: vendor U-Boot 2015.01 / BL33 (NOT mainline U-Boot)
 userspace:  Buildroot from $(basename "$ROOTFS_TAR") (built for 4.9.113)
+hardware:   NOT TESTED
 built:      $(date -u '+%Y-%m-%dT%H:%M:%SZ')
 note:       the mainline overlay is applied; 7.3 modules load via
             /etc/init.d/S01modules, the 4.9 tree is kept only as a fallback.
