@@ -1,1 +1,0 @@
-root=/dev/mmcblk0p18 rootfstype=ext4 rw rootwait skip_initramfs init=/init selinux=0 enforcing=0 androidboot.selinux=permissive androidboot.hardware=amlogic androidboot.hardware.amlogic_dt_id=yandex_station_2g console=ttyS0,115200 androidboot.console=ttyS0 no_console_suspend earlyprintk=aml-uart,0xff803000
