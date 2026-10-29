@@ -4,7 +4,7 @@
 The whole board DTS is templated here so the ring nodes and the rest of the
 tree can never drift apart - edit this file and re-run it, never the .dts.
 
-Ring wiring (from the vendor DTB, see mainline/docs/ring.md):
+Ring wiring (from the vendor DTB, see docs/ring.md):
 
   * two IS31FL3236A controllers on i2c0, 0x3c (ring LEDs 1-12) and
     0x3f (ring LEDs 13-24);
@@ -69,7 +69,7 @@ HEADER = '''// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
  *   vendor DTB  AtriOS-linux/common/arch/arm64/boot/dts/amlogic/
  *               sm1_s905x3_yandex.dts (decompiled, phandle numbering is
  *               off by one for the periphs bank: vendor = mainline + 1)
- *   details      mainline/docs/dts-review.md
+ *   details      docs/dts-review.md
  */
 
 /dts-v1/;
@@ -360,11 +360,11 @@ AUDIO = dts("""
  * PDM array and the AXG DPCM sound card.
  *
  * Everything here is mainline 7.3 (sound/soc/meson/axg-*.c) plus the
- * in-house codec drivers from mainline/drivers/audio (patches/linux/
+ * in-house codec drivers from drivers/audio (patches/linux/
  * 0007..0009).  Vendor reference: sm1_s905x3_yandex.dts -
  * i2c@1d000 codecs :2126-2164, auge_sound :4244, audiobus tdm@1 :2391,
  * PDM pinctrl :1342.  Details and the userspace contract:
- * mainline/docs/audio.md
+ * docs/audio.md
  * ------------------------------------------------------------------
  */
 
