@@ -50,10 +50,10 @@ below has been run on the device yet - every "written/built" state means
 | Zigbee | `zigbee-control` | new serdev driver | planned |
 | Audio | AML auge + es7210/es8156/sy6045s | ASoC meson + three ported codecs | codecs built as modules; card merged into the board DTS (5 dai-links, DTB builds); not on hardware |
 | Bluetooth | `bt-dev` + vendor H5 | `btrtl` + `hci_h5` | plan + DTS/CONFIG ready; firmware project-id blocker (7.3 `btrtl` rejects vendor id 33); not on hardware |
-| Wi-Fi | `88x2es` (RTL8822ES) | rtw88 `rtw8822e` stage (a)/(b) | **last**: stage (a) patch + firmware in tree, `rtw88_8822es.ko` builds; not in `modules.tar`/test image; association needs stage (b) |
-| U-Boot | U-Boot 2015.01 (BL33) | U-Boot v2026.10 | `u-boot.bin`, `u-boot.dtb`, `u-boot-nodtb.bin` build; not on hardware; FIP (BL2/BL31) packaging is a separate step |
+| Wi-Fi | `88x2es` (RTL8822ES) | rtw88 `rtw8822e` (a + real 8822E tables) | `rtw88_8822es.ko` in `modules.tar`, SDIO host enabled; not on hardware |
+| U-Boot | U-Boot 2015.01 (BL33) | U-Boot v2026.10 | `u-boot.bin` 837 232 B; FIP with our BL33 built (BL2/BL30/BL31 stay vendor); not on hardware |
 | USB burn | vendor `v2_burning` | `aml_burn` gadget on the mainline gadget framework | implemented in `patches/uboot/0001`, compiled into `u-boot.bin` (`CONFIG_AML_USB_BURN=y`); not verified on hardware |
-| Image | `aml_upgrade_package` | `scripts/make-image.sh` | intermediate test image built (vendor BL33 + our kernel/DTB/modules); the final image (no vendor loader) does not exist yet |
+| Image | `aml_upgrade_package` | `make-image.sh` / `make-final-image.sh` | test image (vendor BL33) and **final image** (our BL33) built; see below |
 
 ## Quick start
 
@@ -72,7 +72,7 @@ Buildroot rootfs tarball, see its `--help`.
 
 ## Сборка (build)
 
-Everything is driven by six scripts (`scripts/lib.sh` is shared helpers):
+Everything is driven by these scripts (`scripts/lib.sh` is shared helpers):
 `fetch-sources.sh`, `apply.sh`, `build-kernel.sh`, `build-uboot.sh`,
 `build-all.sh` and `make-image.sh`. The state outside this checkout is
 `$SRC_DIR` (sources and unpacked trees), `mainline/out/` (artifacts) and - for
@@ -155,7 +155,7 @@ and hashes are of those files):
   recorded in `.atrios-mainline-patches` (so a second run detects them);
   `0010-rtw88-8822e.patch` was added afterwards and is recorded separately in
   `docs/wifi-port.md`;
-- `Image.gz` (15 699 393 B), `dtbs` and `modules.tar` (22 045 792 B) build,
+- `Image.gz` (15 905 990 B), `dtbs` and `modules.tar` (21 775 920 B) build,
   exit 0;
 - `meson-sm1-yandex-station-max.dtb` carries 72 ring channels
   (`station2:{red,green,blue}:ring1..24`), the keypad node `GPIOA_15/A_14`
@@ -167,12 +167,12 @@ and hashes are of those files):
   bogus string list for `spi-max-frequency` when decompiling, the blob itself
   holds `0x3d0900`);
 - `snd-soc-es7210.ko`, `snd-soc-es8156.ko`, `snd-soc-sy6045s.ko` link and are
-  inside `modules.tar`; `rtw88_8822es.ko` was built separately and is **not**
-  in `modules.tar` (see `docs/wifi-port.md`);
+  inside `modules.tar`, including `rtw88_8822es.ko` and the real 8822E
+  tables in `rtw88_8822c.ko` (see `docs/wifi-port.md`);
 - the four board drivers are built into the image (`ringfb_*`,
   `atrios_keypad`, `rotary_volume_*`, `ledpanel_*` in `System.map`);
 - U-Boot v2026.10 builds with `CONFIG_AML_USB_BURN=y`:
-  `u-boot.bin` 828 384 B, `u-boot.dtb` 75 472 B, `u-boot-nodtb.bin`
+  `u-boot.bin` 837 232 B, `u-boot.dtb` 75 472 B, `u-boot-nodtb.bin`
   752 912 B; the packaged DTB says `model = "Yandex Station Max"` and has
   `&usb`/`&dwc2` enabled (peripheral);
 - the test image `out/images/atrios-mainline-test-v130.img`
@@ -193,17 +193,23 @@ mainline/out/images/atrios-mainline-test-v130.img (+ .sha256)   # make-image.sh
 The Amlogic FIP (BL2/BL31 packaging) is built separately and is not part of
 these scripts.
 
-### Final image (not built yet)
+### Final image
 
-The image from `make-image.sh` is an **intermediate** test image: BL33 is
-still the vendor U-Boot 2015.01, on purpose, because that is the only boot
-chain known to work on this board.
+Two images exist:
 
-The final image must contain **no vendor bootloader**: BL2/BL33 must come from
-our mainline U-Boot (FIP assembled and signed outside these scripts) and be
-flashed through the mainline USB burn path. Neither the FIP build nor a
-hardware-verified boot exists yet, so no "final" artifact is published -
-`docs/image.md` and `docs/uboot-burn-port.md` describe what is still missing.
+| File | Bootloader | Purpose |
+|---|---|---|
+| `out/images/atrios-mainline-test-v130.img` | vendor U-Boot 2015.01 (BL33) | fallback test image |
+| `out/images/atrios-mainline-v130.img` | **our mainline U-Boot** as BL33 inside the FIP | final image |
+
+The final image is 1 571 493 000 B, sha256
+`eeef11226489389935964a41c97d5e1d0899663b5ca78da9d509ae990632f4e9`.
+BL2/BL30/BL31 remain the vendor signed payloads (they contain the
+board-specific LPDDR4 training); only BL33 is ours. The FIP is built by
+`scripts/make-fip.sh`, verified by an LZ4 round-trip and the presence of
+`aml_usb_burn_run`, and packed by `scripts/make-final-image.sh`. See
+`docs/final-image.md` for the composition, external dependencies and flashing
+risks. Nothing has been booted on hardware yet.
 
 ### Environment variables
 
