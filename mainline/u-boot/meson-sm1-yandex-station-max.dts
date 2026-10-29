@@ -118,3 +118,27 @@
 	disable-wp;
 	max-frequency = <100000000>;
 };
+
+/*
+ * USB (burn) port.
+ *
+ * usb@ffe09000 is the dwc3-meson-g12a glue, its DWC2 child (usb@ff400000) is
+ * the peripheral controller used by the Amlogic USB Burning Tool
+ * (1b8e:c003).  The glue driver force-switches the OTG PHY (usb2_phy1) to
+ * peripheral mode in its child_pre_probe hook once the DWC2 child probes, so
+ * no extra properties are needed here.
+ *
+ * The DWC3 host child (usb@ff500000) keeps the upstream default (enabled) so
+ * that the xHCI/USB-storage code is built and can be exercised with
+ * "usb start".  It cannot drive the shared OTG port while the glue is in
+ * peripheral mode, so there is no usable host port on this board; the port is
+ * reserved for the burn/ums gadget (see mainline/docs/uboot.md).
+ */
+&usb {
+	status = "okay";
+	dr_mode = "peripheral";
+};
+
+&dwc2 {
+	status = "okay";
+};

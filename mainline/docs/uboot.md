@@ -1,210 +1,465 @@
 # U-Boot v2026.10 для Yandex Station Max (S905X3 / SM1)
 
-Статус: конфигурация и DTS подготовлены, **на железе не проверялись**.
-База — U-Boot, тег `v2026.10` (tag object `a58e2b7a…`, проверено через GitHub API).
+Статус: **собирается, артефакты и DTB проверены; на железе не запускалось.**
+Дата: 2026-10-29. Ветка: `mainline`. База: U-Boot `v2026.10`
+(`2026.10`, собран `aarch64-linux-gnu-gcc` 15).
 
-## 1. Что даёт апстрим
+Порт burn-протокола (Amlogic USB Burning Tool) описан отдельно в
+`docs/uboot-burn-port.md`; этот документ — про обычную сборку и загрузку
+mainline-ядра.
 
-| Блок | Факт | Ссылка (u-boot v2026.10) |
-|---|---|---|
-| Платформа | SM1 собирается профилем `CONFIG_MESON_G12A` (так же у odroid-c4/hc4, khadas-vim3l) | `arch/arm/mach-meson/Kconfig:57-62`, `configs/odroid-c4_defconfig:13` |
-| `TARGET_*` | **их нет для meson**: борд выбирается строками `SYS_VENDOR`/`SYS_BOARD`, код лежит в `board/<vendor>/<board>/` | `arch/arm/mach-meson/Kconfig:78-98` |
-| Тактирование | драйвер g12a понимает `amlogic,sm1-clkc` | `drivers/clk/meson/g12a.c:1011-1013` |
-| Pinctrl | SM1 использует **g12a**-совместимые таблицы; отдельного SM1-драйвера в U-Boot нет | `drivers/pinctrl/meson/pinctrl-meson-g12a.c:1276,1280`; DTS: `meson-g12-common.dtsi:271-272, 1759-1760` |
-| MMC | `amlogic,meson-sm1-mmc` включает фазу `CLK_CO_PHASE_270` (стабильно на SM1 >50 МГц) | `drivers/mmc/meson_gx_mmc.c:73-74, 401` |
-| UART | uart_AO матчится по второму compatible `amlogic,meson-gx-uart` | `drivers/serial/serial_meson.c:245`; `meson-g12-common.dtsi:2072-2081` |
-| Объём RAM | `dram_init()` берёт размер из узла `/memory` (`reg[1]`) | `arch/arm/mach-meson/board-common.c:34-50` |
-| Размещение DTS | при `CONFIG_OF_UPSTREAM=y` DT ищется в `dts/upstream/src/arm64/<vendor>/` | `dts/Makefile:11-38` |
-| Bootstd | `DISTRO_DEFAULTS` помечен deprecated, вместо него `BOOTSTD_DEFAULTS`, `bootcmd = "bootflow scan"` | `boot/Kconfig:1209-1226`, `boot/Kconfig:543-551`, `boot/Kconfig:2011-2016` |
-| Env | без `ENV_IS_IN_*` включается `ENV_IS_DEFAULT` → `ENV_IS_NOWHERE`, окружение **не сохраняется** | `env/Kconfig:95-110` |
+---
 
-Следствие: **новый `CONFIG_TARGET_*` не нужен и не создаётся.** Мы используем штатный
-механизм `SYS_BOARD`, поэтому в defconfig стоит `CONFIG_SYS_BOARD="yandex-station-max"`,
-а в дерево U-Boot добавляется каталог `board/amlogic/yandex-station-max/`.
-Переиспользовать `board/amlogic/odroid-n2/odroid-n2.c` нельзя без правок: он читает ADC
-для определения варианта Odroid и выставляет `fdtfile` вида `meson-sm1-odroid-*.dtb`
-(`board/amlogic/odroid-n2/odroid-n2.c:69-105`).
+## 0. Кратко
 
-## 2. Файлы в этом каталоге и куда их класть
+* Исходники порта: `mainline/u-boot/{yandex-station-max_defconfig,
+  meson-sm1-yandex-station-max.dts, board/amlogic/yandex-station-max/}`.
+  В дерево U-Boot они кладутся `mainline/scripts/apply.sh --uboot-only`.
+* Сборка: `mainline/scripts/build-uboot.sh -j 6` (форма `-j6` скриптом **не**
+  принимается — только `-j 6` / `--jobs 6`).
+* `u-boot.bin` — это **BL33**, не FIP. FIP (BL2/BL30/BL31 + BL33) собирается
+  отдельно, см. §5.
+* Ядро грузится из Android boot image в `boot_a` (или `boot`/`boot_b`) через
+  `bootm`; DTB берётся из second stage того же boot image. Резервный путь —
+  bootstd/extlinux из `system_a`. Подробно — §3.
+* Окружение **не сохраняется**: `ENV_IS_NOWHERE` (`saveenv` — no-op), каждый
+  старт с дефолтным env из defconfig. Всё, что должно переживать перезагрузку,
+  задаётся при сборке, а не через `setenv`.
 
-```
-mainline/u-boot/
-  yandex-station-max_defconfig
-  meson-sm1-yandex-station-max.dts
-  board/amlogic/yandex-station-max/{Makefile,yandex-station-max.c,MAINTAINERS}
-```
+---
 
-В дереве U-Boot (проверено, что имена/пути совпадают с v2026.10):
+## 1. Сборка (проверено)
 
 ```sh
-cd /path/to/u-boot-2026.10
-cp /path/to/AtriOS/mainline/u-boot/yandex-station-max_defconfig      configs/
-cp /path/to/AtriOS/mainline/u-boot/meson-sm1-yandex-station-max.dts  dts/upstream/src/arm64/amlogic/
-cp -r /path/to/AtriOS/mainline/u-boot/board/amlogic/yandex-station-max board/amlogic/
+cd /home/leftymods/atrios-mainline
+mainline/scripts/apply.sh --uboot-only     # defconfig + DTS + board-файлы
+mainline/scripts/build-uboot.sh -j 6
 ```
 
-`CONFIG_DEFAULT_DEVICE_TREE="amlogic/meson-sm1-yandex-station-max"` — путь считается
-от `dts/upstream/src/arm64/`, т.е. файл обязан лежать в `.../arm64/amlogic/`
-(`dts/Makefile:11-38`); `#include "meson-sm1.dtsi"` подхватывается из того же каталога.
+Скрипт печатает, какой именно DTS собирается, — это главная проверка, что
+используется наш файл, а не SoC-дефолт:
 
-## 3. Сборка
+```
+[+] u-boot:  /home/leftymods/mainline-src/u-boot-2026.10
+[+] build:   /home/leftymods/atrios-mainline/mainline/out/uboot/build
+[+] config:  yandex-station-max_defconfig
+[+] board:   dts/upstream/src/arm64/amlogic/meson-sm1-yandex-station-max.dts
+[+] cross:   aarch64-linux-gnu-gcc (15)
+[+] jobs:    6
+```
+
+Артефакты (сборка 2026-10-29, `mainline/out/uboot/`):
+
+| Файл | Размер на момент сборки | Примечание |
+|---|---|---|
+| `u-boot.bin` | ≈ 0.8 MB (837 096) | BL33 целиком; размер зависит от текущей ревизии burn-порта |
+| `u-boot-nodtb.bin` | ≈ 0.76 MB (761 624) | код без DT |
+| `u-boot.dtb` | 75 472 | sha256 `45180fa5223ca61c40e3a6fcbc75483920bead8c1c5f0294b69d1e9b53c4d29e` |
+
+`u-boot.dtb` детерминирован (одинаковый DT → одинаковый blob); `u-boot.bin`
+побайтово не воспроизводим: U-Boot вкомпилирует timestamp, а `burn/`
+сейчас активно правится (см. `docs/uboot-burn-port.md`). `u-boot.bin` —
+сырой бинарник BL33 (`objcopy` из ELF `u-boot`; не LZ4 и не подписан), его
+и заворачивает в FIP `make-fip.sh` (§5).
+
+Доказательства, что собран **наш** DTS:
 
 ```sh
-export CROSS_COMPILE=aarch64-linux-gnu-
-make yandex-station-max_defconfig
-make -j$(nproc)
+# в build/.dtb.cmd видно source_dts := .../meson-sm1-yandex-station-max.dts
+fdtget -t s mainline/out/uboot/build/u-boot.dtb / model
+# -> Yandex Station Max
+fdtget -t s mainline/out/uboot/build/u-boot.dtb / compatible
+# -> yandex,station-max amlogic,sm1
+cmp mainline/out/uboot/build/u-boot.dtb mainline/out/uboot/build/dts/dt.dtb   # identical
 ```
 
-Результат:
+Ключевые символы в `mainline/out/uboot/build/u-boot` (`nm`): `do_bootm`,
+`android_image_get_kernel`, `android_image_get_second`, `part_get_info_by_name`,
+`ext4_read_file`, `bootflow_scan_first`, `button_gpio_bind`,
+`dwc2_udc_probe`, `aml_usb_burn_run`, `meson_board_late_init`, `misc_init_r`,
+`meson_serial_probe`.
 
-* `u-boot.bin` — **BL33** (payload для FIP), это то, что подписывается;
-* `u-boot` — ELF, `u-boot.dtb` — вкомпилированный DT;
-* `u-boot.bin.sd.bin` сборочной системой U-Boot **не создаётся** (в `Makefile`
-  такого правила нет). Его делает подписывающий инструмент Amlogic
-  (`aml_encrypt_g12a --bootmk`, см. `doc/board/amlogic/odroid-c4.rst`,
-  `doc/board/amlogic/pre-generated-fip.rst`) либо `amlogic-boot-fip/build-fip.sh`.
-  В вендорском дереве это видно в `bootloader/uboot-repo/fip/g12a/build.sh:111-118`.
+---
 
-Ключевые параметры defconfig (все сверены с Kconfig v2026.10):
+## 2. defconfig: что включено и почему
 
-| Параметр | Значение | Почему |
+`CONFIG_SYS_BOARD="yandex-station-max"`, вендор — дефолт `amlogic`
+(`arch/arm/mach-meson/Kconfig`), поэтому отдельного `CONFIG_TARGET_*` нет.
+
+| Параметр | Значение | Зачем |
 |---|---|---|
-| `CONFIG_TEXT_BASE` | `0x01000000` | как у SM1-бордов (`odroid-c4_defconfig:4`); старое имя — `SYS_TEXT_BASE` |
-| `CONFIG_CUSTOM_SYS_INIT_SP_ADDR` | `0x20000000` | как у odroid-c4 |
-| `CONFIG_MESON_G12A` | `y` | профиль SM1 |
-| `CONFIG_DEFAULT_DEVICE_TREE` | `amlogic/meson-sm1-yandex-station-max` | наш DTS |
-| `CONFIG_DEBUG_UART_BASE` | `0xff803000` | регистры uart_AO |
-| `CONFIG_BAUDRATE` | 115200 (default) | консоль `serial0:115200n8` |
-| `CONFIG_BOOTSTD_DEFAULTS` | `y` | вместо deprecated `DISTRO_DEFAULTS` |
-| `CONFIG_BUTTON` + `CONFIG_BUTTON_GPIO` | `y` | кнопки из `gpio-keys` |
-| `CONFIG_FS_EXT4`, `CONFIG_DOS_PARTITION`, `CONFIG_EFI_PARTITION` | `y` | читать Android-разметку и rootfs |
-| `CONFIG_MMC_MESON_GX`, `CONFIG_PINCTRL_MESON_G12A`, `CONFIG_MESON_SERIAL` | `y` | eMMC/SD, пинмукс, консоль |
+| `CONFIG_ARCH_MESON` + `CONFIG_MESON_G12A` | y | профиль SM1 (как у odroid-c4/hc4) |
+| `CONFIG_TEXT_BASE` / `CUSTOM_SYS_INIT_SP_ADDR` | `0x01000000` / `0x20000000` | как у SM1-бордов |
+| `CONFIG_SYS_LOAD_ADDR` | `0x1000000` | `loadaddr`; boot image целиком влезает в `0x01000000..0x02000000` |
+| `CONFIG_OF_UPSTREAM` + `CONFIG_DEFAULT_DEVICE_TREE` | y / `amlogic/meson-sm1-yandex-station-max` | DTS ищется в `dts/upstream/src/arm64/` |
+| `CONFIG_DEBUG_UART_BASE` | `0xff803000` | uart_AO, 115200 8N1 |
+| `CONFIG_MESON_SERIAL` | y | консоль через `stdout-path` |
+| `CONFIG_MMC_MESON_GX`, `CONFIG_PINCTRL_MESON_G12A` | y | eMMC/SD, пинмукс |
+| `CONFIG_DM_GPIO` (+ `DM_GPIO_LOOKUP_LINE_NAME`) | y | кнопки/GPIO; отдельного `GPIOLIB` в U-Boot нет — его роль играет `DM_GPIO` |
+| `CONFIG_BUTTON` + `CONFIG_BUTTON_GPIO` | y | `button list`/`button summary` |
+| `CONFIG_DM_REGULATOR`, `DM_REGULATOR_FIXED`, `MESON_EE_POWER_DOMAIN` | y | fixed-регуляторы и power domains SM1 |
+| `CONFIG_USB` + `USB_XHCI_HCD/_DWC3` + `USB_HOST/STORAGE` | y | host-стек собран (см. §4 — на плате порт один, OTG) |
+| `CONFIG_DM_USB_GADGET`, `USB_GADGET_DWC2_OTG`, `USB_GADGET_DOWNLOAD` | y | gadget для `ums` и burn |
+| `CONFIG_AML_USB_BURN`, `CONFIG_MESON_G12A_USB_PHY` | y | порт burn-протокола (см. `docs/uboot-burn-port.md`) |
+| `CONFIG_DOS_PARTITION`, `EFI_PARTITION` | y | читать GPT (Android-разметка) |
+| `CONFIG_FS_EXT4`, `CONFIG_CMD_EXT4`, `CONFIG_FS_FAT`, `CONFIG_CMD_FAT`, `CONFIG_CMD_FS_GENERIC` | y | rootfs `system` и SD |
+| `CONFIG_CMD_MMC`, `CONFIG_CMD_PART` | y | `mmc read`, `part start/size` |
+| `CONFIG_BOOTSTD_DEFAULTS` | y | bootstd + extlinux/script/VBE bootmeth |
+| `# CONFIG_DISTRO_DEFAULTS is not set` | — | убираем deprecated script-boot; `ARCH_MESON` его «подразумевает», поэтому выключено явно |
+| `CONFIG_HUSH_PARSER` | y | нужен для `for`/`if` в `bootcmd` |
+| `CONFIG_ANDROID_BOOT_IMAGE` | y | `bootm` должен понимать `ANDROID!`-образ |
+| `CONFIG_USE_BOOTCOMMAND` + `CONFIG_BOOTCOMMAND` | y | загрузка без env (§3.3) |
+| `CONFIG_MISC_INIT_R` | y | `misc_init_r()` из board-файла: `fdtfile`, MAC |
+| `CONFIG_ENV_IS_NOWHERE` (следствие отсутствия `ENV_IS_IN_*`) | — | **`saveenv` не работает**; env только дефолтный |
 
-## 4. DTS: что подтверждено
+Проверка «нет несуществующих символов»: `make yandex-station-max_defconfig`
+проходит без предупреждений `undefined symbol`, `.config` содержит все
+перечисленные опции. `GPIOLIB` и `CONFIG_TARGET_*` для meson не существуют —
+их в defconfig нет.
 
-`mainline/u-boot/meson-sm1-yandex-station-max.dts` собран `cpp` + `dtc` (см. §6), поэтому
-имена макросов и лейблов проверены фактически:
+`CONFIG_ANDROID_BOOT_IMAGE` — критичная правка: без неё `bootm` на
+`boot_a` печатает `Wrong Image Format` и загрузка не идёт.
 
-| Элемент | Подтверждено |
+---
+
+## 3. Как U-Boot грузит mainline-ядро
+
+### 3.1 Что лежит на eMMC (факты)
+
+* Разметка — GPT: текущий Linux стартует с `root=/dev/mmcblk0p18`, значит
+  таблицу разделов видит ядро (GPT/MBR), её же умеет читать mainline
+  `part`. На железе подтвердить `part list mmc 0`.
+* `bootloader` — 4 MiB, там FIP (BL2+BL30+BL31+BL33).
+* `boot_a` (~16 MiB) — Android boot image: `Image.gz` + наш DTB как
+  `second stage`; собирается `scripts/make-image.sh`
+  (`build_boot_partition`). Заголовок v1, `page_size=2048`,
+  `kernel_addr=0x20000000`, `second_addr=0x00f00000`, cmdline внутри
+  заголовка (`root=/dev/mmcblk0p18 …`).
+* `system_a` — ext4 с rootfs.
+* `dtb` (`_aml_dtb`/`meson1`) — контейнер Amlogic `AML_` v2: 2048-байтный
+  заголовок + payload-DTB. Вендорский BL33 читает DTB именно оттуда
+  (`store dtb read`).
+
+### 3.2 Решение: DTB из `boot.PARTITION` (second stage), не из `dtb`
+
+Выбрано **second stage внутри boot image**:
+
+1. Это «сырой» FDT (`d00dfeed`) без контейнера — mainline U-Boot понимает его
+   сразу (`boot_get_fdt()` → `android_image_get_second()` в
+   `boot/image-fdt.c`).
+2. DTB пишется в тот же образ, что и ядро, одним прогоном `make-image.sh` —
+   версии ядра и DT гарантированно совпадают.
+3. Раздел `dtb` — формат Amlogic `AML_` (заголовок 0x800, board-id, padding):
+   в mainline U-Boot нет его парсера, а тащить рантайм-извлечение ради
+   fallback’а не нужно. Если обновить только `dtb`, а `boot` оставить старым,
+   получим рассинхрон.
+
+Почему `bootm`, а не `booti`: в `boot_a` лежит **gzip** (`Image.gz`), а `booti`
+ожидает несжатый `Image`. `bootm` с `CONFIG_ANDROID_BOOT_IMAGE` сам разбирает
+заголовок, распаковывает ядро по `kernel_addr` и подставляет DTB/cmdline из
+образа.
+
+Почему не `BOOTMETH_ANDROID`: этот bootmeth требует раздел `misc` с валидным
+BCB и `CONFIG_ANDROID_AB` (чтобы выбрать `boot_a`/`boot_b`). Это лишняя
+зависимость от заводского содержимого `misc`; явный `bootcmd` детерминирован
+и меньше. Включить `BOOTMETH_ANDROID` можно позже как отдельный fallback.
+
+### 3.3 `bootcmd` (вкомпилирован в дефолтный env)
+
+```
+for d in 0 1; do
+  mmc dev ${d};
+  for p in boot_a boot boot_b; do
+    if part start mmc ${d} ${p} boot_start; then
+      part size mmc ${d} ${p} boot_size;
+      echo Booting ${p} from mmc ${d};
+      if mmc read ${loadaddr} ${boot_start} ${boot_size}; then
+        bootm ${loadaddr};
+      fi;
+    fi;
+  done;
+done;
+echo No Android boot image, trying bootstd;
+bootflow scan
+```
+
+По шагам:
+
+1. `d=0` — eMMC (`aliases mmc0 = &sd_emmc_c`), `d=1` — SD (`mmc1`).
+2. `boot_a` → `boot` → `boot_b`: A/B-имя, затем не-слотовое (на случай
+   другого образа/разметки).
+3. `part start/size` берут LBA и размер из GPT; `mmc read` читает **весь**
+   раздел (≤16 MiB) в `${loadaddr}=0x01000000`.
+4. `bootm 0x01000000`:
+   * проверяет `ANDROID!`, распаковывает `Image.gz` в `0x20000000`
+     (`kernel_addr` из заголовка);
+   * DTB берёт из second stage (наш DTB);
+   * cmdline — из заголовка образа, к нему добавляется env `bootargs`, если
+     он задан.
+5. Если ни один раздел не подошёл/образ битый — `bootflow scan`
+   (extlinux/script, см. §3.4). Если и там пусто — консоль U-Boot.
+
+Память: boot image занимает `0x01000000..0x01F08000` (15 761 408 B =
+15.03 MiB), ядро — с `0x20000000`, `secmon` — `0x05000000..0x07300000`.
+Пересечений нет. Если ядро вырастет так, что образ перестанет влезать в
+`boot_a` (16 MiB), загрузка сломается — `make-image.sh` этот лимит раздела
+не проверяет, за размером надо следить.
+
+### 3.4 Резервный путь: bootstd/extlinux
+
+`bootflow scan` использует `BOOTMETH_EXTLINUX`/`BOOTMETH_SCRIPT`. Чтобы он
+сработал, в `system_a` (ext4) нужно положить:
+
+```
+/extlinux/extlinux.conf
+/boot/Image                       (распакованный: gzip -dc Image.gz > Image)
+/boot/amlogic/meson-sm1-yandex-station-max.dtb
+```
+
+`extlinux` в bootstd грузит ядро через `bootm`; держите в разделе
+несжатый `Image` (или FIT), чтобы не зависеть от авто-декомпрессии.
+
+`fdtfile` уже выставляется в `misc_init_r()`:
+`amlogic/meson-sm1-yandex-station-max.dtb`; путь в `extlinux.conf`/`fdtdir`
+должен с ним совпадать. Важно: bootstd **не умеет** разбирать Android boot
+image, поэтому `boot_a` он не найдёт — это только fallback для extlinux.
+
+---
+
+## 4. U-Boot DTS
+
+`meson-sm1-yandex-station-max.dts` — отдельный DT только для U-Boot
+(ядерный — `mainline/dts/meson-sm1-yandex-station-max.dts`).
+
+| Элемент | Состояние |
 |---|---|
-| `GPIOA_14` = 63, `GPIOA_15` = 64 | `dts/upstream/include/dt-bindings/gpio/meson-g12a-gpio.h` (в дереве U-Boot нумерация на 1 меньше вендорской, физические пины те же: вендор `0x40/0x41`) |
-| `GPIOX_9` = 74, `GPIOX_17` = 82 | там же (в вендоре 75/83) |
-| `&gpio`, `&gpio_ao`, `&uart_AO`, `&uart_A`, `&sd_emmc_c`, `&sd_emmc_b` | `meson-g12-common.dtsi` |
-| `uart_ao_a_pins`, `uart_a_pins`, `emmc_ctrl_pins`, `emmc_data_8b_pins`, `emmc_ds_pins`, `emmc_clk_gate_pins`, `sdcard_c_pins`, `sdcard_clk_gate_c_pins` | `meson-g12-common.dtsi:309-362, 886-906, 1501, 1916` |
-| `KEY_MICMUTE` (248), `KEY_VOICECOMMAND` (582) | `dt-bindings/input/input.h` + `linux-event-codes.h` |
-| memory = 2 GiB (`0x80000000`) | узел `/memory` читает `board-common.c:34-50` |
+| `/memory@0` | `0x0..0x80000000` = 2 GiB; `dram_init()` берёт размер отсюда |
+| `aliases` | `mmc0=eMMC (sd_emmc_c)`, `mmc1=SD (sd_emmc_b)`, `serial0=uart_AO`, `serial1=uart_A` — как в ядерном DT |
+| `chosen/stdout-path` | `serial0:115200n8` |
+| `uart_AO` | okay, `uart_ao_a_pins` |
+| `uart_A` | okay (BT RTL8822ES), U-Boot его не использует |
+| `sd_emmc_c` (eMMC) | okay, 8 бит, HS200, `max-frequency=200 MHz`; U-Boot-only compatible `amlogic,meson-sm1-mmc` включает фазу 270° |
+| `sd_emmc_b` (SD) | okay, 4 бита, `max-frequency=100 MHz`, без `cd-gpios` |
+| `gpio-keys` | `micmute` = GPIOA_14 (`KEY_MICMUTE`), `function` = GPIOA_15 (`KEY_VOICECOMMAND`, вендорский `0x246`) |
+| USB | glue `usb@ffe09000` — okay, `dr_mode="peripheral"`; DWC2 `usb@ff400000` — okay (burn/`ums`); DWC3 `usb@ff500000` — включён по умолчанию dtsi, но общий OTG-порт отдан peripheral, отдельного host-порта нет |
+| 20V_AMPL (GPIOX_9) | **намеренно не описан** — U-Boot не должен включать усилитель |
+| BT reset (GPIOX_17) | **намеренно не описан** — линией владеет ядро/BT-драйвер |
 
-Особенности:
-
-* **aliases**: `meson-g12-common.dtsi:21-25` уже задаёт `mmc0 = &sd_emmc_b` (SD),
-  `mmc1 = &sd_emmc_c` (eMMC), `mmc2 = &sd_emmc_a` (SDIO). Мы переопределяем на
-  ядерную нумерацию: `mmc0 = eMMC`, `mmc1 = SD`. В U-Boot это влияет на `mmc dev N`
-  и на порядок обхода bootstd.
-* **`compatible = "amlogic,meson-sm1-mmc", "amlogic,meson-axg-mmc"`** в `sd_emmc_c/b` —
-  U-Boot-only. Именно первый compatible включает фазу 270° для SM1
-  (`meson_gx_mmc.c:73-74`); порядок разбора compatible — от первого к последнему
-  (`drivers/core/lists.c:232-263`). **В ядерный DTS это добавлять нельзя** (в Linux
-  такого compatible нет).
-* **Кнопки** описаны обычным `gpio-keys`: U-Boot-драйвер `button-gpio` понимает
-  `gpio-keys`/`gpios`/`linux,code`/`label` (`drivers/button/button-gpio.c:58-66,119-120`)
-  и нужен только для диагностики (`button list`, `button summary`). В ядре для этих
-  кнопок планируется опросный драйвер — см. `docs/buttons.md`.
-* **20V усилитель (GPIOX_9), BT reset (GPIOX_17) намеренно не описаны**: U-Boot не должен
-  дёргать силовые/рессетные линии. Если понадобится — в файле есть закомментированный
-  `gpio-hog`-пример.
-* Ethernet в U-Boot не включён: вендорский DTS содержит `internal_phy = <1>`
-  (`…/sm1_s905x3_yandex.dts:369-383`), но наличие PHY на плате не подтверждено;
-  для U-Boot сеть не нужна.
-
-## 5. Как это соотносится с текущей Android-разметкой
-
-Факты по вендорскому дереву:
-
-* Разметка: `bootloader` 4 MiB, `reserved` 64 MiB (`AtriOS-linux/device/yandex/common/common_partition.xml`);
-  A/B-слоты (`device/yandex/station_max/fstab.ab.amlogic`, `slotselect`),
-  `boot` 16 MiB, `system` ext4 ≈1.5 GiB (`device/yandex/station_max/BoardConfig.mk:107-121`).
-* BootROM (SM1) ищет FIP **по смещению 512 байт (сектор 1)** от начала eMMC/SD;
-  при неудаче — `boot0`, затем `boot1` (`doc/board/amlogic/boot-flow.rst`, раздел «Boot Modes»).
-  POC-пины для SM1 — `BOOT_4/5/6` (там же).
-* Вендорские артефакты (`device/yandex/station_max/upgrade/`):
-  `bootloader.img` (1 453 936 B) и `u-boot.bin.sd.bin` (1 454 448 B) — **sd.bin = 512-байтовая
-  шапка + ровно тот же payload**; `u-boot.bin` (1 613 168 B) — другой образ (не совпадает побайтово с `bootloader.img`;
-вероятно иная компрессия BL33 — надо проверить).
-  Запись вендорским апдейтерам соответствует `bootloader.PARTITION`.
-
-Практические выводы:
-
-1. Подписанный FIP пишется так же, как для odroid-c4:
-   `dd if=u-boot.bin.sd.bin of=$DEV conv=fsync,notrunc bs=512 skip=1 seek=1`
-   (`doc/board/amlogic/pre-generated-fip.rst`).
-2. **Перед перезаписью снять дамп первых секторов** и убедиться, где реально лежит
-   вендорский FIP (`@AML` = `40 41 4d 4c`). Это единственный надёжный способ не
-   превратить устройство в кирпич: расхождение «смещение 0 vs 512» в вендорском
-   образе пока не проверено.
-3. `CONFIG_ENV_IS_NOWHERE` (см. §1) означает: `saveenv` не работает, каждый старт — с
-   дефолтным окружением. Для постоянного env нужен `CONFIG_ENV_IS_IN_MMC` с явным
-   смещением **вне** Android-разметки — пока сознательно не включено.
-4. Rootfs сейчас `system` (ext4) — под bootstd достаточно положить
-   `/extlinux/extlinux.conf` + `/boot/Image` (+ `meson-sm1-yandex-station-max.dtb`) в
-   этот раздел, тогда `bootflow scan` найдёт загрузку без изменения разметки.
-   Вендорский `boot.img` — Android boot image; чтобы грузить его, нужен
-   `BOOTMETH_ANDROID` (`boot/Kconfig:592`, тянет `ANDROID_BOOT_IMAGE`/`CMD_ABOOTIMG`).
-
-## 6. Как проверялся DTS без полного дерева
-
-Полное дерево U-Boot скачать не удалось (обрыв загрузки), поэтому проверка сделана
-локально: из `dts/upstream/src/arm64/amlogic/` взяты `meson-sm1.dtsi`,
-`meson-g12-common.dtsi`, из `dts/upstream/include/` — все транзитивные `dt-bindings`
-(13 итераций `cpp`), затем:
+Проверки на собранном DTB:
 
 ```sh
-cpp -nostdinc -undef -x assembler-with-cpp -I inc -I amlogic meson-sm1-yandex-station-max.dts -o pre.dts
-dtc -I dts -O dtb -o ysm.dtb pre.dts     # exit 0
+fdtget -t x mainline/out/uboot/u-boot.dtb /memory@0 reg      # 0 0 0 80000000
+fdtget -t s mainline/out/uboot/u-boot.dtb /chosen stdout-path # serial0:115200n8
+fdtget -t s mainline/out/uboot/u-boot.dtb /soc/usb@ffe09000 dr_mode  # peripheral
+fdtget -t x mainline/out/uboot/u-boot.dtb /soc/mmc@ffe07000 reg       # 0 ffe07000 0 800
 ```
 
-Результат: ошибок нет, предупреждения только из `meson-g12-common.dtsi`
-(`unit_address_vs_reg`/`simple_bus_reg` для pinctrl-узлов — они есть и у апстримных
-бордов). Из собранного blobs подтверждено: `mmc0 → mmc@ffe07000`, `mmc1 → mmc@ffe05000`,
-`serial0 → serial@3000`, `linux,code = <0xf8>/<0x246>`, `gpios = <0x2e 0x3f 1>/<0x2e 0x40 1>`.
+`gpio status -a` на железе должен показать GPIOX_9/GPIOX_17 как входы/не
+тронутые — они не описаны и U-Boot их не дёргает.
 
-Что НЕ проверено: реальная сборка `make yandex-station-max_defconfig` + `make`
-(нужен сетевой доступ к tarball U-Boot), линковка `board/amlogic/yandex-station-max/yandex-station-max.c`
-и работа драйверов на железе.
+---
 
-## 7. Что проверить на железе
+## 5. FIP (BL2/BL30/BL31 + наш BL33)
 
-1. **Первым делом — USB-загрузка, без записи в eMMC**: `pyamlboot`
-   (`doc/board/amlogic/boot-flow.rst`, раздел USB) умеет залить образ в RAM.
-2. Консоль uart_AO (ttyS0) 115200 — должна появиться строка с `yandex-station-max`.
-3. `bdinfo` → 2 GiB (иначе `/memory`/BL2 не совпали).
-4. `mmc info` для `mmc 0` (eMMC, 8 бит, HS200) и `mmc 1` (SD). При CRC-ошибках:
-   снизить `max-frequency` до 52 МГц и сравнить с вариантом без `meson-sm1-mmc`.
-5. `button list` / `button summary` — `micmute` (GPIOA_14) и `function` (GPIOA_15).
-6. `gpio status -a`: проверить, что GPIOX_9 (20V_AMPL) и GPIOX_17 (BT reset) не тронуты.
-7. Замер 20 В рейла и поведение BT при старте (рессет не дёргаем — риск «залипания» BT).
-8. `bootflow scan -l` на разделе `system`; проверить чтение ext4.
-9. Дамп первых секторов до/после прошивки FIP (см. §5.2), плюс проверить, что `boot0` не тронут.
-10. `usb start` / `ums 0 mmc 0` — аварийный доступ к eMMC.
+U-Boot upstream не собирает Amlogic FIP: `u-boot.bin` — только BL33. Готовый
+FIP от другой платы (odroid-c4) брать нельзя — другой DDR/ACS.
 
-## 8. Риски и открытые вопросы
+В дереве есть отдельный сборщик: **`mainline/scripts/make-fip.sh`**. Он
+собирает FIP v3 (`@AML`) и проверяет результат:
 
-* **DDR-инициализация.** Готовый FIP от odroid-c4 использовать нельзя: его ACS/BL2
-  настроены под 4 GiB DDR4, а у нас 2 GiB LPDDR4. Вендорский BL2 собран под наш борд:
-  `bootloader/uboot-repo/bl33/board/amlogic/yandex_station_v1/firmware/timing.c`
-  (активные записи `__ddr_setting[]` — LPDDR4, `DDR_RFC_TYPE_LPDDR4_8Gbx1`, 1392 МГц,
-  `RANK01_CH01` и `RANK0_CH01`, строки 370-516; выбор по `board_id`), плюс `fip/g12a/*.fw`.
-  Безопасный путь: взять текущий вендорский FIP и заменить в нём только BL33 на наш
-  `u-boot.bin`, переподписав (gxlimg поддерживает SM1 —
-  `doc/board/amlogic/pre-generated-fip.rst`, раздел про gxlimg). Это надо проверить.
-* **Нет SM1-специфичного pinctrl-драйвера** в U-Boot: используются g12a-таблицы.
-  Для нужных нам групп (emmc/sdcard_c/uart) это то же, что у odroid-c4, но при
-  проблемах с SDIO/BT это первое, что смотреть.
-* **Размер FIP.** Раздел `bootloader` — 4 MiB; вендорский образ ~1.6 MB, наш (lz4)
-  должен уложиться, но проверять после подписи.
-* **Расхождение в ядерном DTS** (не моя зона, зафиксировать): `function` описан как
-  `linux,code = <582>` с комментарием «BTN_TRIGGER_HAPPY7», но 582 = `KEY_VOICECOMMAND`
-  (вендорский `key_code` 0x246). В U-Boot-DTS использован `KEY_VOICECOMMAND`.
-* `sd_emmc_b` без `cd-gpios` (так и в ядерном DTS): U-Boot будет считать карту
-  присутствующей; если это мешает — добавить `broken-cd`/`cd-gpios` после проверки схемы.
-* Отсутствие `u-boot.bin.sd.bin` в артефактах сборки U-Boot — не ошибка: файл делает
-  подписывающий тул (см. §3).
+```sh
+mainline/scripts/make-fip.sh
+# артефакты в mainline/out/fip/:
+#   u-boot.bin            FIP (bootloader.PARTITION / UBOOT.USB / DDR.USB)
+#   u-boot.bin.sd.bin     FIP + 512-байтная SD-шапка
+#   u-boot.bin.usb.bl2    BL2-стадия для BootROM/pyamlboot
+#   u-boot.bin.usb.tpl    шаблон для Amlogic USB Burning Tool
+#   u-boot.bin.sha256
+```
+
+Что делает скрипт:
+
+1. BL2/BL30/BL31 (+ `acs.bin`, `bl301.bin`) и DDR-fw берёт из
+   `amlogic-boot-fip/khadas-vim3l` (generic SM1), подписывает
+   `aml_encrypt_g12a --level v3`;
+2. BL33 = `mainline/out/uboot/u-boot.bin`, сжимает lz4, кладёт в тот же
+   layout (BL30/BL31 offsets и размеры совпадают с вендорским образом);
+3. разбирает готовый FIP и проверяет, что lz4-BL33 разжимается **побайтово**
+   в исходный `u-boot.bin`, плюс сверяет TOC/размер с вендорским
+   `bootloader.img` (если он есть).
+
+Проверено (2026-10-29): FIP **1 110 384 B** (1.06 MiB), `@AML` v3,
+BL33 lz4 `431 472 B -> 837 096 B` (sha256 совпал с `u-boot.bin`); влезает
+в 4 MiB `bootloader` (и в 2 MiB burn-лимит). `u-boot.bin.sd.bin` —
+1 110 896 B.
+
+Для сравнения, вендорский образ:
+
+| Файл | Размер | Что это |
+|---|---|---|
+| `device/.../upgrade/bootloader.img` | 1 453 936 | FIP v3, `@AML`-заголовок с offset `0x10`; 1-я компонента (BL2) — тоже в v3-конверте |
+| `device/.../upgrade/u-boot.bin.sd.bin` | 1 454 448 | 512-байтная SD-шапка + тот же FIP (`cmp <(dd … skip=1) bootloader.img` → identical) |
+
+Вендорские компоненты при необходимости извлекаются:
+
+```sh
+bootloader/uboot-repo/fip/stool/parse_uboot.sh -s g12a \
+    -i device/yandex/station_max/upgrade/bootloader.img -o /tmp/fipout
+# -> bl2_new.bin (bl2+acs), bl30_new.bin, bl31.img, bl33.bin (LZ4C), ddr*.fw
+```
+
+Ограничения и риски:
+
+* **BL2 — generic SM1**, а вендорский BL2 собран под конкретную LPDDR4
+  Station Max (`.../yandex_station_v1/firmware/timing.c`). Совпадение
+  layout/TOC ещё не значит, что DDR инициализируется. Это риск №1
+  аппаратной проверки. Если не заведётся — собрать FIP с вендорским BL2
+  (разделить `bl2_new.bin` на `bl2.bin` 57344 B + `acs.bin` 4096 B,
+  положить рядом с вендорскими `bl30.bin`/`bl301.bin`/`bl31.img`, DDR-fw
+  и `aml_encrypt_g12a` и передать этот каталог в `make-fip.sh --src DIR`;
+  BL33 остаётся наш).
+* v3-конверт нашего FIP не побайтово равен вендорскому (другой ключ/соль
+  у `aml_encrypt_g12a`); если на устройстве прожиганы efuse secure boot,
+  BL2 может отвергнуть образ. Приватных ключей устройства в репозитории нет.
+* Поэтому первый запуск — **не запись**, а USB-загрузка (pyamlboot,
+  `u-boot.bin.usb.bl2`/`.tpl` или `doc/board/amlogic/boot-flow.rst`).
+* Перед записью снять дамп первых 4 MiB и проверить `@AML` в вендорском
+  образе, чтобы не перепутать смещение (0 vs 512).
+
+---
+
+## 6. Прошивка
+
+1. **Ничего не писать, пока не снят дамп** первых 4 MiB eMMC/SD и не
+   проверено, где лежит вендорский FIP (`@AML` = `40 41 4d 4c`).
+2. **SD-burn (спасательный круг):** `aml_sdc_burn.UBOOT`, `aml_sdc_burn.ini`,
+   `platform.conf` и образ на FAT32-карте; BootROM подхватывает это без
+   участия eMMC.
+3. **Вендорский пакет обновления:** заменить в нём `bootloader.PARTITION` на
+   `mainline/out/fip/u-boot.bin`; пишется в раздел `bootloader` (4 MiB).
+4. **Вручную в eMMC/SD:** BootROM ищет FIP с сектора 1 (смещение 512):
+
+   ```sh
+   # 512-байтная SD-шапка отбрасывается, FIP кладётся в сектор 1
+   dd if=mainline/out/fip/u-boot.bin.sd.bin of=$DEV \
+      bs=512 skip=1 seek=1 conv=fsync,notrunc
+   ```
+
+   `boot0`/`boot1` не трогать. Для eMMC проверить, что вендорский апдейтер
+   пишет FIP в то же место (см. дамп).
+5. После прошивки консоль — uart_AO (ttyS0), 115200 8N1.
+
+---
+
+## 7. Переменные окружения
+
+Env **энергонезависимый только в теории**: `ENV_IS_NOWHERE`, `saveenv` не
+работает. Значения ниже — либо дефолт из сборки, либо выставлены кодом
+(`misc_init_r`) и живут до перезагрузки.
+
+| Переменная | Значение по умолчанию | Кто/что использует |
+|---|---|---|
+| `bootcmd` | см. §3.3 | autoboot |
+| `loadaddr` | `0x1000000` (`CONFIG_SYS_LOAD_ADDR`) | `mmc read`, `bootm` |
+| `fdtfile` | `amlogic/meson-sm1-yandex-station-max.dtb` | `misc_init_r()`; bootstd/extlinux |
+| `bootargs` | не задан | если задан — добавляется **перед** cmdline из boot image |
+| `fdtaddr` | не задан | fallback-адрес DTB для `bootm` |
+| `boot_targets` | не задан | порядок bootdev для `bootflow scan` |
+| `usb_burning` | не задан | вход в burn-режим (`docs/uboot-burn-port.md`) |
+| `aml_burn_timeout` | `5000` (мс) | таймаут burn-цикла |
+| `aml_burn_identify` | `0` | индикация в burn-режиме |
+| `aml_burn_part_<name>` | не задан | ручное отображение имени на LBA:size, если нет GPT |
+| `ethaddr`, `soc_rev` | из efuse/SM | `misc_init_r()` |
+
+Пример ручной проверки без перезаписи `bootcmd`:
+
+```
+setenv bootargs 'console=ttyS0,115200 earlycon'
+mmc dev 0
+part list mmc 0
+part start mmc 0 boot_a boot_start
+part size  mmc 0 boot_a boot_size
+mmc read ${loadaddr} ${boot_start} ${boot_size}
+bootm ${loadaddr}
+```
+
+`setenv` действует только до reset; `saveenv` вернёт ошибку — это ожидаемо.
+
+---
+
+## 8. Что проверить на железе (по порядку)
+
+1. **USB-загрузка без записи** (pyamlboot, `doc/board/amlogic/boot-flow.rst`):
+   залить образ в RAM. Это проверяет DDR/BL2/BL33 без риска кирпича.
+2. Консоль uart_AO 115200: строка `U-Boot 2026.10 … yandex-station-max`.
+3. `bdinfo` → 2 GiB. Если меньше — `/memory`/BL2 не совпали.
+4. `mmc list` → `mmc@ffe07000` (eMMC, mmc 0), `mmc@ffe05000` (SD, mmc 1).
+5. `mmc dev 0 && mmc info` — 8 бит, HS200; при CRC снизить
+   `max-frequency` до 52 МГц и сравнить без `amlogic,meson-sm1-mmc`.
+6. `part list mmc 0` — есть `boot_a`, `system_a`, `dtb`, `misc`.
+7. Ручной boot (§7): `part start/size`, `mmc read`, `bootm` — до того, как
+   доверять `bootcmd`.
+8. `button list` / `button summary` → `micmute` (GPIOA_14), `function`
+   (GPIOA_15).
+9. `gpio status -a` — GPIOX_9 (20V_AMPL) и GPIOX_17 (BT reset) не тронуты.
+10. `bootflow scan` — чтение ext4 `system_a`, extlinux (если положили файлы).
+11. `ums 0 mmc 0` — аварийный доступ к eMMC по USB.
+12. После старта ядра: `cat /proc/device-tree/model` → `Yandex Station Max`,
+    `cat /proc/cmdline` → `root=/dev/mmcblk0p18 … console=ttyS0,115200`.
+13. Дамп первых секторов до/после прошивки FIP; `boot0` не тронут.
+
+---
+
+## 9. Что работает / что нет
+
+| Блок | Статус |
+|---|---|
+| Сборка `u-boot.bin`/`u-boot.dtb`, наш DTS | **работает** (проверено) |
+| Консоль uart_AO, `stdout-path` | собрано, на железе не проверено |
+| eMMC (8 бит, HS200), SD (4 бита), GPT/разделы | собрано, не проверено |
+| ext4/FAT, `mmc read`, `part start/size` | собрано, не проверено |
+| `bootm` Android boot image + gzip + DTB из second stage | собрано, не проверено |
+| bootstd + extlinux/script из `system_a` | собрано, не проверено |
+| Кнопки GPIO (`button list`) | собрано, не проверено |
+| USB gadget DWC2 (`ums`), burn-драйвер | собрано, не проверено |
+| USB host (xHCI) | собран, но **порт один** и отдан peripheral — host не заработает |
+| `saveenv` / постоянный env | **не работает** (`ENV_IS_NOWHERE`) |
+| Чтение DTB из раздела `dtb` (AML_ контейнер) | **не поддерживается** (и не нужно) |
+| FIP: подпись/запись | **не проверено**; ключей устройства нет |
+| DDR/BL2, 20V-рейл, BT reset, BT UART, Ethernet, HDMI/audio | вне U-Boot-порта |
+
+---
+
+## 10. Риски и открытые вопросы
+
+1. **DDR/BL2 — риск №1.** `make-fip.sh` берёт generic SM1 BL2 из
+   `amlogic-boot-fip/khadas-vim3l`; вендорский BL2 собран под конкретную
+   LPDDR4 Station Max (`timing.c`). Если DDR не поднимется — пересобрать FIP
+   с вендорским BL2 (см. §5) или использовать вендорский FIP, заменив только
+   BL33.
+2. **Secure boot / подпись FIP.** v3-конверт нашего FIP подписан встроенным
+   non-secure ключом `aml_encrypt_g12a`, а не ключом устройства; приватных
+   ключей в репозитории нет. Если efuse secure boot закрыт — образ
+   отвергнут. Сначала USB-загрузка/pyamlboot.
+3. **Env не сохраняется.** Любая настройка через `setenv` исчезает после
+   reset; менять поведение — только в defconfig/board-файле/`bootcmd`.
+4. **Размер `boot_a`.** Наш boot image — 15.76 MB при разделе 16 MiB. Рост
+   ядра/initramfs упрётся в размер; следить за `make-image.sh`.
+5. **`loadaddr=0x01000000` и ядро `0x20000000`.** Запас ~480 MiB, но если
+   кто-то поднимет `loadaddr` или будет читать больше одного раздела —
+   возможно перекрытие с ядром. Не менять без пересчёта.
+6. **Нет SM1-специфичного pinctrl** — используются g12a-таблицы. Для
+   eMMC/SD/UART это то же, что у odroid-c4; при проблемах с SDIO/BT смотреть
+   первым делом.
+7. **SD без `cd-gpios`** — U-Boot считает карту присутствующей; если мешает,
+   добавить `broken-cd`/`cd-gpios` после проверки схемы.
+8. **USB host на плате недоступен**: общий OTG-порт принудительно переводится
+   в peripheral при пробе DWC2 (нужно для burn/`ums`). Host-стек собран, но
+   практического порта нет.
+9. **`bootcmd` опирается на имена `boot_a`/`boot`/`boot_b`.** Если на
+   конкретном устройстве разметка другая — проверить `part list mmc 0` и
+   поправить `bootcmd` (или задать `aml_burn_part_*` для burn).
+10. **`CONFIG_DISTRO_DEFAULTS` выключен**: `run distro_bootcmd` и старые
+    distro-скрипты недоступны — только bootstd и наш `bootcmd`. Это
+    осознанно; при необходимости вернуть — снять `# CONFIG_DISTRO_DEFAULTS
+    is not set` и учесть, что `bootcmd` всё равно переопределён.

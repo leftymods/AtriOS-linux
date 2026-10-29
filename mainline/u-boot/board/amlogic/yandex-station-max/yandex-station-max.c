@@ -12,8 +12,14 @@
 #include <init.h>
 #include <net.h>
 #include <vsprintf.h>
+#include <linux/printk.h>
+#include <linux/string.h>
+#include <asm/arch/boot.h>
 #include <asm/arch/sm.h>
 #include <asm/arch/eth.h>
+#ifdef CONFIG_AML_USB_BURN
+#include <aml_burn.h>
+#endif
 
 #define EFUSE_MAC_OFFSET	20
 #define EFUSE_MAC_SIZE		12
@@ -55,3 +61,39 @@ int misc_init_r(void)
 
 	return 0;
 }
+
+#ifdef CONFIG_AML_USB_BURN
+/*
+ * Amlogic USB Burning Tool entry point.
+ *
+ * Only an explicit request enters burn mode: the "aml_burn" command from the
+ * console, or usb_burning=<flag> in the environment (the vendor uses
+ * "usb_burning=update 1000").  The vendor gate on the sticky register
+ * (PREG_STICKY_REG2 == 0x1b8ec003, i.e. readl(0xff6345c8)) is deliberately
+ * not implemented: nobody has been observed writing that value on this board,
+ * see docs/uboot-burn-port.md.
+ */
+static void aml_burn_env_hook(void)
+{
+	const char *flag = env_get("usb_burning");
+	ulong timeout, identify;
+
+	if (!flag || !*flag || !strcmp(flag, "0") || !strcmp(flag, "no"))
+		return;
+
+	timeout = env_get_ulong("aml_burn_timeout", 0, 5000);
+	identify = env_get_ulong("aml_burn_identify", 0, 0);
+
+	printf("aml_burn: usb_burning=\"%s\", entering burn mode (%lu ms)\n",
+	       flag, timeout);
+	aml_usb_burn_run(timeout, identify);
+}
+
+/* Called by arch/arm/mach-meson/board-common.c from board_late_init(). */
+int meson_board_late_init(void)
+{
+	aml_burn_env_hook();
+
+	return 0;
+}
+#endif

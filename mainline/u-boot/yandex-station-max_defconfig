@@ -61,9 +61,16 @@ CONFIG_USB_GADGET_PRODUCT_NUM=0xfada
 CONFIG_USB_GADGET_DWC2_OTG=y
 CONFIG_USB_GADGET_DWC2_OTG_PHY_BUS_WIDTH_8=y
 CONFIG_USB_GADGET_DOWNLOAD=y
+CONFIG_AML_USB_BURN=y
+CONFIG_MESON_G12A_USB_PHY=y
 CONFIG_DOS_PARTITION=y
 CONFIG_EFI_PARTITION=y
 CONFIG_FS_EXT4=y
 CONFIG_CMD_FS_GENERIC=y
 CONFIG_FS_FAT=y
+CONFIG_ANDROID_BOOT_IMAGE=y
 CONFIG_BOOTSTD_DEFAULTS=y
+# CONFIG_DISTRO_DEFAULTS is not set
+CONFIG_USE_BOOTCOMMAND=y
+CONFIG_BOOTCOMMAND="for d in 0 1; do mmc dev ${d}; for p in boot_a boot boot_b; do if part start mmc ${d} ${p} boot_start; then part size mmc ${d} ${p} boot_size; echo Booting ${p} from mmc ${d}; if mmc read ${loadaddr} ${boot_start} ${boot_size}; then bootm ${loadaddr}; fi; fi; done; done; echo No Android boot image, trying bootstd; bootflow scan"
+CONFIG_HUSH_PARSER=y
