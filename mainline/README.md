@@ -155,7 +155,7 @@ and hashes are of those files):
   recorded in `.atrios-mainline-patches` (so a second run detects them);
   `0010-rtw88-8822e.patch` was added afterwards and is recorded separately in
   `docs/wifi-port.md`;
-- `Image.gz` (15 905 990 B), `dtbs` and `modules.tar` (21 775 920 B) build,
+- `Image.gz` (15 905 990 B), `dtbs` and `modules.tar` (21 773 432 B) build,
   exit 0;
 - `meson-sm1-yandex-station-max.dtb` carries 72 ring channels
   (`station2:{red,green,blue}:ring1..24`), the keypad node `GPIOA_15/A_14`
@@ -202,8 +202,9 @@ Two images exist:
 | `out/images/atrios-mainline-test-v130.img` | vendor U-Boot 2015.01 (BL33) | fallback test image |
 | `out/images/atrios-mainline-v130.img` | **our mainline U-Boot** as BL33 inside the FIP | final image |
 
-The final image is 1 571 493 000 B, sha256
-`eeef11226489389935964a41c97d5e1d0899663b5ca78da9d509ae990632f4e9`.
+The final image is 1 571 493 000 B; its sha256 is in
+`atrios-mainline-v130.img.sha256` next to the file (the hash changes with every
+rebuild because make_ext4fs stores timestamps).
 BL2/BL30/BL31 remain the vendor signed payloads (they contain the
 board-specific LPDDR4 training); only BL33 is ours. The FIP is built by
 `scripts/make-fip.sh`, verified by an LZ4 round-trip and the presence of
