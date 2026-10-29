@@ -1,0 +1,176 @@
+{
+  "evidence_id": "burn_ev_9048ab4b862d561fbfe5f00f1c6cd1d04ae1170362b0b36c6ec9a33e86e39175",
+  "record": "burn-package-layout",
+  "created": "2026-10-28",
+  "subject": {
+    "name": "yandex_s905x3_custom_v130.img",
+    "local_path": "/home/leftymods/atrios-pack/out/yandex_s905x3_custom_v130.img",
+    "size": 1566609544,
+    "sha256": "eb85e390746cc472b64fdfbea53f2cea790843fdd95ec8e010c43341fe335ed1",
+    "format": "amlogic-amlimage-v2"
+  },
+  "header": {
+    "crc": "0xbc03b96b",
+    "version": 2,
+    "magic": "0x27b51956",
+    "imageSz": 1566609544,
+    "itemAlginSize": 4,
+    "itemNum": 17,
+    "reserve": "all zero"
+  },
+  "item_table": {
+    "offset": 64,
+    "entry_size": 576,
+    "count": 17,
+    "data_start": "0x268"
+  },
+  "items": [
+    {
+      "id": 0,
+      "fileType": "0x00",
+      "offset": "0x0002680",
+      "size": "0x162f70",
+      "main": "USB",
+      "sub": "DDR"
+    },
+    {
+      "id": 1,
+      "fileType": "0x00",
+      "offset": "0x0002680",
+      "size": "0x162f70",
+      "main": "USB",
+      "sub": "UBOOT"
+    },
+    {
+      "id": 2,
+      "fileType": "0x00",
+      "offset": "0x01655f0",
+      "size": "0x017800",
+      "main": "PARTITION",
+      "sub": "_aml_dtb"
+    },
+    {
+      "id": 3,
+      "fileType": "0x00",
+      "offset": "0x017cdf0",
+      "size": "0x000030",
+      "main": "VERIFY",
+      "sub": "_aml_dtb",
+      "content": "sha1sum 2b4bd7c9b0880010cc4765c83c402f4b18435f3b"
+    },
+    {
+      "id": 4,
+      "fileType": "0x00",
+      "offset": "0x017ce20",
+      "size": "0x163170",
+      "main": "UBOOT",
+      "sub": "aml_sdc_burn"
+    },
+    {
+      "id": 5,
+      "fileType": "0x00",
+      "offset": "0x02dff90",
+      "size": "0x00025a",
+      "main": "ini",
+      "sub": "aml_sdc_burn"
+    },
+    {
+      "id": 6,
+      "fileType": "0x00",
+      "offset": "0x02e01ec",
+      "size": "0x9e2000",
+      "main": "PARTITION",
+      "sub": "boot",
+      "content": "ANDROID! boot image"
+    },
+    {
+      "id": 7,
+      "fileType": "0x00",
+      "offset": "0x0cc21ec",
+      "size": "0x000030",
+      "main": "VERIFY",
+      "sub": "boot"
+    },
+    {
+      "id": 8,
+      "fileType": "0x00",
+      "offset": "0x0002680",
+      "size": "0x162f70",
+      "main": "PARTITION",
+      "sub": "bootloader"
+    },
+    {
+      "id": 9,
+      "fileType": "0x00",
+      "offset": "0x0cc221c",
+      "size": "0x000030",
+      "main": "VERIFY",
+      "sub": "bootloader"
+    },
+    {
+      "id": 10,
+      "fileType": "0x00",
+      "offset": "0x0cc224c",
+      "size": "0x146d40",
+      "main": "PARTITION",
+      "sub": "logo",
+      "content": "AML_RES! logo"
+    },
+    {
+      "id": 11,
+      "fileType": "0x00",
+      "offset": "0x0e08f8c",
+      "size": "0x000030",
+      "main": "VERIFY",
+      "sub": "logo"
+    },
+    {
+      "id": 12,
+      "fileType": "0x00",
+      "offset": "0x01655f0",
+      "size": "0x017800",
+      "main": "dtb",
+      "sub": "meson1"
+    },
+    {
+      "id": 13,
+      "fileType": "0x00",
+      "offset": "0x01655f0",
+      "size": "0x017800",
+      "main": "dtb",
+      "sub": "meson1_ENC"
+    },
+    {
+      "id": 14,
+      "fileType": "0x00",
+      "offset": "0x0e08fbc",
+      "size": "0x00009b",
+      "main": "conf",
+      "sub": "platform"
+    },
+    {
+      "id": 15,
+      "fileType": "0x00",
+      "offset": "0x0e09058",
+      "size": "0x5c800000",
+      "main": "PARTITION",
+      "sub": "system"
+    },
+    {
+      "id": 16,
+      "fileType": "0x00",
+      "offset": "0x5d609058",
+      "size": "0x000030",
+      "main": "VERIFY",
+      "sub": "system",
+      "content": "sha1sum 943b5170c794f1379df5d5f83bb223bf2ed3915d"
+    }
+  ],
+  "platform_ini": "Platform:0x0811\nDDRLoad:0xfffa0000\nDDRRun:0xfffa0000\nDDRSize:0x10000\nControl0=0xfffa0000:0x00000004\nControl1=0xfffa0000:0x00005183\nEncrypt_reg:0xff800228\n",
+  "notes": [
+    "fileType 0x00 = normal for every item in this package; no sparse item present",
+    "items 0,1,8 share the same offset/size: the 0x162f70-byte BL2+BL33 image is exposed three times (USB/DDR, USB/UBOOT, PARTITION/bootloader)",
+    "VERIFY items are ASCII 'sha1sum <40 hex>' and are fed to 'verify sha1sum <sum>'",
+    "header crc does not match plain crc32 of file/body/header; no image_check() implementation exists in the BSP"
+  ]
+}

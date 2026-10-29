@@ -1,0 +1,162 @@
+{
+  "evidence_id": "burn_ev_48d93b8e08601fe67ff66fb66c644ff859c690930d8c4e68589b11ae8c1266db",
+  "record": "burn-protocol-sources",
+  "created": "2026-10-28",
+  "scope": "Amlogic v2 USB burning protocol as implemented by the Yandex Station Max vendor BSP",
+  "tree": {
+    "root": "/home/leftymods/AtriOS/AtriOS/AtriOS-linux",
+    "note": "sparse checkout: only 7 of 40 v2_burning files are on disk; the rest were read from git HEAD",
+    "mirror": "/home/leftymods/UB-AtriOS/drivers/usb/gadget/v2_burning (2017 copy, byte-identical usb_pcd.c/optimus_transform.c apart from style/refactor)"
+  },
+  "files": [
+    {
+      "path": "bl33/drivers/usb/gadget/v2_burning/v2_usb_tool/usb_pcd.c",
+      "sha256": "f04b94b597b70cc280a5f89ad1785eb02834074657abf2085b6818c541c22f25",
+      "on_disk": false,
+      "role": "descriptors + EP0 vendor request dispatch + bulk flow control"
+    },
+    {
+      "path": "bl33/drivers/usb/gadget/v2_burning/v2_usb_tool/usb_pcd.h",
+      "sha256": "a40815fa1e40fc10467576a903b0afcf5d44662f92ba3c7ed3d5e20229007cfa",
+      "on_disk": false,
+      "role": "AM_REQ_* codes, CmdData_WriteMedia"
+    },
+    {
+      "path": "bl33/drivers/usb/gadget/v2_burning/v2_usb_tool/optimus_core.c",
+      "sha256": "4aa5c7268f2b3c57fe49202c868ecca23fded7aaf836d9325153d1783809aacb",
+      "on_disk": false,
+      "role": "v2_usbburning() main loop + 'update' U_BOOT_CMD"
+    },
+    {
+      "path": "bl33/drivers/usb/gadget/v2_burning/v2_usb_tool/optimus_transform.c",
+      "sha256": "02c83a4f87bbfb326a49826b94221ebf1544425c1aaf18ec1b6ffeaa024b0f55",
+      "on_disk": false,
+      "role": "optimus_working() text command dispatcher"
+    },
+    {
+      "path": "bl33/drivers/usb/gadget/v2_burning/v2_common/optimus_download.c",
+      "sha256": "7dde1137eb8036a2f14878211c47eb52bed53f42fa176bf8851adddf3a3aadd9",
+      "on_disk": true,
+      "role": "download/upload command parsing, media write, verify, burn_complete"
+    },
+    {
+      "path": "bl33/drivers/usb/gadget/v2_burning/v2_common/amlImage_if.h",
+      "sha256": "3522def941c9ed280682c00b950510c757a31d57a9b75c9d31a08a9fb864806c",
+      "on_disk": true,
+      "role": "AMLIMAGE header/item structures, magic 0x27b51956"
+    },
+    {
+      "path": "bl33/drivers/usb/gadget/v2_burning/v2_common/optimus_download.h",
+      "sha256": "690d04e3e3b49d61d44f45ab154323c61f1e49237297e32674d6d56ab77bcf6a",
+      "on_disk": true,
+      "role": "buffer map, work modes, burn-complete choices, identifyWaitTime"
+    },
+    {
+      "path": "bl33/drivers/usb/gadget/v2_burning/v2_common/optimus_buffer_manager.c",
+      "sha256": "0b9fc43392f03e0f87eadfa32dbd1964e77abd7efb657e827451737f17ccc3a8",
+      "on_disk": false,
+      "role": "64K slot buffering, 64K-multiple rule, upload command data"
+    },
+    {
+      "path": "bl33/board/amlogic/yandex_station_v1/yandex_station_v1.c",
+      "sha256": "35c2af00da0de5e32d91ae68a2afddceaa0f6f1311f93ced900a00a0fde2c8df",
+      "on_disk": true,
+      "role": "burn mode entry gate (PREG_STICKY_REG2)"
+    },
+    {
+      "path": "bl33/board/amlogic/configs/yandex_station_v1.h",
+      "sha256": "944a73223fdb86729c2390ed1dbbacddf44ae7861e9e9c300bead129c550c395",
+      "on_disk": false,
+      "role": "default env: usb_burning=update 1000, try_auto_burn, CONFIG_AML_V2_FACTORY_BURN"
+    }
+  ],
+  "findings": [
+    {
+      "claim": "VID/PID = 0x1b8e:0xc003, bcdUSB 0x0200, bcdDevice 0x0007, MPS0 64, no string descriptors",
+      "source": "usb_pcd.c:54-84"
+    },
+    {
+      "claim": "1 interface, class 0xff, 2 bulk EPs: 0x81 IN and 0x02 OUT, 512-byte MPS at high speed",
+      "source": "usb_pcd.c:86-160, dwc_pcd.h:39-46"
+    },
+    {
+      "claim": "USE_FULL_SPEED is gated on CONFIG_AML_USB_BURN_FULL_SPPED, which is not defined for yandex_station_v1",
+      "source": "dwc_pcd.h:33-35 + grep of board/amlogic/configs/yandex_station_v1.h"
+    },
+    {
+      "claim": "Vendor request codes: 0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x11,0x12,0x20,0x30,0x31,0x32,0x33,0x34",
+      "source": "usb_pcd.h:41-59"
+    },
+    {
+      "claim": "Identify (0x20) returns {ver_major, ver_minor, stage_major, stage_minor}; TPL reports stage_minor=16",
+      "source": "usb_pcd.c:573-589, platform.h:125-133"
+    },
+    {
+      "claim": "Download command data is a 32-byte struct {retry,len,seq,checksum,alg(u16),ackLen(u16),reserv[12]}",
+      "source": "usb_pcd.h:63-80, usb_pcd.c:702-737"
+    },
+    {
+      "claim": "Checksum algorithms advertised: 0x00ee none, 0x00ef add-sum, 0x00f0 crc32; only add-sum is implemented",
+      "source": "usb_pcd.c:824-849"
+    },
+    {
+      "claim": "add_sum() is declared but not defined anywhere in the tree",
+      "source": "optimus_download.h:159 + git grep add_sum"
+    },
+    {
+      "claim": "image_check() is declared but not defined anywhere in the tree; header crc field is not verified",
+      "source": "amlImage_if.h:105 + git grep image_check"
+    },
+    {
+      "claim": "Non-final data packets must be a multiple of 64 KiB",
+      "source": "optimus_buffer_manager.c:190-193"
+    },
+    {
+      "claim": "Busy replies are the ASCII strings 'Continue:32' (download) and 'Continue:34' (bulkcmd)', success is 'OK!!' with ackLen bytes",
+      "source": "usb_pcd.c:853, 1086-1095"
+    },
+    {
+      "claim": "Burn mode entry: boot_id==5 (AO_SEC_GP_CFG0[3:0]) or AO_SEC_GP_CFG7 bit31, plus PREG_STICKY_REG2 gate 0x1b8ec003/0x1b8ec004",
+      "source": "aml_v2_burning.c:62-80, yandex_station_v1.c:612-616, 706-711"
+    },
+    {
+      "claim": "set_usb_boot_function(CLEAR_USB_BOOT) is an SMC 0x82000043 with x1=1 into BL31, not SCPI",
+      "source": "arch/arm/cpu/armv8/g12a/bl31_apis.c:337-347, arch/arm/include/asm/arch-g12a/bl31_apis.h:73-77"
+    },
+    {
+      "claim": "Env drives burn: usb_burning=update 1000 and try_auto_burn=update 700 750",
+      "source": "board/amlogic/configs/yandex_station_v1.h:114,117,236-247"
+    },
+    {
+      "claim": "Unknown text commands fall through to run_command() (remote shell risk)",
+      "source": "optimus_transform.c:468-470"
+    },
+    {
+      "claim": "erase_bootloader erases the 'boot' partition when ROM_BOOT_SKIP_BOOT_ENABLED_4_USB is undefined (it is undefined here)",
+      "source": "optimus_download.c:1395-1410 + grep of config"
+    }
+  ],
+  "cross_check": {
+    "host_implementation": "pyamlboot (github.com/superna9999/pyamlboot)",
+    "urls": [
+      "https://github.com/superna9999/pyamlboot/blob/master/pyamlboot/pyamlboot.py#L17-L60",
+      "https://github.com/superna9999/pyamlboot/blob/master/pyamlboot/pyamlboot.py#L505-L600",
+      "https://github.com/superna9999/pyamlboot/blob/master/pyamlboot/optimus.py#L745-L830",
+      "https://github.com/superna9999/pyamlboot/blob/master/pyamlboot/socid.py"
+    ],
+    "agreements": [
+      "same VID/PID 0x1b8e:0xc003 for both BootROM and TPL",
+      "same request codes + REQ_GET_AMLC 0x50 / REQ_WRITE_AMLC 0x60 / REQ_PASSWORD 0x35 / REQ_NOP 0x36 exist only in the ROM path",
+      "download uses 0x10000-byte blocks, seq starting at 0, ackLen 0x200, alg add-sum",
+      "tool skips bootloader download when stage_minor == 16",
+      "Continue:32 / OK!! handshake"
+    ]
+  },
+  "unknowns": [
+    "who writes PREG_STICKY_REG2=0x1b8ec003 and what 0x1b8ec004 means",
+    "exact wValue/wIndex sent by the Windows tool for 0x32 (only wIndex==0xffff && wLength==0x20 special case is visible in target code)",
+    "header crc algorithm (tested crc32 variants do not match 0xbc03b96b)",
+    "exact add_sum() implementation (used pyamlboot equivalent)",
+    "whether the vendor tool requires full-speed fallback on any port"
+  ]
+}
