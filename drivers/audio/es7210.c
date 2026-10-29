@@ -163,7 +163,7 @@ static const struct reg_default es7210_reg_defaults[] = {
 	{ ES7210_ALC2_MAX_GAIN,	0xbf },
 	{ ES7210_ALC1_MAX_GAIN,	0xbf },
 	{ 0x1f,			0x00 },
-	{ ES7210_ADC34_HPF2,	0x26 },
+	{ ES7210_ADC34_HPF2,	0x06 },
 	{ ES7210_ADC34_HPF1,	0x26 },
 	{ ES7210_ADC12_HPF2,	0x06 },
 	{ ES7210_ADC12_HPF1,	0x26 },
@@ -423,10 +423,10 @@ static int es7210_set_dai_fmt(struct snd_soc_dai *dai, unsigned int fmt)
 	 * as master and everything else as slave.
 	 */
 	switch (fmt & SND_SOC_DAIFMT_CLOCK_PROVIDER_MASK) {
-	case SND_SOC_DAIFMT_CBP_CFP:
 	case SND_SOC_DAIFMT_CBC_CFP:
 		frame_master = true;
 		break;
+	case SND_SOC_DAIFMT_CBP_CFP:
 	case SND_SOC_DAIFMT_CBP_CFC:
 	case SND_SOC_DAIFMT_CBC_CFC:
 		frame_master = false;
@@ -477,12 +477,12 @@ static int es7210_set_dai_fmt(struct snd_soc_dai *dai, unsigned int fmt)
 	 * inversion bit, so NB_IF behaves like NB_NF (same as the vendor).
 	 */
 	switch (fmt & SND_SOC_DAIFMT_INV_MASK) {
-	case SND_SOC_DAIFMT_IB_NF:
+	case SND_SOC_DAIFMT_NB_IF:
 	case SND_SOC_DAIFMT_IB_IF:
 		inv = ES7210_MODE_BCLK_INV;
 		break;
-	case SND_SOC_DAIFMT_NB_IF:
 	case SND_SOC_DAIFMT_NB_NF:
+	case SND_SOC_DAIFMT_IB_NF:
 		inv = 0;
 		break;
 	default:

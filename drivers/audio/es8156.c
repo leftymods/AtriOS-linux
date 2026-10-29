@@ -67,7 +67,7 @@
 /* SDP: bits 2:0 format, bit 3 output enable (active low), bits 6:4 width */
 #define ES8156_SDP_FMT_MASK		GENMASK(2, 0)
 #define ES8156_SDP_FMT_I2S		0x0
-#define ES8156_SDP_FMT_RIGHT_J		0x1
+#define ES8156_SDP_FMT_LEFT_J		0x1
 #define ES8156_SDP_FMT_DSP_A		0x3
 #define ES8156_SDP_FMT_DSP_B		0x7
 #define ES8156_SDP_HP_SWITCH		BIT(3)
@@ -310,8 +310,8 @@ static int es8156_set_dai_fmt(struct snd_soc_dai *dai, unsigned int fmt)
 	case SND_SOC_DAIFMT_I2S:
 		format = ES8156_SDP_FMT_I2S;
 		break;
-	case SND_SOC_DAIFMT_RIGHT_J:
-		format = ES8156_SDP_FMT_RIGHT_J;
+	case SND_SOC_DAIFMT_LEFT_J:
+		format = ES8156_SDP_FMT_LEFT_J;
 		break;
 	case SND_SOC_DAIFMT_DSP_A:
 		format = ES8156_SDP_FMT_DSP_A;

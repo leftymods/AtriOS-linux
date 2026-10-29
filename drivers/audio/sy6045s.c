@@ -691,11 +691,14 @@ static int sy6045s_hw_params(struct snd_pcm_substream *substream,
 	bool i2s = false;
 
 	switch (priv->format & SND_SOC_DAIFMT_INV_MASK) {
-	case SND_SOC_DAIFMT_IB_NF:
+	case SND_SOC_DAIFMT_NB_IF:
 		val = 0x20;
 		break;
-	case SND_SOC_DAIFMT_IB_IF:
+	case SND_SOC_DAIFMT_IB_NF:
 		val = 0x40;
+		break;
+	case SND_SOC_DAIFMT_IB_IF:
+		val = 0x60;
 		break;
 	default:
 		val = 0;
@@ -749,6 +752,7 @@ static int sy6045s_trigger(struct snd_pcm_substream *substream, int cmd,
 			gpiod_set_value(priv->fault_gpio, 1);
 		} else {
 			dev_info(priv->dev, "SPK ON (queue work)\n");
+			cancel_work_sync(&priv->spk_off_work);
 			queue_work(system_highpri_wq, &priv->spk_on_work);
 		}
 		return 0;
@@ -761,6 +765,7 @@ static int sy6045s_trigger(struct snd_pcm_substream *substream, int cmd,
 			gpiod_set_value(priv->fault_gpio, 0);
 		} else {
 			dev_info(priv->dev, "SPK OFF (queue work)\n");
+			cancel_work_sync(&priv->spk_on_work);
 			queue_work(system_highpri_wq, &priv->spk_off_work);
 		}
 		return 0;
@@ -785,8 +790,10 @@ static struct snd_soc_dai_driver sy6045s_dai = {
 		.rates = SNDRV_PCM_RATE_8000_96000,
 		.rate_min = 8000,
 		.rate_max = 96000,
-		.formats = SNDRV_PCM_FMTBIT_S32_LE,
+		.formats = SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FMTBIT_S24_LE |
+			   SNDRV_PCM_FMTBIT_S32_LE,
 	},
+	.symmetric_rate = 1,
 	.ops = &sy6045s_dai_ops,
 };
 
@@ -857,9 +864,9 @@ static const struct snd_kcontrol_new sy6045s_snd_controls[] = {
 		       0, 0xff, 0, sy6045s_vol_tlv),
 	SOC_SINGLE_TLV("Ch2 Playback Volume", SY6045S_REG_VOL_CH2,
 		       0, 0xff, 0, sy6045s_vol_tlv),
-	SOC_SINGLE("Master Playback Switch", SY6045S_REG_SWITCH, 3, 1, 0),
-	SOC_SINGLE("Ch1 Playback Switch", SY6045S_REG_SWITCH, 0, 1, 0),
-	SOC_SINGLE("Ch2 Playback Switch", SY6045S_REG_SWITCH, 1, 1, 0),
+	SOC_SINGLE("Master Playback Switch", SY6045S_REG_SWITCH, 3, 1, 1),
+	SOC_SINGLE("Ch1 Playback Switch", SY6045S_REG_SWITCH, 0, 1, 1),
+	SOC_SINGLE("Ch2 Playback Switch", SY6045S_REG_SWITCH, 1, 1, 1),
 	SOC_SINGLE("EQ Switch", SY6045S_REG_EQ, 4, 1, 0),
 	{
 		.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
@@ -1105,12 +1112,12 @@ static void sy6045s_i2c_remove(struct i2c_client *client)
 	struct device *dev = &client->dev;
 	struct sy6045s_priv *priv = dev_get_drvdata(dev);
 
+	snd_soc_unregister_component(dev);
+
 	cancel_work_sync(&priv->spk_off_work);
 	cancel_work_sync(&priv->spk_on_work);
 
 	sy6045s_set_sby_mode_on(priv);
-
-	snd_soc_unregister_component(dev);
 	regulator_bulk_disable(ARRAY_SIZE(priv->supplies), priv->supplies);
 }
 
