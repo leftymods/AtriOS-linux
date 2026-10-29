@@ -814,7 +814,9 @@ static int ledpanel_probe(struct spi_device *spi)
 
 	lp->api_version = st.api_version;
 	lp->fw_version = st.fw_version;
-	lp->crc = lp->proto == LEDPANEL_PROTO_SA && st.api_version >= 9;
+	/* PA (gowin) always carries CRC; SA only from API 9. */
+	lp->crc = lp->proto == LEDPANEL_PROTO_PA ||
+		  (lp->proto == LEDPANEL_PROTO_SA && st.api_version >= 9);
 
 	/*
 	 * gowin_led_device keeps the geometry in a board_rev lookup table

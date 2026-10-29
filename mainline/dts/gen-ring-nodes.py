@@ -321,6 +321,21 @@ FOOTER = '''};
 \tpinctrl-0 = <&remote_input_ao_pins>;
 \tpinctrl-names = "default";
 };
+\n&sd_emmc_a {
+\tstatus = "okay";
+\tpinctrl-0 = <&sdio_pins>;
+\tpinctrl-1 = <&sdio_clk_gate_pins>;
+\tpinctrl-names = "default", "clk-gate";
+\t#address-cells = <1>;
+\t#size-cells = <0>;
+\tbus-width = <4>;
+\tcap-sd-highspeed;
+\tmax-frequency = <100000000>;
+\tnon-removable;
+\tdisable-wp;
+\tkeep-power-in-suspend;   /* RTL8822ES firmware survives suspend */
+\tvmmc-supply = <&reg_3v3_d>;
+};
 '''
 
 

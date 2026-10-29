@@ -12,6 +12,16 @@ case "$1" in
   start)
     echo "[AtriOS] Starting user interface daemons..."
     mkdir -p /var/log
+    # fbdev numbering is dynamic; userspace expects fb4 (panel) and fb5 (ring).
+    for _fb in /sys/class/graphics/fb*; do
+      [ -r "$_fb/name" ] || continue
+      _name=$(cat "$_fb/name" 2>/dev/null)
+      _node=/dev/$(basename "$_fb")
+      case "$_name" in
+        atrios-ledpanel) [ -e /dev/fb4 ] || ln -sf "$_node" /dev/fb4 ;;
+        led-ring-fb)     [ -e /dev/fb5 ] || ln -sf "$_node" /dev/fb5 ;;
+      esac
+    done
     # keep the serial console quiet (hide driver debug spam)
     dmesg -n 4 2>/dev/null || true
     if [ -x /usr/lib/atrios/rotaryd ]; then

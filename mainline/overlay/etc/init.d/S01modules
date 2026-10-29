@@ -78,6 +78,8 @@ case "$1" in
     load snd-soc-es7210
     load snd-soc-es8156
     load snd-soc-sy6045s
+    # PDM capture link uses the generic DMIC codec
+    load snd-soc-dmic
 
     # Wireless (optional).
     say "Wireless:"

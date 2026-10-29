@@ -417,6 +417,15 @@ apply_uboot() {
 	for p in "${patches[@]}"; do
 		apply_patch "$UBOOT_DIR" "$p"
 	done
+
+	# The burn stack lives in this repository as canonical sources; keep the
+	# tree in sync even when someone edits it without regenerating the patch.
+	if [ -d "$MAINLINE_DIR/u-boot/burn" ]; then
+		mkdir -p "$UBOOT_DIR/drivers/usb/gadget/aml_burn"
+		cp -a "$MAINLINE_DIR/u-boot/burn/." \
+			"$UBOOT_DIR/drivers/usb/gadget/aml_burn/"
+		log "synced u-boot/burn sources"
+	fi
 }
 
 # --------------------------------------------------------------------------

@@ -642,6 +642,22 @@
 	pinctrl-names = "default";
 };
 
+&sd_emmc_a {
+	status = "okay";
+	pinctrl-0 = <&sdio_pins>;
+	pinctrl-1 = <&sdio_clk_gate_pins>;
+	pinctrl-names = "default", "clk-gate";
+	#address-cells = <1>;
+	#size-cells = <0>;
+	bus-width = <4>;
+	cap-sd-highspeed;
+	max-frequency = <100000000>;
+	non-removable;
+	disable-wp;
+	keep-power-in-suspend;   /* RTL8822ES firmware survives suspend */
+	vmmc-supply = <&reg_3v3_d>;
+};
+
 /*
  * ------------------------------------------------------------------
  * Audio: ES7210 mics, ES8156 headphone DAC, 2x SY6045S amps, TDM-B,

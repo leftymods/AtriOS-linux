@@ -176,6 +176,11 @@ static int ptbl_parse(struct blk_desc *desc)
 
 	blk = AML_PTBL_OFFSET / desc->blksz;
 	blocks = DIV_ROUND_UP(sizeof(*t), desc->blksz);
+	if (blocks * desc->blksz > sizeof(store_ptbl_buf)) {
+		printf("aml_burn: block size %u is too large for the table buffer\n",
+		       desc->blksz);
+		return -ENOTSUPP;
+	}
 	if (blk_dread(desc, blk, blocks, store_ptbl_buf) != blocks) {
 		printf("aml_burn: cannot read the Amlogic partition table\n");
 		return -EIO;
@@ -874,6 +879,15 @@ int aml_up_begin(const char *media, const char *part, const char *type,
 			printf("aml_burn: upload mem needs a hex address\n");
 			return -ENOTSUPP;
 		}
+		/*
+		 * The tool only uses this to read the secure-boot register.  Do not
+		 * expose arbitrary physical memory to the USB host.
+		 */
+		if (addr != AML_BURN_SECURE_REG || size > 16) {
+			printf("aml_burn: upload mem 0x%llx is not allowed\n",
+			       (unsigned long long)addr);
+			return -ENOTSUPP;
+		}
 		up->kind = AML_UP_MEM;
 		up->addr = addr;
 	} else if (!strcmp(media, "store")) {
@@ -915,7 +929,8 @@ int aml_up_read(struct aml_burn_upload *up, u64 off, u8 *buf, u32 len)
 		return -EINVAL;
 
 	if (up->kind == AML_UP_MEM) {
-		aml_mem_read(up->addr + off, buf, len);
+		/* Secure-boot register: a non-secure board reads as zeroes. */
+		memset(buf, 0, len);
 		return 0;
 	}
 

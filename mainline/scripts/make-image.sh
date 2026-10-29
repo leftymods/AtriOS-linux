@@ -469,6 +469,13 @@ build_rootfs() {
 	ko_count=$(find "$tree/lib/modules/$KREL" -name '*.ko' | wc -l)
 	[ "$ko_count" -gt 0 ] || die "no .ko files under lib/modules/$KREL"
 
+	# Apply the mainline userspace overlay (asound.conf, S01modules for 7.3,
+	# fb symlinks, adapted atrios helpers).
+	if [ -d "$MAINLINE_DIR/overlay" ]; then
+		log "applying mainline userspace overlay"
+		cp -a "$MAINLINE_DIR/overlay/." "$tree"/
+	fi
+
 	# The vendor cmdline uses init=/init, which the Android rootfs provided.
 	# The Buildroot tree only has /sbin/init, so add the symlink instead of
 	# rewriting the vendor command line.
@@ -483,8 +490,8 @@ kernel:     Linux $KREL (mainline) + $(basename "$BOARD_DTB")
 bootloader: vendor U-Boot 2015.01 / BL33 (NOT mainline U-Boot)
 userspace:  Buildroot from $(basename "$ROOTFS_TAR") (built for 4.9.113)
 built:      $(date -u '+%Y-%m-%dT%H:%M:%SZ')
-note:       /etc/init.d/S01modules still insmods /lib/modules/4.9.113;
-            the 7.3 codecs must be loaded with modprobe (see docs/image.md).
+note:       the mainline overlay is applied; 7.3 modules load via
+            /etc/init.d/S01modules, the 4.9 tree is kept only as a fallback.
 EOF
 
 	if command -v depmod >/dev/null 2>&1; then

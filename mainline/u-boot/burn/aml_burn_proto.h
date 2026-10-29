@@ -183,7 +183,7 @@ struct aml_burn_upload {
 #define AML_PTBL_GAP		(8 * SZ_1M)
 #define AML_PTBL_NAME_SZ	16
 /* sizeof(struct aml_ptbl) == 1304, rounded up to whole sectors */
-#define AML_PTBL_READ_SZ	2048
+#define AML_PTBL_READ_SZ	4096
 
 struct aml_ptbl_entry {
 	u8 name[AML_PTBL_NAME_SZ];
