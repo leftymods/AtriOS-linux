@@ -159,7 +159,7 @@ build_staging() {
 
 	log "building boot/system/dtb with scripts/make-image.sh"
 	# make-image.sh packs a throw-away test image; only its staging is used.
-	"$MAINLINE_DIR/scripts/make-image.sh" \
+	FINAL_IMAGE=1 "$MAINLINE_DIR/scripts/make-image.sh" \
 		--out "$WORK_DIR/images" --staging "$STAGING_DIR" "${IMAGE_ARGS[@]}"
 
 	[ -f "$boot" ] || die "make-image.sh did not produce $boot"

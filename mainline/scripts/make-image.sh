@@ -487,7 +487,11 @@ build_rootfs() {
 	cat > "$tree/etc/atrios-test-image" <<EOF
 AtriOS Mainline
 kernel:     Linux $KREL (mainline) + $(basename "$BOARD_DTB")
-bootloader: vendor U-Boot 2015.01 / BL33 (NOT mainline U-Boot)
+bootloader: $(if [ "${FINAL_IMAGE:-0}" = 1 ]; then \
+                echo "mainline U-Boot v2026.10 (BL33 inside the vendor FIP)"; \
+              else \
+                echo "vendor U-Boot 2015.01 (BL33)"; \
+              fi)
 userspace:  Buildroot from $(basename "$ROOTFS_TAR") (built for 4.9.113)
 hardware:   NOT TESTED
 built:      $(date -u '+%Y-%m-%dT%H:%M:%SZ')
