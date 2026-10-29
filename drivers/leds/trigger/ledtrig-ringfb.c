@@ -93,9 +93,14 @@ static void ringfb_push_locked(struct ringfb *ring)
 
 	memcpy(ring->shadow, info->screen_buffer, RINGFB_SIZE);
 	for (i = 0; i < RINGFB_CHANNELS; i++) {
-		if (!ring->channels[i])
+		struct led_classdev *led = ring->channels[i];
+		unsigned int val;
+
+		if (!led)
 			continue;
-		led_set_brightness(ring->channels[i], ring->shadow[i]);
+		/* gva hardware scales 0..255 into max_brightness (200). */
+		val = (unsigned int)ring->shadow[i] * led->max_brightness / 255;
+		led_set_brightness(led, val);
 	}
 }
 
@@ -126,12 +131,8 @@ static int ringfb_trigger_activate(struct led_classdev *led)
 	unsigned int key;
 	int ret;
 
-	if (led->max_brightness != RINGFB_MAX_BRIGHTNESS) {
-		dev_warn(led->dev,
-			 "cannot activate led_ring_fb trigger for led with max_brightness != %d\n",
-			 RINGFB_MAX_BRIGHTNESS);
+	if (!led->max_brightness)
 		return -EINVAL;
-	}
 
 	ret = ringfb_led_key(led, &key);
 	if (ret) {
@@ -218,6 +219,8 @@ static int ringfb_set_par(struct fb_info *info)
 	return 0;
 }
 
+static void ringfb_destroy(struct fb_info *info);
+
 static const struct fb_ops ringfb_ops = {
 	.owner		= THIS_MODULE,
 	.fb_check_var	= ringfb_check_var,
@@ -296,7 +299,9 @@ static int ringfb_probe(struct platform_device *pdev)
 	return 0;
 
 err_unregister_fb:
+	/* unregister drops the last reference; fb_destroy frees the rest. */
 	unregister_framebuffer(info);
+	return ret;
 err_free_cmap:
 	fb_dealloc_cmap(&info->cmap);
 err_free_screen:

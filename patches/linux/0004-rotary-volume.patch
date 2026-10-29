@@ -36,7 +36,7 @@ diff --git a/drivers/input/misc/rotary-volume.c b/drivers/input/misc/rotary-volu
 new file mode 100644
 --- /dev/null
 +++ b/drivers/input/misc/rotary-volume.c
-@@ -0,0 +1,241 @@
+@@ -0,0 +1,246 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * rotary-volume.c - GPIO rotary volume encoder for Yandex Station devices
@@ -127,14 +127,19 @@ new file mode 100644
 +	 * are ignored, so one detent gives exactly one key event even though
 +	 * both edges are requested.
 +	 */
++	/*
++	 * The vendor packs state as (gpio0 << 1) | gpio1 and reports
++	 * keycodes[0] when the first line falls while the second stays high.
++	 * Keep that mapping so the direction matches the stock driver.
++	 */
 +	if (changed == BIT(0)) {
 +		if (!(prev & BIT(0)) || !(state & BIT(1)))
 +			goto out;
-+		code = rv->keycodes[1];
++		code = rv->keycodes[0];
 +	} else if (changed == BIT(1)) {
 +		if (!(prev & BIT(1)) || !(state & BIT(0)))
 +			goto out;
-+		code = rv->keycodes[0];
++		code = rv->keycodes[1];
 +	} else {
 +		goto out;
 +	}

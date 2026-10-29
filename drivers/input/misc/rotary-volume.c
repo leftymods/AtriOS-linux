@@ -88,14 +88,19 @@ static irqreturn_t rotary_volume_irq(int irq, void *data)
 	 * are ignored, so one detent gives exactly one key event even though
 	 * both edges are requested.
 	 */
+	/*
+	 * The vendor packs state as (gpio0 << 1) | gpio1 and reports
+	 * keycodes[0] when the first line falls while the second stays high.
+	 * Keep that mapping so the direction matches the stock driver.
+	 */
 	if (changed == BIT(0)) {
 		if (!(prev & BIT(0)) || !(state & BIT(1)))
 			goto out;
-		code = rv->keycodes[1];
+		code = rv->keycodes[0];
 	} else if (changed == BIT(1)) {
 		if (!(prev & BIT(1)) || !(state & BIT(0)))
 			goto out;
-		code = rv->keycodes[0];
+		code = rv->keycodes[1];
 	} else {
 		goto out;
 	}
