@@ -60,6 +60,8 @@ while [ $# -gt 0 ]; do
 		-j|--jobs)
 			[ -n "${2:-}" ] || die "--jobs requires a number"
 			JOBS=$2; shift 2 ;;
+		-j[0-9]*)
+			JOBS=${1#-j}; shift ;;
 		--dry-run) DRY_RUN=1; shift ;;
 		-h|--help) usage; exit 0 ;;
 		*) die "unknown option: $1 (try --help)" ;;
