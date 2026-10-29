@@ -778,6 +778,7 @@ static int ledpanel_probe(struct spi_device *spi)
 	struct ledpanel_status st = { };
 	struct backlight_properties props = { };
 	struct device *dev = &spi->dev;
+	struct fb_info *info;
 	struct ledpanel *lp;
 	const char *bl_name;
 	u32 value;

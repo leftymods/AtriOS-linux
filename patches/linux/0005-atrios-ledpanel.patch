@@ -43,7 +43,7 @@ diff --git a/drivers/video/fbdev/atrios-ledpanel.c b/drivers/video/fbdev/atrios-
 new file mode 100644
 --- /dev/null
 +++ b/drivers/video/fbdev/atrios-ledpanel.c
-@@ -0,0 +1,978 @@
+@@ -0,0 +1,979 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * atrios-ledpanel.c - front 25x16 LED panel (Gowin FPGA) framebuffer driver
@@ -824,6 +824,7 @@ new file mode 100644
 +	struct ledpanel_status st = { };
 +	struct backlight_properties props = { };
 +	struct device *dev = &spi->dev;
++	struct fb_info *info;
 +	struct ledpanel *lp;
 +	const char *bl_name;
 +	u32 value;
