@@ -84,7 +84,7 @@
 #define LEDPANEL_MAX_DIM		255
 
 #define LEDPANEL_DEFAULT_MAX_BRIGHTNESS	200
-#define LEDPANEL_DEFAULT_SPI_HZ		1000000
+#define LEDPANEL_DEFAULT_SPI_HZ		4000000
 #define LEDPANEL_DEFAULT_REFRESH_MS	20
 
 #define LEDPANEL_CMD_SHOW_PIC		0x07
@@ -590,6 +590,8 @@ static void ledpanel_destroy(struct fb_info *info)
 	cancel_delayed_work_sync(&lp->push);
 	vfree(info->screen_buffer);
 	info->screen_buffer = NULL;
+	fb_dealloc_cmap(&info->cmap);
+	framebuffer_release(info);
 }
 
 static const struct fb_ops ledpanel_fb_ops = {
@@ -713,15 +715,8 @@ static int ledpanel_detect(struct ledpanel *lp, struct ledpanel_status *st)
 static int ledpanel_fb_init(struct ledpanel *lp)
 {
 	struct device *dev = &lp->spi->dev;
-	struct fb_info *info;
+	struct fb_info *info = lp->info;
 	int ret;
-
-	info = framebuffer_alloc(0, dev);
-	if (!info)
-		return -ENOMEM;
-
-	info->par = lp;
-	lp->info = info;
 
 	info->screen_size = PAGE_ALIGN(lp->stride * lp->height);
 	info->screen_buffer = vzalloc(info->screen_size);
@@ -788,11 +783,13 @@ static int ledpanel_probe(struct spi_device *spi)
 	u32 value;
 	int ret;
 
-	lp = devm_kzalloc(dev, sizeof(*lp), GFP_KERNEL);
-	if (!lp)
+	info = framebuffer_alloc(sizeof(*lp), dev);
+	if (!info)
 		return -ENOMEM;
 
+	lp = info->par;
 	lp->spi = spi;
+	lp->info = info;
 	mutex_init(&lp->lock);
 	INIT_DELAYED_WORK(&lp->push, ledpanel_push_work);
 
@@ -801,16 +798,18 @@ static int ledpanel_probe(struct spi_device *spi)
 	if (spi_hz && (!spi->max_speed_hz || spi_hz < spi->max_speed_hz))
 		spi->max_speed_hz = spi_hz;
 	ret = spi_setup(spi);
-	if (ret)
-		return dev_err_probe(dev, ret, "failed to setup SPI\n");
+	if (ret) {
+		ret = dev_err_probe(dev, ret, "failed to setup SPI\n");
+		goto err_release;
+	}
 
 	ret = ledpanel_reset(lp);
 	if (ret)
-		return ret;
+		goto err_release;
 
 	ret = ledpanel_detect(lp, &st);
 	if (ret)
-		return ret;
+		goto err_release;
 
 	lp->api_version = st.api_version;
 	lp->fw_version = st.fw_version;
@@ -866,8 +865,10 @@ static int ledpanel_probe(struct spi_device *spi)
 	lp->tx = devm_kzalloc(dev, lp->tx_len, GFP_KERNEL);
 	lp->payload = devm_kzalloc(dev, lp->payload_len, GFP_KERNEL);
 	lp->shadow = devm_kzalloc(dev, lp->payload_len, GFP_KERNEL);
-	if (!lp->tx || !lp->payload || !lp->shadow)
-		return -ENOMEM;
+	if (!lp->tx || !lp->payload || !lp->shadow) {
+		ret = -ENOMEM;
+		goto err_release;
+	}
 
 	/* Pretend the last sent frame was all ones so the first push is sent. */
 	memset(lp->shadow, 0xff, lp->payload_len);
@@ -904,11 +905,13 @@ static int ledpanel_probe(struct spi_device *spi)
 	return 0;
 
 err_unregister_fb:
+	/* unregister drops the last reference; fb_destroy frees cmap and info. */
 	unregister_framebuffer(lp->info);
-	fb_dealloc_cmap(&lp->info->cmap);
-	framebuffer_release(lp->info);
 	lp->info = NULL;
+	return ret;
 
+err_release:
+	framebuffer_release(info);
 	return ret;
 }
 
@@ -937,12 +940,11 @@ static void ledpanel_remove(struct spi_device *spi)
 		return;
 
 	/*
-	 * screen_buffer is freed from ledpanel_destroy() once the last user
-	 * is gone; here we only drop the registration reference.
+	 * screen_buffer, cmap and fb_info are released from ledpanel_destroy()
+	 * when the last /dev/fb user closes the file; remove() only drops the
+	 * registration reference.
 	 */
 	unregister_framebuffer(info);
-	fb_dealloc_cmap(&info->cmap);
-	framebuffer_release(info);
 	lp->info = NULL;
 }
 

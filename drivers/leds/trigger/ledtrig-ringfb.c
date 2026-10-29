@@ -227,6 +227,7 @@ static const struct fb_ops ringfb_ops = {
 	.fb_imageblit	= sys_imageblit,
 	.fb_read	= fb_sys_read,
 	.fb_write	= fb_sys_write,
+	.fb_destroy	= ringfb_destroy,
 };
 
 static int ringfb_probe(struct platform_device *pdev)
@@ -235,16 +236,13 @@ static int ringfb_probe(struct platform_device *pdev)
 	struct ringfb *ring;
 	int ret;
 
-	ring = devm_kzalloc(&pdev->dev, sizeof(*ring), GFP_KERNEL);
-	if (!ring)
-		return -ENOMEM;
-
-	mutex_init(&ring->lock);
-	INIT_DELAYED_WORK(&ring->refresh, ringfb_refresh_work);
-
-	info = framebuffer_alloc(0, &pdev->dev);
+	info = framebuffer_alloc(sizeof(*ring), &pdev->dev);
 	if (!info)
 		return -ENOMEM;
+
+	ring = info->par;
+	mutex_init(&ring->lock);
+	INIT_DELAYED_WORK(&ring->refresh, ringfb_refresh_work);
 
 	info->screen_buffer = vzalloc(RINGFB_SIZE);
 	if (!info->screen_buffer) {
@@ -308,17 +306,24 @@ err_free_fb:
 	return ret;
 }
 
+static void ringfb_destroy(struct fb_info *info)
+{
+	struct ringfb *ring = info->par;
+
+	cancel_delayed_work_sync(&ring->refresh);
+	vfree(info->screen_buffer);
+	fb_dealloc_cmap(&info->cmap);
+	framebuffer_release(info);
+}
+
 static void ringfb_remove(struct platform_device *pdev)
 {
 	struct ringfb *ring = platform_get_drvdata(pdev);
-	struct fb_info *info = ring->info;
 
 	led_trigger_unregister(&ring->trigger);
 	cancel_delayed_work_sync(&ring->refresh);
-	unregister_framebuffer(info);
-	fb_dealloc_cmap(&info->cmap);
-	vfree(info->screen_buffer);
-	framebuffer_release(info);
+	/* fb_destroy() runs when the last /dev/fb user closes the file. */
+	unregister_framebuffer(ring->info);
 }
 
 static const struct of_device_id ringfb_of_match[] = {
