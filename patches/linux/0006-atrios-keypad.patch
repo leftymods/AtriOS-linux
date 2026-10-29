@@ -36,10 +36,9 @@ index 1339619..8b49d66 100644
  obj-$(CONFIG_INPUT_BMA150)		+= bma150.o
 diff --git a/drivers/input/misc/atrios-keypad.c b/drivers/input/misc/atrios-keypad.c
 new file mode 100644
-index 0000000..19547c4
 --- /dev/null
 +++ b/drivers/input/misc/atrios-keypad.c
-@@ -0,0 +1,357 @@
+@@ -0,0 +1,365 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * atrios-keypad.c - polling GPIO keypad for Yandex Station devices
@@ -139,8 +138,16 @@ index 0000000..19547c4
 +		if (!(changed & BIT(i)))
 +			continue;
 +
-+		input_report_key(kp->input, kp->keycodes[i],
-+				 !!(state & BIT(i)));
++		/*
++		 * The vendor keypad reports KEY_MICMUTE active-low (press = 0) and
++		 * the stock rotaryd expects exactly that.
++		 */
++		if (kp->keycodes[i] == KEY_MICMUTE)
++			input_report_key(kp->input, KEY_MICMUTE,
++					 !(state & BIT(i)));
++		else
++			input_report_key(kp->input, kp->keycodes[i],
++					 !!(state & BIT(i)));
 +	}
 +
 +	input_sync(kp->input);

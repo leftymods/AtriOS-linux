@@ -65,7 +65,7 @@ diff -Naur a/sound/soc/codecs/Makefile b/sound/soc/codecs/Makefile
  obj-$(CONFIG_SND_SOC_TAS2562)	+= snd-soc-tas2562.o
 --- /dev/null
 +++ b/sound/soc/codecs/sy6045s.c
-@@ -0,0 +1,1150 @@
+@@ -0,0 +1,1156 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * sy6045s.c - ASoC driver for the Silergy SY6045S audio amplifier
@@ -899,6 +899,8 @@ diff -Naur a/sound/soc/codecs/Makefile b/sound/soc/codecs/Makefile
 +	unsigned int val;
 +
 +	val = snd_soc_component_read(component, sw->reg);
++	if ((int)val < 0)
++		return val;
 +	ucontrol->value.integer.value[0] =
 +		((val & sw->mask) != sw->off_value);
 +
@@ -1011,7 +1013,8 @@ diff -Naur a/sound/soc/codecs/Makefile b/sound/soc/codecs/Makefile
 +		goto out;
 +
 +	ret = sy6045s_load_firmware(priv, name);
-+	sy6045s_restore_regs(priv);
++	if (!ret)
++		ret = sy6045s_restore_regs(priv);
 +
 +out:
 +	mutex_unlock(&priv->io_lock);
@@ -1038,7 +1041,8 @@ diff -Naur a/sound/soc/codecs/Makefile b/sound/soc/codecs/Makefile
 +		goto out;
 +
 +	ret = sy6045s_load_firmware(priv, priv->default_fw_name);
-+	sy6045s_restore_regs(priv);
++	if (!ret)
++		ret = sy6045s_restore_regs(priv);
 +
 +out:
 +	mutex_unlock(&priv->io_lock);
@@ -1125,6 +1129,8 @@ diff -Naur a/sound/soc/codecs/Makefile b/sound/soc/codecs/Makefile
 +	}
 +
 +	if (priv->reset_gpio) {
++		/* Vendor asserts reset low, then releases it. */
++		gpiod_set_value(priv->reset_gpio, 0);
 +		msleep(20);
 +		gpiod_set_value(priv->reset_gpio, 1);
 +		msleep(20);

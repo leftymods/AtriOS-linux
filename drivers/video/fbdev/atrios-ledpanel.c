@@ -165,6 +165,7 @@ struct ledpanel {
 	struct spi_device *spi;
 	struct fb_info *info;
 	struct gpio_desc *reset;
+	struct gpio_desc *jtag_sel;
 	struct backlight_device *bl;
 
 	enum ledpanel_proto proto;
@@ -352,7 +353,8 @@ static const char *ledpanel_str_status(struct ledpanel *lp, u8 status)
 }
 
 /* Returns 0 when the panel accepted the last command. */
-static int ledpanel_check_status(struct ledpanel *lp)
+static int ledpanel_check_status(struct ledpanel *lp,
+				 struct ledpanel_status *out)
 {
 	struct ledpanel_status st;
 	int ret;
@@ -363,6 +365,8 @@ static int ledpanel_check_status(struct ledpanel *lp)
 	ret = ledpanel_fetch_status(lp, &st);
 	if (ret)
 		return ret;
+	if (out)
+		*out = st;
 
 	/*
 	 * PA reports the frame queue overflow bit during normal animation
@@ -448,7 +452,8 @@ static void ledpanel_convert(struct ledpanel *lp)
  */
 static int ledpanel_send_frame_locked(struct ledpanel *lp)
 {
-	unsigned int len;
+	unsigned int len, i;
+	struct ledpanel_status st = { };
 	int ret;
 
 	ledpanel_convert(lp);
@@ -470,11 +475,28 @@ static int ledpanel_send_frame_locked(struct ledpanel *lp)
 		lp->tx[len++] = lp->next_frame_delay >> 8;
 	}
 
-	ret = ledpanel_write_locked(lp, len);
-	if (ret)
-		return ret;
+	for (i = 0; i < 5; i++) {
+		ret = ledpanel_write_locked(lp, len);
+		if (ret)
+			return ret;
 
-	ret = ledpanel_check_status(lp);
+		ret = ledpanel_check_status(lp, &st);
+		if (!ret)
+			break;
+
+		/* The vendor retries CRC and command-overflow failures. */
+		if (lp->proto == LEDPANEL_PROTO_PA &&
+		    (st.status & (LEDPANEL_PA_CRC_ERROR | LEDPANEL_PA_CMD_OVF))) {
+			usleep_range(10, 20);
+			continue;
+		}
+		if (lp->proto == LEDPANEL_PROTO_SA &&
+		    st.status == LEDPANEL_SA_STATUS_CRC_ERROR) {
+			usleep_range(10, 20);
+			continue;
+		}
+		return ret;
+	}
 	if (ret)
 		return ret;
 
@@ -629,7 +651,7 @@ static int ledpanel_bl_update_status(struct backlight_device *bd)
 	lp->tx[1] = brightness;
 	ret = ledpanel_write_locked(lp, 2);
 	if (!ret)
-		ret = ledpanel_check_status(lp);
+		ret = ledpanel_check_status(lp, NULL);
 	if (!ret)
 		lp->brightness = brightness;
 	mutex_unlock(&lp->lock);
@@ -801,6 +823,14 @@ static int ledpanel_probe(struct spi_device *spi)
 	ret = spi_setup(spi);
 	if (ret) {
 		ret = dev_err_probe(dev, ret, "failed to setup SPI\n");
+		goto err_release;
+	}
+
+	/* Select the SPI/application mode (vendor drives this high). */
+	lp->jtag_sel = devm_gpiod_get_optional(dev, "jtag-sel", GPIOD_OUT_HIGH);
+	if (IS_ERR(lp->jtag_sel)) {
+		ret = dev_err_probe(dev, PTR_ERR(lp->jtag_sel),
+				    "failed to get jtag-sel GPIO\n");
 		goto err_release;
 	}
 

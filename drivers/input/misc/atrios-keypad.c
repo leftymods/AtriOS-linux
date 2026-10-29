@@ -97,8 +97,16 @@ static void atrios_keypad_report(struct atrios_keypad *kp, unsigned int state)
 		if (!(changed & BIT(i)))
 			continue;
 
-		input_report_key(kp->input, kp->keycodes[i],
-				 !!(state & BIT(i)));
+		/*
+		 * The vendor keypad reports KEY_MICMUTE active-low (press = 0) and
+		 * the stock rotaryd expects exactly that.
+		 */
+		if (kp->keycodes[i] == KEY_MICMUTE)
+			input_report_key(kp->input, KEY_MICMUTE,
+					 !(state & BIT(i)));
+		else
+			input_report_key(kp->input, kp->keycodes[i],
+					 !!(state & BIT(i)));
 	}
 
 	input_sync(kp->input);

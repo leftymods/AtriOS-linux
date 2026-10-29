@@ -831,6 +831,8 @@ static int sy6045s_reg_switch_get(struct snd_kcontrol *kcontrol,
 	unsigned int val;
 
 	val = snd_soc_component_read(component, sw->reg);
+	if ((int)val < 0)
+		return val;
 	ucontrol->value.integer.value[0] =
 		((val & sw->mask) != sw->off_value);
 
@@ -943,7 +945,8 @@ static ssize_t settings_file_store(struct device *dev,
 		goto out;
 
 	ret = sy6045s_load_firmware(priv, name);
-	sy6045s_restore_regs(priv);
+	if (!ret)
+		ret = sy6045s_restore_regs(priv);
 
 out:
 	mutex_unlock(&priv->io_lock);
@@ -970,7 +973,8 @@ static ssize_t default_settings_store(struct device *dev,
 		goto out;
 
 	ret = sy6045s_load_firmware(priv, priv->default_fw_name);
-	sy6045s_restore_regs(priv);
+	if (!ret)
+		ret = sy6045s_restore_regs(priv);
 
 out:
 	mutex_unlock(&priv->io_lock);
@@ -1057,6 +1061,8 @@ static int sy6045s_i2c_probe(struct i2c_client *client)
 	}
 
 	if (priv->reset_gpio) {
+		/* Vendor asserts reset low, then releases it. */
+		gpiod_set_value(priv->reset_gpio, 0);
 		msleep(20);
 		gpiod_set_value(priv->reset_gpio, 1);
 		msleep(20);

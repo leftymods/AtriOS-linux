@@ -162,7 +162,7 @@ Reference host, 2026-10-29; sizes and hashes are of the files in `out/`.
 
 - `patches/linux/0002–0011` apply in order to a clean Linux 7.3 tree and are
   recorded in `.atrios-mainline-patches`; a second run detects them.
-- `Image.gz` (15 905 990 B), `dtbs` and `modules.tar` (21 773 432 B) build with
+- `Image.gz` (15 904 872 B), `dtbs` and `modules.tar` (21 776 728 B) build with
   exit 0 under `--strict`.
 - `meson-sm1-yandex-station-max.dtb` carries 72 ring channels
   (`station2:{red,green,blue}:ring1..24`), the keypad node (`GPIOA_15/A_14`,
