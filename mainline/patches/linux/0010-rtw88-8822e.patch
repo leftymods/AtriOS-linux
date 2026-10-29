@@ -1,0 +1,255 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: AtriOS <atrios@localhost>
+Date: Thu, 29 Oct 2026 00:00:00 +0300
+Subject: [PATCH] rtw88: add RTL8822ES (SDIO 0x024c:0xa822) bring-up
+
+Stage (a) of the Yandex Station Max Wi-Fi port.  The RTL8822ES is an
+SDIO member of the 8822C family: the power-on/off sequences, the SDIO
+page/rqpn tables and the digital BB init are the same, while the RF and
+analog tables, the calibration routines and the efuse map differ.
+
+This minimal patch only teaches rtw88 the new SDIO ID and its firmware:
+
+ - add SDIO_DEVICE_ID_REALTEK_RTW8822ES (0xa822) to sdio_ids.h
+ - add rtw8822e_hw_spec, a copy of rtw8822c_hw_spec whose .fw_name is
+   "rtw88/rtw8822e_fw.bin"; .id stays RTW_CHIP_TYPE_8822C so the shared
+   8822C code paths are used
+ - add the rtw88_8822es module (id table + firmware request) and its
+   Kconfig/Makefile entries
+
+WoW is deliberately left disabled: there is no 8822E WoW firmware.
+The 8822C AGC/RF/cal-init/txpower tables and the 8822C efuse layout are
+still used as a placeholder, so association is not expected until the
+8822E tables are ported (stage b).
+
+Signed-off-by: AtriOS <atrios@localhost>
+---
+diff --git a/drivers/net/wireless/realtek/rtw88/Kconfig b/drivers/net/wireless/realtek/rtw88/Kconfig
+index 3736f29..a259b50 100644
+--- a/drivers/net/wireless/realtek/rtw88/Kconfig
++++ b/drivers/net/wireless/realtek/rtw88/Kconfig
+@@ -123,6 +123,17 @@ config RTW88_8822CU
+ 
+ 	  802.11ac USB wireless network adapter
+ 
++config RTW88_8822ES
++	tristate "Realtek 8822ES SDIO wireless network adapter"
++	depends on MMC
++	select RTW88_CORE
++	select RTW88_SDIO
++	select RTW88_8822C
++	help
++	  Select this option will enable support for 8822ES chipset
++
++	  802.11ac SDIO wireless network adapter
++
+ config RTW88_8723DE
+ 	tristate "Realtek 8723DE PCI wireless network adapter"
+ 	depends on PCI
+diff --git a/drivers/net/wireless/realtek/rtw88/Makefile b/drivers/net/wireless/realtek/rtw88/Makefile
+index 0b3da05..fb8a4f8 100644
+--- a/drivers/net/wireless/realtek/rtw88/Makefile
++++ b/drivers/net/wireless/realtek/rtw88/Makefile
+@@ -46,6 +46,9 @@ rtw88_8822cs-objs		:= rtw8822cs.o
+ obj-$(CONFIG_RTW88_8822CU)	+= rtw88_8822cu.o
+ rtw88_8822cu-objs		:= rtw8822cu.o
+ 
++obj-$(CONFIG_RTW88_8822ES)	+= rtw88_8822es.o
++rtw88_8822es-objs		:= rtw8822es.o
++
+ obj-$(CONFIG_RTW88_8723X)	+= rtw88_8723x.o
+ rtw88_8723x-objs		:= rtw8723x.o
+ 
+diff --git a/drivers/net/wireless/realtek/rtw88/rtw8822c.c b/drivers/net/wireless/realtek/rtw88/rtw8822c.c
+index 32d9709..81ada0f 100644
+--- a/drivers/net/wireless/realtek/rtw88/rtw8822c.c
++++ b/drivers/net/wireless/realtek/rtw88/rtw8822c.c
+@@ -5443,6 +5443,120 @@ const struct rtw_chip_info rtw8822c_hw_spec = {
+ };
+ EXPORT_SYMBOL(rtw8822c_hw_spec);
+ 
++/*
++ * The RTL8822ES is an SDIO variant of the 8822C family with its own firmware
++ * image (SDIO ID 0x024c:0xa822).  It reuses the 8822C code paths -- power
++ * sequences, page/rqpn tables and the digital BB init are identical, and
++ * .id intentionally stays RTW_CHIP_TYPE_8822C so that the SDIO layer keeps
++ * using the 8822C indirect-access and RX aggregation quirks.
++ *
++ * Stage (a) of the port: only the firmware name differs.  AGC/RF/cal-init/
++ * txpower tables and the efuse map of the 8822E are known to differ from the
++ * 8822C and are still the 8822C ones here, see docs/wifi-port.md.
++ * WoW is disabled because no 8822E WoW firmware is available.
++ */
++const struct rtw_chip_info rtw8822e_hw_spec = {
++	.ops = &rtw8822c_ops,
++	.id = RTW_CHIP_TYPE_8822C,
++	.fw_name = "rtw88/rtw8822e_fw.bin",
++	.wlan_cpu = RTW_WCPU_3081,
++	.tx_pkt_desc_sz = 48,
++	.tx_buf_desc_sz = 16,
++	.rx_pkt_desc_sz = 24,
++	.rx_buf_desc_sz = 8,
++	.phy_efuse_size = 512,
++	.log_efuse_size = 768,
++	.ptct_efuse_size = 124,
++	.txff_size = 262144,
++	.rxff_size = 24576,
++	.fw_rxff_size = 12288,
++	.rsvd_drv_pg_num = 16,
++	.txgi_factor = 2,
++	.is_pwr_by_rate_dec = false,
++	.max_power_index = 0x7f,
++	.csi_buf_pg_num = 50,
++	.band = RTW_BAND_2G | RTW_BAND_5G,
++	.page_size = TX_PAGE_SIZE,
++	.dig_min = 0x20,
++	.amsdu_in_ampdu = true,
++	.usb_tx_agg_desc_num = 3,
++	.hw_feature_report = true,
++	.c2h_ra_report_size = 7,
++	.old_datarate_fb_limit = false,
++	.default_1ss_tx_path = BB_PATH_A,
++	.path_div_supported = true,
++	.ht_supported = true,
++	.vht_supported = true,
++	.lps_deep_mode_supported = BIT(LPS_DEEP_MODE_LCLK) | BIT(LPS_DEEP_MODE_PG),
++	.sys_func_en = 0xD8,
++	.pwr_on_seq = card_enable_flow_8822c,
++	.pwr_off_seq = card_disable_flow_8822c,
++	.page_table = page_table_8822c,
++	.rqpn_table = rqpn_table_8822c,
++	.prioq_addrs = &prioq_addrs_8822c,
++	.intf_table = &phy_para_table_8822c,
++	.dig = rtw8822c_dig,
++	.dig_cck = NULL,
++	.rf_base_addr = {0x3c00, 0x4c00},
++	.rf_sipi_addr = {0x1808, 0x4108},
++	.ltecoex_addr = &rtw8822c_ltecoex_addr,
++	.mac_tbl = &rtw8822c_mac_tbl,
++	.agc_tbl = &rtw8822c_agc_tbl,
++	.bb_tbl = &rtw8822c_bb_tbl,
++	.rfk_init_tbl = &rtw8822c_array_mp_cal_init_tbl,
++	.rf_tbl = {&rtw8822c_rf_b_tbl, &rtw8822c_rf_a_tbl},
++	.rfe_defs = rtw8822c_rfe_defs,
++	.rfe_defs_size = ARRAY_SIZE(rtw8822c_rfe_defs),
++	.en_dis_dpd = true,
++	.dpd_ratemask = DIS_DPD_RATEALL,
++	.iqk_threshold = 8,
++	.lck_threshold = 8,
++	.bfer_su_max_num = 2,
++	.bfer_mu_max_num = 1,
++	.rx_ldpc = true,
++	.tx_stbc = true,
++	.edcca_th = rtw8822c_edcca_th,
++	.l2h_th_ini_cs = 60,
++	.l2h_th_ini_ad = 45,
++	.ampdu_density = IEEE80211_HT_MPDU_DENSITY_2,
++
++	.max_scan_ie_len = (RTW_PROBE_PG_CNT - 1) * TX_PAGE_SIZE,
++	.coex_para_ver = 0x26020420,
++	.bt_desired_ver = 0x20,
++	.scbd_support = true,
++	.new_scbd10_def = true,
++	.ble_hid_profile_support = true,
++	.wl_mimo_ps_support = true,
++	.pstdma_type = COEX_PSTDMA_FORCE_LPSOFF,
++	.bt_rssi_type = COEX_BTRSSI_DBM,
++	.ant_isolation = 15,
++	.rssi_tolerance = 2,
++	.wl_rssi_step = wl_rssi_step_8822c,
++	.bt_rssi_step = bt_rssi_step_8822c,
++	.table_sant_num = ARRAY_SIZE(table_sant_8822c),
++	.table_sant = table_sant_8822c,
++	.table_nsant_num = ARRAY_SIZE(table_nsant_8822c),
++	.table_nsant = table_nsant_8822c,
++	.tdma_sant_num = ARRAY_SIZE(tdma_sant_8822c),
++	.tdma_sant = tdma_sant_8822c,
++	.tdma_nsant_num = ARRAY_SIZE(tdma_nsant_8822c),
++	.tdma_nsant = tdma_nsant_8822c,
++	.wl_rf_para_num = ARRAY_SIZE(rf_para_tx_8822c),
++	.wl_rf_para_tx = rf_para_tx_8822c,
++	.wl_rf_para_rx = rf_para_rx_8822c,
++	.bt_afh_span_bw20 = 0x24,
++	.bt_afh_span_bw40 = 0x36,
++	.afh_5g_num = ARRAY_SIZE(afh_5g_8822c),
++	.afh_5g = afh_5g_8822c,
++
++	.coex_info_hw_regs_num = ARRAY_SIZE(coex_info_hw_regs_8822c),
++	.coex_info_hw_regs = coex_info_hw_regs_8822c,
++
++	.fw_fifo_addr = {0x780, 0x700, 0x780, 0x660, 0x650, 0x680},
++	.fwcd_segs = &rtw8822c_fwcd_segs,
++};
++EXPORT_SYMBOL(rtw8822e_hw_spec);
++
+ MODULE_FIRMWARE("rtw88/rtw8822c_fw.bin");
+ MODULE_FIRMWARE("rtw88/rtw8822c_wow_fw.bin");
+ 
+diff --git a/drivers/net/wireless/realtek/rtw88/rtw8822c.h b/drivers/net/wireless/realtek/rtw88/rtw8822c.h
+index fc62b67..2b2dc98 100644
+--- a/drivers/net/wireless/realtek/rtw88/rtw8822c.h
++++ b/drivers/net/wireless/realtek/rtw88/rtw8822c.h
+@@ -128,6 +128,7 @@ void rtw8822c_parse_tbl_dpk(struct rtw_dev *rtwdev,
+ 			    const struct rtw_table *tbl);
+ 
+ extern const struct rtw_chip_info rtw8822c_hw_spec;
++extern const struct rtw_chip_info rtw8822e_hw_spec;
+ 
+ #define RTW_DECL_TABLE_DPK(name)			\
+ const struct rtw_table name ## _tbl = {			\
+diff --git a/drivers/net/wireless/realtek/rtw88/rtw8822es.c b/drivers/net/wireless/realtek/rtw88/rtw8822es.c
+new file mode 100644
+index 0000000..5c3d436
+--- /dev/null
++++ b/drivers/net/wireless/realtek/rtw88/rtw8822es.c
+@@ -0,0 +1,38 @@
++// SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
++/* Copyright(c) 2026 AtriOS project
++ */
++
++#include <linux/mmc/sdio_func.h>
++#include <linux/mmc/sdio_ids.h>
++#include <linux/module.h>
++#include "main.h"
++#include "rtw8822c.h"
++#include "sdio.h"
++
++static const struct sdio_device_id rtw_8822es_id_table[] =  {
++	{
++		SDIO_DEVICE(SDIO_VENDOR_ID_REALTEK,
++			    SDIO_DEVICE_ID_REALTEK_RTW8822ES),
++		.driver_data = (kernel_ulong_t)&rtw8822e_hw_spec,
++	},
++	{}
++};
++MODULE_DEVICE_TABLE(sdio, rtw_8822es_id_table);
++
++static struct sdio_driver rtw_8822es_driver = {
++	.name = KBUILD_MODNAME,
++	.probe = rtw_sdio_probe,
++	.remove = rtw_sdio_remove,
++	.shutdown = rtw_sdio_shutdown,
++	.id_table = rtw_8822es_id_table,
++	.drv = {
++		.pm = &rtw_sdio_pm_ops,
++	}
++};
++module_sdio_driver(rtw_8822es_driver);
++
++MODULE_FIRMWARE("rtw88/rtw8822e_fw.bin");
++
++MODULE_AUTHOR("AtriOS project");
++MODULE_DESCRIPTION("Realtek 802.11ac wireless 8822es driver");
++MODULE_LICENSE("Dual BSD/GPL");
+diff --git a/include/linux/mmc/sdio_ids.h b/include/linux/mmc/sdio_ids.h
+index afae93f..ea42d87 100644
+--- a/include/linux/mmc/sdio_ids.h
++++ b/include/linux/mmc/sdio_ids.h
+@@ -133,6 +133,7 @@
+ #define SDIO_DEVICE_ID_REALTEK_RTW8723DS_2ANT	0xd723
+ #define SDIO_DEVICE_ID_REALTEK_RTW8723DS_1ANT	0xd724
+ #define SDIO_DEVICE_ID_REALTEK_RTW8821DS	0xd821
++#define SDIO_DEVICE_ID_REALTEK_RTW8822ES	0xa822
+ #define SDIO_DEVICE_ID_REALTEK_RTW8723CS	0xb703
+ 
+ #define SDIO_VENDOR_ID_SIANO			0x039a
