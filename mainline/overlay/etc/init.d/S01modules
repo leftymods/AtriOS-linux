@@ -1,0 +1,94 @@
+#!/bin/sh
+# /etc/init.d/S01modules - load the mainline (7.3) hardware modules
+#
+# This replaces the vendor 4.9 script.  It never references
+# /lib/modules/4.9.113: modprobe always resolves against
+# /lib/modules/$(uname -r), and anything that is built into the mainline
+# kernel (axg sound card, rotary-volume, atrios-keypad, ring/screen
+# framebuffers, ltrf216a) must not be loaded here at all.
+#
+# Buildroot uses BusyBox init and does not read /etc/modules-load.d;
+# this script is the modules-load.d equivalent for this image.
+
+KREL="${KREL:-$(uname -r)}"
+MODDIR="${MODDIR:-/lib/modules/$KREL}"
+
+say() {
+    echo "[AtriOS] $*"
+}
+
+have_module() {
+    [ -d "$MODDIR" ] || return 1
+    # No GNU find -quit: BusyBox find does not implement it.
+    find "$MODDIR" -name "$1.ko" 2>/dev/null | head -n 1 | grep -q .
+}
+
+load() {
+    name="$1"
+    if ! have_module "$name"; then
+        say "  [-] $name: no $name.ko in $MODDIR (skipped)"
+        return 0
+    fi
+    if modprobe "$name" 2>/dev/null; then
+        say "  [+] $name"
+    else
+        say "  [!] $name: modprobe failed, check dmesg"
+    fi
+}
+
+load_rtw88() {
+    # Station Max has an RTL8822ES (SDIO 024c:a822): the out-of-tree
+    # rtw88_8822es module added by patches/linux/0010.  Older trees only
+    # have rtw88_8822cs, so accept either and load only one.  modprobe
+    # pulls in rtw88_core/rtw88_8822c/rtw88_sdio via modules.dep.
+    # The driver is useless without the matching mainline firmware blob;
+    # the 4.9 rootfs only ships the vendor rtl8822* images, so do not
+    # pretend the radio is up when request_firmware() would fail.
+    for pair in "rtw88_8822es:rtw8822e_fw.bin" "rtw88_8822cs:rtw8822c_fw.bin"; do
+        name=${pair%%:*}
+        fw=${pair#*:}
+        if ! have_module "$name"; then
+            continue
+        fi
+        if [ ! -f "/lib/firmware/rtw88/$fw" ]; then
+            say "  [!] $name: /lib/firmware/rtw88/$fw is missing (skipped)"
+            return 0
+        fi
+        load "$name"
+        return 0
+    done
+    say "  [-] no rtw88 SDIO module (rtw88_8822es/rtw88_8822cs) in $MODDIR (skipped)"
+}
+
+case "$1" in
+  start)
+    say "Loading mainline $KREL hardware modules..."
+    if [ ! -d "$MODDIR" ]; then
+        say "ERROR: $MODDIR does not exist; is this really the mainline kernel?"
+        exit 1
+    fi
+    if [ ! -f "$MODDIR/modules.dep" ] && command -v depmod >/dev/null 2>&1; then
+        say "  modules.dep missing, running depmod for $KREL"
+        depmod -b "$(dirname "$MODDIR")" "$KREL" 2>/dev/null || true
+    fi
+
+    # Audio codecs.  The axg sound card itself is built in and rebinds when
+    # the codec drivers register (ASoC -EPROBE_DEFER), so load them first.
+    say "Audio codecs:"
+    load snd-soc-es7210
+    load snd-soc-es8156
+    load snd-soc-sy6045s
+
+    # Wireless (optional).
+    say "Wireless:"
+    load_rtw88
+
+    say "Mainline module load finished."
+    ;;
+  stop)
+    ;;
+  *)
+    echo "Usage: $0 {start|stop}"
+    exit 1
+esac
+exit 0

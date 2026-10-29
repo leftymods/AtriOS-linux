@@ -1,0 +1,20 @@
+#!/bin/sh
+# /etc/init.d/S03amplifiers - intentionally a no-op on the mainline image
+#
+# The 4.9 script relaxed the amplification pads and ran the vendor amp
+# power sequence through /dev/mem (MST_PAD_CTRL0/1 and friends).  On
+# mainline the audio clock driver owns those registers and the DTS
+# re-parents the pads, so poking /dev/mem would race the kernel and can
+# hang the board.  Stop the old script from the 4.9 rootfs from running by
+# shadowing it with this stub (cp -a overlay/. rootfs/ overwrites it).
+case "$1" in
+  start)
+    echo "[AtriOS] S03amplifiers: skipped (mainline; pads/amps are driven by the kernel)"
+    ;;
+  stop)
+    ;;
+  *)
+    echo "Usage: $0 {start|stop}"
+    exit 1
+esac
+exit 0

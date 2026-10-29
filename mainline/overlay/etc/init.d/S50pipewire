@@ -1,0 +1,40 @@
+#!/bin/sh
+# /etc/init.d/S50pipewire - optional PipeWire/WirePlumber session (mainline)
+#
+# Kept from the 4.9 image so `pw-play` and desktop-style clients work if
+# the binaries are present.  The AtriOS daemons (rotaryd, audio) use ALSA
+# directly; PipeWire is not required for volume or capture.
+#
+# Difference from 4.9: the delayed `S03amplifiers start` hook is gone.
+# That script only existed to program the vendor amp pads through
+# /dev/mem, which the mainline clock driver now owns.
+
+case "$1" in
+  start)
+    if command -v pipewire >/dev/null 2>&1; then
+      echo "[AtriOS] Starting PipeWire audio engine..."
+      mkdir -p /var/run/pipewire
+      export XDG_RUNTIME_DIR=/var/run/pipewire
+      export DBUS_SESSION_BUS_ADDRESS="unix:path=/var/run/dbus/system_bus_socket"
+      export DBUS_SYSTEM_BUS_ADDRESS="unix:path=/var/run/dbus/system_bus_socket"
+      chmod 0700 /var/run/pipewire
+
+      pipewire >/dev/null 2>&1 &
+      sleep 1
+      if command -v wireplumber >/dev/null 2>&1; then
+        wireplumber >/dev/null 2>&1 &
+      elif command -v pipewire-media-session >/dev/null 2>&1; then
+        pipewire-media-session >/dev/null 2>&1 &
+      fi
+    else
+      echo "[AtriOS] PipeWire not installed; ALSA-only mode"
+    fi
+    ;;
+  stop)
+    killall wireplumber pipewire-media-session pipewire 2>/dev/null || true
+    ;;
+  *)
+    echo "Usage: $0 {start|stop}"
+    exit 1
+esac
+exit 0
