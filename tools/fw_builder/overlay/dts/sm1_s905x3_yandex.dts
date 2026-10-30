@@ -3811,7 +3811,7 @@
 		compatible = "amlogic, bt-dev";
 		dev_name = "bt-dev";
 		status = "okay";
-		gpio_reset = <0x18 0x53 0x00>;
+		gpio_reset = <0x18 0x54 0x00>;
 		gpio_hostwake = <0x18 0x55 0x00>;
 	};
 

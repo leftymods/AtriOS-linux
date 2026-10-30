@@ -64,17 +64,18 @@ def record(dev):
         os.unlink(TMP)
     except OSError:
         pass
-    try:
-        r = subprocess.run(
-            ["arecord", "-q", "-D", f"hw:{CARD},{dev}", "-c", "2",
-             "-r", "48000", "-f", "S32_LE", "-d", "1", TMP],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            timeout=4)
-        if r.returncode != 0 or not os.path.exists(TMP):
-            return None
-        return TMP
-    except Exception:
-        return None
+    for c in [CARD, "0"]:
+        try:
+            r = subprocess.run(
+                ["arecord", "-q", "-D", f"hw:{c},{dev}", "-c", "2",
+                 "-r", "48000", "-f", "S32_LE", "-d", "1", TMP],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=4)
+            if r.returncode == 0 and os.path.exists(TMP) and os.path.getsize(TMP) > 0:
+                return TMP
+        except Exception:
+            pass
+    return None
 
 
 def analyze(path):

@@ -35,6 +35,8 @@ DEVICE_UPGRADE_DIR = REPO_ROOT / "device" / "yandex" / "station_max" / "upgrade"
 
 BOOTLOADER_IMG = DEVICE_UPGRADE_DIR / "bootloader.img"
 SD_UBOOT_IMG = DEVICE_UPGRADE_DIR / "u-boot.bin.sd.bin"
+BOOTLOADER_ENC_IMG = DEVICE_UPGRADE_DIR / "bootloader.img.encrypt"
+SD_UBOOT_ENC_IMG = DEVICE_UPGRADE_DIR / "u-boot.bin.encrypt.sd.bin"
 PLATFORM_CONF = DEVICE_UPGRADE_DIR / "platform.conf"
 SD_BURN_INI = DEVICE_UPGRADE_DIR / "aml_sdc_burn.ini"
 LOGO_IMG = DEVICE_UPGRADE_DIR / "logo.PARTITION"
@@ -242,6 +244,16 @@ def synthesize_staging(
     ):
         record(name, staging / name)
 
+    if BOOTLOADER_ENC_IMG.exists():
+        _copy(BOOTLOADER_ENC_IMG, staging / "DDR_ENC.USB")
+        _copy(BOOTLOADER_ENC_IMG, staging / "UBOOT_ENC.USB")
+        record("DDR_ENC.USB", staging / "DDR_ENC.USB")
+        record("UBOOT_ENC.USB", staging / "UBOOT_ENC.USB")
+
+    if SD_UBOOT_ENC_IMG.exists():
+        _copy(SD_UBOOT_ENC_IMG, staging / "aml_sdc_burn.UBOOT.ENC")
+        record("aml_sdc_burn.UBOOT.ENC", staging / "aml_sdc_burn.UBOOT.ENC")
+
     # --- Device tree --------------------------------------------------------
     dts_file = ws / "overlay" / "dts" / DEFAULT_DTS.name
     if not dts_file.exists():
@@ -253,9 +265,11 @@ def synthesize_staging(
     build_multi_dtb(str(raw_dtb), str(aml_dtb))
     _copy(aml_dtb, staging / "meson1.dtb")
     _copy(aml_dtb, staging / "meson1_ENC.dtb")
+    _copy(raw_dtb, staging / f"{dts_file.stem}.dtb")
     record("_aml_dtb.PARTITION", aml_dtb)
     record("meson1.dtb", staging / "meson1.dtb")
     record("meson1_ENC.dtb", staging / "meson1_ENC.dtb")
+    record(f"{dts_file.stem}.dtb", staging / f"{dts_file.stem}.dtb")
 
     # --- Boot image ---------------------------------------------------------
     kernel = ws / "overlay" / "boot" / "Image.gz"
