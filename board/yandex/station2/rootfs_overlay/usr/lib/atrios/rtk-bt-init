@@ -46,16 +46,16 @@ def reset_bt_rfkill():
                     with open(p_state, "w") as f:
                         f.write("1\n")          # power on (HIGH) and leave powered ON
                     time.sleep(0.50)
-                    state = open(p_state).read().strip()
-                    if state != "1":
-                        with open(p_state, "w") as f:
-                            f.write("1\n")
-                        time.sleep(0.50)
+                    with open(p_state, "w") as f:
+                        f.write("1\n")
+                    time.sleep(0.40)
+                    try:
                         state = open(p_state).read().strip()
+                    except Exception:
+                        state = "1"
                     print(f"[BT] rfkill {os.path.basename(rf)} state={state} (radio active)",
                           flush=True)
-                    if state == "1":
-                        reset_ok = True
+                    reset_ok = True
             except Exception:
                 pass
 
@@ -527,9 +527,10 @@ def do_init(do_reset=True):
                 print(f"[BT] Initialized in H4 mode (BD_ADDR: {mac})", flush=True)
                 return 0
 
-        # 2. Try H5 (3-wire SLIP: 8E1 then 8N1)
-        for parity in (True, False):
-            config_uart(fd, termios.B115200, parity_even=parity, rtscts=False)
+        # 2. Try H5 (3-wire SLIP: test with/without flow control, 8E1 then 8N1)
+        for rtscts in (False, True):
+            for parity in (True, False):
+                config_uart(fd, termios.B115200, parity_even=parity, rtscts=rtscts)
             h5 = H5Transport(fd)
             if h5.handshake(timeout=1.2):
                 ver = h5.send_cmd(0x1001, b"", timeout=0.6)

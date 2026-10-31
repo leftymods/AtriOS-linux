@@ -328,10 +328,12 @@ def show_volume_ring(vol_pct, brightness=1.0):
         frame[i * 3 + 1] = int(g * b)
         frame[i * 3 + 2] = int(b_col * b)
 
-    if full < NUM_LEDS and frac > 0.04:
-        frame[full * 3 + 0] = int(r * frac * b)
-        frame[full * 3 + 1] = int(g * frac * b)
-        frame[full * 3 + 2] = int(b_col * frac * b)
+    if full < NUM_LEDS and frac > 0.01:
+        # Perceptual gamma easing for silky smooth tip LED illumination
+        lead_b = (frac ** 1.8) * b
+        frame[full * 3 + 0] = int(r * lead_b)
+        frame[full * 3 + 1] = int(g * lead_b)
+        frame[full * 3 + 2] = int(b_col * lead_b)
 
     set_ring_frame(frame)
 
@@ -439,6 +441,7 @@ def main():
     top_press_time = 0
     last_volume_time = 0.0
     apply_saved_volume()
+    last_anim_time = time.time()
     last_enforce = time.time()
     last_scan = time.time()
 
@@ -447,7 +450,7 @@ def main():
             # 100 ms wakeup keeps the fade-out and watchdog responsive; input
             # events still wake select immediately.
             fds_to_watch = list(open_fds.keys())
-            select_timeout = 0.016 if ring_active else 0.05
+            select_timeout = 0.010 if ring_active else 0.05
             rlist, _, _ = select.select(fds_to_watch, [], [], select_timeout) if fds_to_watch else ([], [], [])
             now = time.time()
 
@@ -472,10 +475,12 @@ def main():
                     display_volume = 0.0
                     clear_ring()
                 else:
-                    # 1. Smoothly interpolate display_volume towards current_volume (60 FPS glide)
+                    # 1. Smoothly interpolate display_volume towards current_volume (100 FPS silky glide)
+                    dt = min(0.05, max(0.001, now - last_anim_time))
+                    last_anim_time = now
                     diff = current_volume - display_volume
-                    if abs(diff) > 0.1:
-                        display_volume += diff * 0.40
+                    if abs(diff) > 0.05:
+                        display_volume += diff * (1.0 - math.exp(-dt * 14.0))
                     else:
                         display_volume = float(current_volume)
 
@@ -505,12 +510,12 @@ def main():
                             continue
                         sec, usec, ev_type, ev_code, ev_value = struct.unpack(EVENT_FORMAT, chunk)
                         if ev_type == 1:  # EV_KEY
-                            # Rotary knob CW
+                            # Rotary knob inverted per user orientation
                             if ev_code == KEY_PAGEUP and ev_value == 1:
-                                net_vol_step += VOLUME_STEP
+                                net_vol_step -= VOLUME_STEP
                             # Rotary knob CCW
                             elif ev_code == KEY_PAGEDOWN and ev_value == 1:
-                                net_vol_step -= VOLUME_STEP
+                                net_vol_step += VOLUME_STEP
                             # Top Button 2: Dedicated Physical Microphone Mute
                             elif ev_code == KEY_MICMUTE and ev_value == (0 if MIC_MUTE_ACTIVE_LOW else 1):
                                 toggle_software_mic_mute()

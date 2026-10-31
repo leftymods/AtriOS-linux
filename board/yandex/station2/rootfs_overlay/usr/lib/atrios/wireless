@@ -127,34 +127,42 @@ case "$CMD" in
       echo "Attaching Bluetooth controller on $BT_TTY..."
       killall hciattach btattach rtk_hciattach 2>/dev/null || true
       usleep 200000 2>/dev/null || sleep 1
-      BT_RC=99
-      if [ -f /usr/lib/atrios/rtk-bt-init ]; then
-        python3 /usr/lib/atrios/rtk-bt-init init
-        BT_RC=$?
+
+      # 1. Power cycle radio cleanly via rfkill (state 1 = power on, 0 = power off)
+      for rfk in /sys/class/rfkill/rfkill*; do
+        [ -f "$rfk/state" ] || continue
+        [ "$(cat "$rfk/type" 2>/dev/null)" = "bluetooth" ] || continue
+        echo 0 > "$rfk/state" 2>/dev/null || true
+        usleep 150000 2>/dev/null || sleep 1
+        echo 1 > "$rfk/state" 2>/dev/null || true
+        usleep 400000 2>/dev/null || sleep 1
+      done
+
+      # 2. Prefer vendor Realtek rtk_hciattach (creates hci0 interface)
+      if [ -x /usr/bin/rtk_hciattach ]; then
+        echo "Starting Realtek rtk_hciattach ($BT_TTY, rtk_h5)..."
+        /usr/bin/rtk_hciattach -n -s 115200 "$BT_TTY" rtk_h5 1500000 >/tmp/rtk_hciattach.log 2>&1 &
+        for i in 1 2 3 4 5 6; do
+          if [ -d /sys/class/bluetooth/hci0 ]; then
+            break
+          fi
+          usleep 500000 2>/dev/null || sleep 1
+        done
       fi
 
-      # 1. Controller in H4 mode (BT_RC == 0)
-      if [ "$BT_RC" -eq 0 ]; then
-        if command -v hciattach >/dev/null 2>&1; then
-          hciattach "$BT_TTY" any 115200 flow 2>/dev/null || hciattach "$BT_TTY" any 115200 noflow 2>/dev/null || true
-        elif command -v btattach >/dev/null 2>&1; then
-          btattach -B "$BT_TTY" -S 115200 -P h4 >/dev/null 2>&1 &
+      # 3. Fallback: try python rtk-bt-init if rtk_hciattach did not create hci0
+      if [ ! -d /sys/class/bluetooth/hci0 ]; then
+        killall rtk_hciattach 2>/dev/null || true
+        if [ -f /usr/lib/atrios/rtk-bt-init ]; then
+          python3 /usr/lib/atrios/rtk-bt-init init
         fi
-        sleep 1
-        if command -v hciconfig >/dev/null 2>&1; then
-          hciconfig hci0 up 2>/dev/null || true
-          # Silent mode: non-discoverable and non-connectable (no inquiry or page scan)
-          hciconfig hci0 noscan 2>/dev/null || true
-        fi
-      # 2. Controller in H5 mode (BT_RC == 2) - Try vendor rtk_hciattach if available
-      elif [ "$BT_RC" -eq 2 ] && [ -x /usr/bin/rtk_hciattach ]; then
-        echo "Launching Realtek rtk_hciattach on $BT_TTY (H5 mode)..."
-        /usr/bin/rtk_hciattach -n -s 115200 "$BT_TTY" rtk_h5 2>/dev/null &
-        sleep 1
-        if command -v hciconfig >/dev/null 2>&1 && hciconfig hci0 >/dev/null 2>&1; then
-          hciconfig hci0 up 2>/dev/null || true
-          hciconfig hci0 noscan 2>/dev/null || true
-        fi
+      fi
+
+      # 4. Bring up hci0
+      if [ -d /sys/class/bluetooth/hci0 ] && command -v hciconfig >/dev/null 2>&1; then
+        hciconfig hci0 up 2>/dev/null || true
+        hciconfig hci0 noscan 2>/dev/null || true
+        echo "[OK] Bluetooth controller initialized successfully on hci0."
       fi
     }
 
