@@ -9,6 +9,7 @@
 #include <linux/slab.h>
 #include <linux/list.h>
 #include <linux/mutex.h>
+#include <linux/uaccess.h>
 
 #define XRES		24
 #define YRES		24
@@ -103,10 +104,20 @@ static int ring_fb_check_var(struct fb_var_screeninfo *var, struct fb_info *info
 static ssize_t ring_fb_write(struct fb_info *info, const char __user *buf,
 			     size_t count, loff_t *ppos)
 {
-	ssize_t ret = fb_sys_write(info, buf, count, ppos);
-	if (ret > 0)
-		ring_fb_sync(info);
-	return ret;
+	unsigned long p = *ppos;
+	size_t total_size = info->screen_size;
+
+	if (p >= total_size)
+		return 0;
+	if (count > total_size - p)
+		count = total_size - p;
+
+	if (copy_from_user(info->screen_buffer + p, buf, count))
+		return -EFAULT;
+
+	*ppos += count;
+	ring_fb_sync(info);
+	return count;
 }
 
 static struct fb_ops ring_fb_ops = {

@@ -36,6 +36,10 @@
 #include <linux/delay.h>
 #include <linux/device.h>
 
+#ifndef sysfs_emit
+#define sysfs_emit(buf, fmt, ...) scnprintf(buf, PAGE_SIZE, fmt, ##__VA_ARGS__)
+#endif
+
 #define GOWIN_DRV_NAME		"led_panel"
 #define GOWIN_FB_NAME		"led_panel_fb"
 
