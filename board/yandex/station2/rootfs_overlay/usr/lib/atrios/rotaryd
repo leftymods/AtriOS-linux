@@ -264,10 +264,29 @@ def show_mute_ring():
     set_ring_frame(b"\x00" * (NUM_LEDS * 3))
 
 
-def show_volume_ring(vol_pct):
-    if vol_pct <= 0:
+def calc_led_color(ratio):
+    """Return (r, g, 0) for a given ratio 0.0..1.0 along the ring.
+    0.00..0.30: Green -> Yellow
+    0.30..0.60: Yellow -> Red
+    0.60..1.00: Continued solid Red across the top volume sector
+    """
+    if ratio < 0.30:
+        r = int(255 * (ratio / 0.30))
+        g = 255
+    elif ratio < 0.60:
+        r = 255
+        g = int(255 * (1.0 - (ratio - 0.30) / 0.30))
+    else:
+        r = 255
+        g = 0
+    return r, g, 0
+
+
+def show_volume_ring(vol_pct, brightness=1.0):
+    if vol_pct <= 0 or brightness <= 0.001:
         set_ring_frame(b"\x00" * (NUM_LEDS * 3))
         return
+    brightness = max(0.0, min(1.0, float(brightness)))
     # Fractional last LED with perceptual gamma easing for smooth turn-on
     exact = NUM_LEDS * max(0.0, min(100.0, float(vol_pct))) / 100.0
     full = int(exact)
@@ -275,24 +294,14 @@ def show_volume_ring(vol_pct):
     frame = bytearray(NUM_LEDS * 3)
     for i in range(full):
         ratio = i / max(1, NUM_LEDS - 1)
-        if ratio < 0.5:
-            r = int(255 * (ratio * 2.0))
-            g = 255
-        else:
-            r = 255
-            g = int(255 * (2.0 - ratio * 2.0))
-        frame[i * 3 + 0] = r
-        frame[i * 3 + 1] = g
+        r, g, _ = calc_led_color(ratio)
+        frame[i * 3 + 0] = int(r * brightness)
+        frame[i * 3 + 1] = int(g * brightness)
         frame[i * 3 + 2] = 0
     if full < NUM_LEDS and frac > 0.01:
-        eased_frac = frac ** 2.2
+        eased_frac = (frac ** 2.2) * brightness
         ratio = full / max(1, NUM_LEDS - 1)
-        if ratio < 0.5:
-            r = int(255 * (ratio * 2.0))
-            g = 255
-        else:
-            r = 255
-            g = int(255 * (2.0 - ratio * 2.0))
+        r, g, _ = calc_led_color(ratio)
         frame[full * 3 + 0] = int(r * eased_frac)
         frame[full * 3 + 1] = int(g * eased_frac)
         frame[full * 3 + 2] = 0
@@ -390,12 +399,16 @@ def main():
     last_enforce = time.time()
     last_scan = time.time()
 
+    FADE_START_DELAY = 1.3
+    FADE_DURATION = 0.7
+
     try:
         while True:
-            # 100 ms wakeup keeps the fade-out and watchdog responsive; input
-            # events still wake select immediately.
+            now = time.time()
+            in_fade = (not mic_muted and last_volume_time > 0 and (now - last_volume_time > FADE_START_DELAY))
+            poll_timeout = 0.03 if in_fade else 0.15
             fds_to_watch = list(open_fds.keys())
-            rlist, _, _ = select.select(fds_to_watch, [], [], 0.1) if fds_to_watch else ([], [], [])
+            rlist, _, _ = select.select(fds_to_watch, [], [], poll_timeout) if fds_to_watch else ([], [], poll_timeout)
             now = time.time()
 
             # Debounced state flush: write to flash 300ms after user finishes rotating the knob
@@ -404,7 +417,7 @@ def main():
 
             # Watchdog: enforce saved volume only when knob is idle
             if now - last_enforce > 1.0:
-                if not volume_dirty and (now - last_volume_time > 1.5):
+                if not volume_dirty and (now - last_volume_time > 2.2):
                     enforce_volume()
                 last_enforce = now
 
@@ -413,10 +426,17 @@ def main():
                 scan_and_open_devices(open_fds)
                 last_scan = now
 
-            # Fade out volume bar after 2 seconds if not in mic mute mode
-            if not mic_muted and last_volume_time > 0 and (now - last_volume_time > 2.0):
-                clear_ring()
-                last_volume_time = 0
+            # Smooth fade-out of volume bar on inactivity
+            if not mic_muted and last_volume_time > 0:
+                elapsed = now - last_volume_time
+                if elapsed > FADE_START_DELAY:
+                    fade_prog = (elapsed - FADE_START_DELAY) / FADE_DURATION
+                    if fade_prog < 1.0:
+                        fade_factor = (1.0 - fade_prog) ** 1.8
+                        show_volume_ring(current_volume, brightness=fade_factor)
+                    else:
+                        clear_ring()
+                        last_volume_time = 0
 
             for fd in rlist:
                 try:
