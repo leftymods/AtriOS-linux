@@ -215,7 +215,7 @@ case "$CMD" in
           fi
           if [ -x /usr/bin/bluealsa-aplay ] && ! pgrep -x bluealsa-aplay >/dev/null 2>&1; then
             echo "Starting BlueALSA audio playback bridge..."
-            /usr/bin/bluealsa-aplay -v -D plughw:AMLAUGESOUND,0 -M AMLAUGESOUND --mixer-name='Woofer Master' >/tmp/bluealsa-aplay.log 2>&1 &
+            /usr/bin/bluealsa-aplay -v -D plughw:AMLAUGESOUND,0 -M none >/tmp/bluealsa-aplay.log 2>&1 &
             sleep 0.5
           fi
           if [ -x /usr/lib/atrios/bt-volume-sync ] && ! pgrep -f /usr/lib/atrios/bt-volume-sync >/dev/null 2>&1; then

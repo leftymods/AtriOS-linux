@@ -2,7 +2,7 @@
 """
 AtriOS Bluetooth Volume Synchronization Daemon (bt-volume-sync)
 Synchronizes volume bidirectionally between connected Bluetooth audio sources
-(iOS / Android via AVRCP / BlueALSA) and the Yandex Station Max hardware mixer/LED ring.
+(iOS / Android via AVRCP / BlueZ / BlueALSA) and the Yandex Station Max hardware mixer/LED ring.
 """
 
 import os
@@ -110,33 +110,55 @@ def apply_hardware_volume(pct):
         pass
     show_volume_ring(pct)
 
+def get_bluez_transport_paths():
+    try:
+        out = subprocess.check_output(
+            ["gdbus", "call", "--system", "--dest", "org.bluez",
+             "--object-path", "/", "--method", "org.freedesktop.DBus.ObjectManager.GetManagedObjects"],
+            timeout=2
+        ).decode('utf-8', errors='replace')
+        return re.findall(r"objectpath '(/org/bluez/hci0/dev_[^']+/fd\d+)'", out)
+    except Exception:
+        return []
+
 def get_bluealsa_pcm_paths():
     try:
         out = subprocess.check_output(
             ["gdbus", "call", "--system", "--dest", "org.bluealsa",
-             "--object-path", "/", "--method", "org.freedesktop.DBus.ObjectManager.GetManagedObjects"],
+             "--object-path", "/org/bluealsa", "--method", "org.freedesktop.DBus.ObjectManager.GetManagedObjects"],
             timeout=2
         ).decode('utf-8', errors='replace')
         return re.findall(r"objectpath '(/org/bluealsa/[^']+)'", out)
     except Exception:
         return []
 
-def set_bluealsa_volume(pcm_path, pct):
+def set_phone_volume(pct):
     val127 = int(round(pct * 127.0 / 100.0))
-    raw16 = (val127 << 8) | val127
-    cmd = [
-        "gdbus", "call", "--system", "--dest", "org.bluealsa",
-        "--object-path", pcm_path,
-        "--method", "org.freedesktop.DBus.Properties.Set",
-        "org.bluealsa.PCM1", "Volume", f"<uint16 {raw16}>"
-    ]
-    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1)
+    val16_ba = (val127 << 8) | val127
+    
+    # 1. Update BlueZ MediaTransport1
+    for t_path in get_bluez_transport_paths():
+        subprocess.run([
+            "gdbus", "call", "--system", "--dest", "org.bluez",
+            "--object-path", t_path,
+            "--method", "org.freedesktop.DBus.Properties.Set",
+            "org.bluez.MediaTransport1", "Volume", f"<uint16 {val127}>"
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1)
+
+    # 2. Update BlueALSA PCM1
+    for pcm_path in get_bluealsa_pcm_paths():
+        subprocess.run([
+            "gdbus", "call", "--system", "--dest", "org.bluealsa",
+            "--object-path", pcm_path,
+            "--method", "org.freedesktop.DBus.Properties.Set",
+            "org.bluealsa.PCM1", "Volume", f"<uint16 {val16_ba}>"
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1)
 
 class VolumeSync:
     def __init__(self):
         self.current_vol = read_state_volume()
         self.last_sync_time = 0.0
-        self.last_sync_origin = None # "phone" or "station"
+        self.last_sync_origin = None
 
     def phone_volume_changed(self, phone_pct):
         if abs(phone_pct - self.current_vol) <= 1:
@@ -158,27 +180,35 @@ class VolumeSync:
         self.current_vol = station_pct
         self.last_sync_time = now
         self.last_sync_origin = "station"
-        # Sync to all active BlueALSA PCMs
-        for p in get_bluealsa_pcm_paths():
-            set_bluealsa_volume(p, station_pct)
+        set_phone_volume(station_pct)
 
 def monitor_phone_volume(sync_mgr):
-    """Monitor BlueALSA D-Bus PropertiesChanged signals."""
+    """Monitor BlueZ and BlueALSA D-Bus PropertiesChanged signals for Volume changes."""
     while True:
         try:
             cmd = [
                 "dbus-monitor", "--system",
-                "type='signal',sender='org.bluealsa',interface='org.freedesktop.DBus.Properties',member='PropertiesChanged'"
+                "type='signal',interface='org.freedesktop.DBus.Properties',member='PropertiesChanged'"
             ]
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+            in_vol = False
             for line in proc.stdout:
-                if "uint16" in line:
-                    m = re.search(r"uint16\s+(\d+)", line)
+                line_str = line.strip()
+                if "string \"Volume\"" in line_str:
+                    in_vol = True
+                    continue
+                if in_vol and "uint16" in line_str:
+                    m = re.search(r"uint16\s+(\d+)", line_str)
                     if m:
-                        val16 = int(m.group(1))
-                        left = (val16 >> 8) & 0xff
-                        phone_pct = int(round(left * 100.0 / 127.0))
-                        sync_mgr.phone_volume_changed(phone_pct)
+                        val = int(m.group(1))
+                        # BlueALSA uses (left << 8) | right; BlueZ uses 0..127
+                        if val > 127:
+                            left = (val >> 8) & 0xff
+                            pct = int(round(left * 100.0 / 127.0))
+                        else:
+                            pct = int(round(val * 100.0 / 127.0))
+                        sync_mgr.phone_volume_changed(pct)
+                    in_vol = False
         except Exception:
             time.sleep(2)
 
@@ -196,7 +226,7 @@ def monitor_station_volume(sync_mgr):
                         sync_mgr.station_volume_changed(val)
         except Exception:
             pass
-        time.sleep(0.08)
+        time.sleep(0.05)
 
 def main():
     sync = VolumeSync()
