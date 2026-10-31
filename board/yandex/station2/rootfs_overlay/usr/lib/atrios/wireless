@@ -208,6 +208,10 @@ case "$CMD" in
             python3 /usr/lib/atrios/bt-agent &
             sleep 0.5
           fi
+          if [ -x /etc/init.d/S03amplifiers ]; then
+            echo "Initializing audio amplifiers and hardware mixer..."
+            /etc/init.d/S03amplifiers start >/dev/null 2>&1 || true
+          fi
           if [ -x /usr/bin/bluealsa ] && ! pgrep -x bluealsa >/dev/null 2>&1; then
             echo "Starting BlueALSA A2DP audio engine..."
             /usr/bin/bluealsa -p a2dp-sink --a2dp-volume -i hci0 &
@@ -215,7 +219,7 @@ case "$CMD" in
           fi
           if [ -x /usr/bin/bluealsa-aplay ] && ! pgrep -x bluealsa-aplay >/dev/null 2>&1; then
             echo "Starting BlueALSA audio playback bridge..."
-            /usr/bin/bluealsa-aplay -v -D plughw:AMLAUGESOUND,0 -M none >/tmp/bluealsa-aplay.log 2>&1 &
+            /usr/bin/bluealsa-aplay -v -D playback_plug -M none >/tmp/bluealsa-aplay.log 2>&1 &
             sleep 0.5
           fi
           if [ -x /usr/lib/atrios/bt-volume-sync ] && ! pgrep -f /usr/lib/atrios/bt-volume-sync >/dev/null 2>&1; then

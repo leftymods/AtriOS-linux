@@ -86,6 +86,7 @@ def apply_hardware_volume(pct):
     raw_255 = volume_to_raw(pct, 255)
     raw_hp = volume_to_raw(pct, 191)
     sw = "0" if pct <= 0 else "1"
+    mute_i2c = "0x08" if pct <= 0 else "0x00"
     lines = [
         f"cset name='Woofer Master Playback Volume' {raw_255}",
         f"cset name='Tweeters Master Playback Volume' {raw_255}",
@@ -93,12 +94,34 @@ def apply_hardware_volume(pct):
         f"cset name='Woofer Master Playback Switch' {sw}",
         f"cset name='Tweeters Master Playback Switch' {sw}",
         f"cset name='Headphone Headphone Switch' {sw}",
+        "cset name='Audio Out Sink' 1",
+        "cset name='Woofer Ch1 Playback Switch' 1",
+        "cset name='Woofer Ch2 Playback Switch' 1",
+        "cset name='Tweeters Ch1 Playback Switch' 1",
+        "cset name='Tweeters Ch2 Playback Switch' 1",
+        "cset name='Woofer Ch1 Playback Volume' 159",
+        "cset name='Woofer Ch2 Playback Volume' 159",
+        "cset name='Tweeters Ch1 Playback Volume' 159",
+        "cset name='Tweeters Ch2 Playback Volume' 159",
         "cset name='SPK mute' 0",
     ]
     batch = "\n".join(lines) + "\n"
     subprocess.run(["amixer", "-c", ALSA_CARD, "-q", "-s"],
                    input=batch.encode('utf-8'),
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # Direct I2C unmute / volume on SY6045S
+    try:
+        hex_raw = f"0x{raw_255:02x}"
+        for addr in ("0x2a", "0x2b"):
+            subprocess.run(["i2cset", "-y", "-f", "2", addr, "0x07", hex_raw],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(["i2cset", "-y", "-f", "2", addr, "0x06", mute_i2c],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(["i2cset", "-y", "-f", "2", addr, "0x22", "0x00"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
     # Save state
     try:
         os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
@@ -201,7 +224,6 @@ def monitor_phone_volume(sync_mgr):
                     m = re.search(r"uint16\s+(\d+)", line_str)
                     if m:
                         val = int(m.group(1))
-                        # BlueALSA uses (left << 8) | right; BlueZ uses 0..127
                         if val > 127:
                             left = (val >> 8) & 0xff
                             pct = int(round(left * 100.0 / 127.0))
@@ -230,6 +252,8 @@ def monitor_station_volume(sync_mgr):
 
 def main():
     sync = VolumeSync()
+    # Apply initial hardware unmute & nominal levels
+    apply_hardware_volume(sync.current_vol)
     t1 = threading.Thread(target=monitor_phone_volume, args=(sync,), daemon=True)
     t2 = threading.Thread(target=monitor_station_volume, args=(sync,), daemon=True)
     t1.start()
