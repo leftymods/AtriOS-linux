@@ -29,7 +29,9 @@ import math
 FB_RING = "/dev/fb5"
 NUM_LEDS = 24
 CARD = "AMLAUGESOUND"
-VOLUME_STEP = 4  # percent per detent; ring fills a full circle in 25 detents
+VOLUME_STEP = 2  # percent per detent; 50 granular steps across full 0-100% volume
+FADE_IDLE_DELAY = 1.0  # seconds to keep ring lit after knob stops moving
+FADE_DURATION = 0.6    # seconds for silky smooth cosine fade-out
 STATE_DIR = "/var/lib/atrios"
 STATE_FILE = STATE_DIR + "/volume"
 DEFAULT_VOLUME = 60
@@ -197,6 +199,10 @@ def set_volume(pct, force_switches=False):
     fast_mixer.set_volume(pct, force_switches=force_switches)
 
 
+ring_active = False
+is_fading = False
+fade_start_time = 0.0
+
 def apply_saved_volume():
     global current_volume, volume_dirty
     value = read_state_volume()
@@ -212,10 +218,12 @@ def apply_saved_volume():
 
 
 def adjust_volume(step):
-    global current_volume, volume_dirty, last_volume_change_time
+    global current_volume, volume_dirty, last_volume_change_time, ring_active, is_fading
     current_volume = max(0, min(100, current_volume + step))
-    # 1. Update visual feedback immediately (0ms latency)
-    show_volume_ring(current_volume)
+    ring_active = True
+    is_fading = False
+    # 1. Update visual feedback immediately (0ms latency, full brightness)
+    show_volume_ring(current_volume, brightness=1.0)
     # 2. Update hardware master ALSA volume immediately via persistent stream
     set_volume(current_volume)
     # 3. Mark dirty to debounce flash state saving
@@ -236,7 +244,8 @@ def enforce_volume():
     saved = read_state_volume()
     if saved is not None and saved != current_volume:
         current_volume = saved
-        show_volume_ring(current_volume)
+        if ring_active and not is_fading:
+            show_volume_ring(current_volume, brightness=1.0)
         set_volume(current_volume)
         return
 
@@ -264,27 +273,29 @@ def show_mute_ring():
     set_ring_frame(b"\x00" * (NUM_LEDS * 3))
 
 
-def show_volume_ring(vol_pct):
-    # Fractional last LED: one LED per 4.166%, so a 2% step changes the
-    # brightness of the edge LED instead of jumping a whole LED.
+def show_volume_ring(vol_pct, brightness=1.0):
     exact = NUM_LEDS * max(0, min(100, vol_pct)) / 100.0
     full = int(exact)
     frac = exact - full
     frame = bytearray(NUM_LEDS * 3)
+    b = max(0.0, min(1.0, brightness))
     for i in range(full):
         ratio = i / max(1, NUM_LEDS - 1)
-        frame[i * 3 + 0] = int(180 * ratio)
-        frame[i * 3 + 1] = int(220 * (1.0 - ratio))
-        frame[i * 3 + 2] = 255
+        frame[i * 3 + 0] = int(180 * ratio * b)
+        frame[i * 3 + 1] = int(220 * (1.0 - ratio) * b)
+        frame[i * 3 + 2] = int(255 * b)
     if full < NUM_LEDS and frac > 0:
         ratio = full / max(1, NUM_LEDS - 1)
-        frame[full * 3 + 0] = int(180 * ratio * frac)
-        frame[full * 3 + 1] = int(220 * (1.0 - ratio) * frac)
-        frame[full * 3 + 2] = int(255 * frac)
+        frame[full * 3 + 0] = int(180 * ratio * frac * b)
+        frame[full * 3 + 1] = int(220 * (1.0 - ratio) * frac * b)
+        frame[full * 3 + 2] = int(255 * frac * b)
     set_ring_frame(frame)
 
 
 def clear_ring():
+    global ring_active, is_fading
+    ring_active = False
+    is_fading = False
     if mic_muted:
         show_mute_ring()
     else:
@@ -380,7 +391,8 @@ def main():
             # 100 ms wakeup keeps the fade-out and watchdog responsive; input
             # events still wake select immediately.
             fds_to_watch = list(open_fds.keys())
-            rlist, _, _ = select.select(fds_to_watch, [], [], 0.1) if fds_to_watch else ([], [], [])
+            select_timeout = 0.02 if (ring_active and is_fading) else 0.05
+            rlist, _, _ = select.select(fds_to_watch, [], [], select_timeout) if fds_to_watch else ([], [], [])
             now = time.time()
 
             # Debounced state flush: write to flash 300ms after user finishes rotating the knob
@@ -398,10 +410,20 @@ def main():
                 scan_and_open_devices(open_fds)
                 last_scan = now
 
-            # Fade out volume bar after 2 seconds if not in mic mute mode
-            if not mic_muted and last_volume_time > 0 and (now - last_volume_time > 2.0):
-                clear_ring()
-                last_volume_time = 0
+            # Smooth fade-out of volume ring
+            if ring_active and not mic_muted:
+                if not is_fading:
+                    if now - last_volume_time >= FADE_IDLE_DELAY:
+                        is_fading = True
+                        fade_start_time = now
+                else:
+                    elapsed = now - fade_start_time
+                    if elapsed >= FADE_DURATION:
+                        clear_ring()
+                    else:
+                        progress = elapsed / FADE_DURATION
+                        brightness = 0.5 * (1.0 + math.cos(math.pi * progress))
+                        show_volume_ring(current_volume, brightness=brightness)
 
             for fd in rlist:
                 try:
