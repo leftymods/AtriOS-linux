@@ -141,6 +141,14 @@ case "$CMD" in
           hciconfig hci0 class 0x240414 2>/dev/null || true
           hciconfig hci0 piscan 2>/dev/null || true
         fi
+      # 2. Controller in H5 mode (BT_RC == 2) - Try vendor rtk_hciattach if available
+      elif [ "$BT_RC" -eq 2 ] && [ -x /usr/bin/rtk_hciattach ]; then
+        echo "Launching Realtek rtk_hciattach on $BT_TTY (H5 mode)..."
+        /usr/bin/rtk_hciattach -n -s 115200 "$BT_TTY" rtk_h5 2>/dev/null &
+        sleep 1
+        if command -v hciconfig >/dev/null 2>&1 && hciconfig hci0 >/dev/null 2>&1; then
+          hciconfig hci0 up 2>/dev/null || true
+        fi
       fi
     }
 
