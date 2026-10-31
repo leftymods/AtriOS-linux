@@ -1,0 +1,35 @@
+syntax = "proto3";
+
+package zigbee.proto;
+
+message SimpleDescriptor {
+    uint32 endpoint = 1;
+    uint32 profileId = 2;
+    uint32 deviceId = 3;
+    uint32 deviceVersion = 4;
+    repeated uint32 inputClusters = 5;
+    repeated uint32 outputClusters = 6;
+};
+
+message ZigbeeNode {
+    uint32 nodeId = 1;
+    fixed64 eui64 = 2;
+    uint32 capability = 3;
+    reserved 4;
+    repeated SimpleDescriptor endpoints = 5;
+};
+
+message NetworkParameters {
+    enum Version {
+        UNKNOWN = 0;
+        FIRST = 1;
+    }
+    uint32 pan_id = 1;
+    bytes extended_pan_id = 2;
+    bytes network_key = 3;
+    uint32 network_key_sequence_number = 4;
+    bytes trust_center_link_key = 5;
+    uint32 channel = 6;
+    repeated ZigbeeNode nodes = 7;
+    Version version = 8;
+};

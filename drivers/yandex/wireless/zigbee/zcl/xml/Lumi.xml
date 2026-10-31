@@ -1,0 +1,16 @@
+<?xml version="1.0"?>
+<zcl:cluster xmlns:zcl="http://zigbee.org/zcl/clusters"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xmlns:type="http://zigbee.org/zcl/types"
+  xmlns:xi="http://www.w3.org/2001/XInclude"
+  xsi:schemaLocation="http://zigbee.org/zcl/clusters cluster.xsd http://zigbee.org/zcl/types type.xsd"
+  id="FCC0" revision="1" name="Lumi" manufacturer="115F">
+  <classification role="application" picsCode="LUMI" primaryTransaction="2" />
+  <server>
+    <attributes>
+      <attribute id="0009" name="Mode" type="uint8" default="0" />
+      <attribute id="0102" name="MotionDetectionInterval" type="uint8" default="60" />
+      <attribute id="0112" name="MotionIlluminance" type="uint32" default="0" />
+    </attributes>
+  </server>
+</zcl:cluster>

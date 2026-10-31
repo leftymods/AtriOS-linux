@@ -1,0 +1,10 @@
+RECURSE(
+    common
+    dmadrv
+    gpiointerrupt
+    nvm3
+    spidrv
+    tempdrv
+    uartdrv
+    ustimer
+)

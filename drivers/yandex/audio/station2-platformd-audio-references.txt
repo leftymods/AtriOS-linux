@@ -1,0 +1,70 @@
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:5:#include "yandex_station2_volume_manager.h"
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:13:#include <smart_devices/platforms/yandexstation_2/platformd/audio_input/audio_input_controller.h>
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:32:#include <yandex_io/capabilities/volume/volume_capability.h>
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:44:#include <yandex_io/modules/audio_input/audio_device/websocket/websocket_audio_config_handler.h>
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:45:#include <yandex_io/modules/audio_input/audio_dumper/audio_dumper.h>
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:46:#include <yandex_io/modules/audio_input/broken_mic/broken_mic_config_handler.h>
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:47:#include <yandex_io/modules/audio_input/broken_mic/broken_mic_first_configure_handler.h>
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:48:#include <yandex_io/modules/audio_input/broken_mic/broken_mic_logger.h>
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:49:#include <yandex_io/modules/audio_input/controller/dialog_mode/audio_input_dialog_mode.h>
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:50:#include <yandex_io/modules/audio_input/controller/mics_state_proxy/audio_input_controller_mics_state_proxy.h>
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:51:#include <yandex_io/modules/audio_input/controller/multiple_vqe_controller/runtime_config_handler/active_vqe_config_handler.h>
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:52:#include <yandex_io/modules/audio_input/doa_listener/doa_listener.h>
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:53:#include <yandex_io/modules/audio_input/mics_state/metrica_listener/metrica_mics_state_listener.h>
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:54:#include <yandex_io/modules/audio_input/mics_state/sdk_notifier/mics_state_sdk_notifier.h>
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:55:#include <yandex_io/modules/audio_input/vqe_speaker_volume_proxy/vqe_controller_speaker_volume_proxy.h>
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:58:#include <yandex_io/modules/configuration_mode_sound/configuration_mode_handler.h>
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:72:#include <yandex_io/modules/smart_volume/smart_volume_configurer.h>
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:79:#include <yandex_io/modules/volume_manager/controllers/max_volume/max_volume_controller.h>
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:82:#include <yandex_io/sdk/audio_source/i_audio_source.h>
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:265:    /* Audio Input Configuration start */
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:266:    YandexIO::AudioDumper::initSignalHandlers();
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:267:    const auto audiodConfig = device->configuration()->getServiceConfig("audiod");
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:269:    auto ioAudioSource = YandexIO::createAudioSource(ipcFactory);
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:270:    auto allChannelsClient = ioAudioSource->createClient();
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:273:    auto brokenMicDetector = std::make_shared<YandexIO::BrokenMicLogger>(ipcFactory, audiodConfig);
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:282:    auto audioDumper = std::make_shared<YandexIO::AudioDumper>(getString(audiodConfig, "dumpPath"));
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:283:    allChannelsClient->addListener(audioDumper);
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:285:    auto websocketAudioConfigHandler = std::make_shared<YandexIO::WebsocketAudioConfigHandler>("/tmp", tryGetString(audiodConfig, "device"));
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:286:    sdk->addBackendConfigObserver(websocketAudioConfigHandler);
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:289:                                                                               audiodConfig, sdk, device->telemetry(), createEqualizerDispatcherFactory(ipcFactory, sdk));
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:296:    auto audioInputController = std::make_shared<AudioInputController>(device, ipcFactory, ioAudioSource,
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:297:                                                                       websocketAudioConfigHandler);
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:298:    sdk->addBackendConfigObserver(audioInputController);
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:300:    auto micsStateProxy = std::make_shared<YandexIO::AudioInputControllerMicsStateProxy>(audioInputController);
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:301:    auto audioInputDialogModeHandler = std::make_shared<YandexIO::AudioInputDialogMode>(audioInputController);
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:302:    sdk->getAliceCapability()->addListener(audioInputDialogModeHandler);
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:304:    auto activeVqeConfigHandler = std::make_shared<YandexIO::ActiveVqeConfigHandler>(audioInputController);
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:305:    sdk->addBackendConfigObserver(activeVqeConfigHandler);
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:307:    /* Audio Input Configuration end */
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:346:    /* Controller for Sound Init LED Animation */
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:353:    /* Subscribe to AudioInput data and update Doa Angle in LISTENING animation */
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:361:    auto volumeManager = std::make_shared<YandexStation2VolumeManager>(device, ipcFactory, sdk,
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:362:                                                                       "/data/quasar/last_vendor_volume",
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:365:                                                                       deviceStateHandler->getVolumeConductor(),
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:366:                                                                       deviceStateHandler->getRcuVolumeConductor(),
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:368:    sdk->addBackendConfigObserver(volumeManager);
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:369:    auto maxVolumeController = std::make_shared<MaxVolumeController>(volumeManager, std::make_shared<UserConfigProvider>(ipcFactory));
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:370:    maxVolumeController->start();
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:372:    ConfigurationModeHandler::Settings confModeSettings{.enterConfigurationModeFirstTimeSound = "first_enter_configure.mp3", .firstInitDefaultVolume = 4};
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:373:    auto configurationModeHandler = std::make_shared<ConfigurationModeHandler>(sdk, volumeManager, std::move(confModeSettings));
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:376:    for (const auto& vqeController : audioInputController->getVqeControllers()) {
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:377:        volumeManager->addListener(std::make_shared<VqeControllerSpeakerVolumeProxy>(vqeController));
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:407:    sdk->addSoundCommandObserver(demoModeHandler);
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:448:    bluetoothModule->addBluetoothStateListener(volumeManager->getBluetoothStateListener());
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:450:    bluetoothModule->addBluetoothListener(volumeManager);
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:455:                                                           ipcFactory, volumeManager, bluetoothController, quasarStateHolder,
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:456:                                                           foregroundActivity, rcuButtonsController, audioInputController,
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:471:    activeVqeConfigHandler->subscribeToConfig(*sdk);
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:473:    websocketAudioConfigHandler->subscribeToConfig(*sdk);
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:480:    volumeManager->subscribeToSystemConfig();
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:482:    audioInputController->subscribeToSystemConfig(*sdk);
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:493:    volumeManager->start();
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:494:    audioInputController->start(); // start capture thread. ButtonsHandler can "mute" input when it starts
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:500:    allChannelsClient->start(); // forward audio input data to listeners
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:507:    TestpointService testpoint(device, sdk, ipcFactory, volumeManager);
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:525:    // Smart volume
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:526:    const auto smartVolumeConfigurer = YandexIO::SmartVolumeConfigurer::create(sdk, volumeManager, allChannelsClient);
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:528:    // Volume capability
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:529:    const auto volumeCapability = std::make_shared<YandexIO::VolumeCapability>(volumeManager);
+ai/related/smart_devices/platforms/yandexstation_2/platformd/platformd.cpp:530:    sdk->getEndpointStorage()->getLocalEndpoint()->addCapability(volumeCapability);

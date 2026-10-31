@@ -1,0 +1,25 @@
+{
+    "ref": "yandexstation_2/88", 
+    "tracked_branches": {
+        "yandexstation_2/84": {
+            "mergeto": "smart_devices:127"
+        }, 
+        "yandexstation_2/85": {
+            "mergeto": "smart_devices:128"
+        }, 
+        "yandexstation_2/86": {
+            "mergeto": "smart_devices:129"
+        }, 
+        "yandexstation_2/87": {
+            "mergeto": "smart_devices:130"
+        }, 
+        "yandexstation_2/88": {
+            "mergeto": "smart_devices:131"
+        }, 
+        "yandexstation_plus_develop": {
+            "development_branch": true
+        }
+    }, 
+    "url": "ssh://gerrit.yandex-team.ru/unity/platform/manifest", 
+    "vcs": "repo"
+}

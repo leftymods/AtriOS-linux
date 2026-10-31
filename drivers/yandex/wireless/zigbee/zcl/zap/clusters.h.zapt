@@ -1,0 +1,84 @@
+#pragma once
+
+#include "generic.h"
+
+namespace zigbee::zcl {
+
+{{#zcl_clusters}}
+class {{label}}ServerCluster : public GenericCluster {
+public:
+    static constexpr uint16_t Id = {{asHex code 4}};
+{{#if (is_defined manufacturerCode)}}
+    static constexpr uint16_t ManufacturerCode = {{asHex manufacturerCode 4}};
+{{/if}}
+
+    enum class AttributeId : uint16_t {
+{{#zcl_attributes_server}}
+        {{label}} = {{asHex code 4}},
+{{/zcl_attributes_server}}
+    };
+
+    enum class ServerCommandId : uint8_t {
+{{#zcl_commands_source_server}}
+        {{label}} = {{asHex code 2}},
+{{/zcl_commands_source_server}}
+    };
+
+    enum class ClientCommandId : uint8_t {
+{{#zcl_commands_source_client}}
+        {{label}} = {{asHex code 2}},
+{{/zcl_commands_source_client}}
+    };
+
+{{#zcl_commands_source_client}}
+{{#first}}
+    class IListener {
+    public:
+        virtual ~IListener();
+{{/first}}
+
+        virtual void on{{asCamelCased label false}}(
+{{#zcl_command_arguments}}
+{{#unless isArray}}
+            const zcl::{{asCamelCased type false}}& {{asCamelCased label}}{{#not_last}},{{/not_last}}
+{{else}}
+            const std::vector<zcl::{{asCamelCased type false}}>& {{asCamelCased label}}s{{#not_last}},{{/not_last}}
+{{/unless}}
+{{/zcl_command_arguments}}
+        ) = 0;
+{{#last}}
+    };
+
+{{/last}}
+{{/zcl_commands_source_client}}
+public:
+    {{label}}ServerCluster(std::weak_ptr<Endpoint> endpoint);
+
+public:
+{{#zcl_commands_source_server}}
+    void {{asCamelCased label}}(
+{{#zcl_command_arguments}}
+{{#unless isArray}}
+        zcl::{{asCamelCased type false}} {{asCamelCased label}}{{#not_last}},{{/not_last}}
+{{else}}
+        std::vector<zcl::{{asCamelCased type false}}> {{asCamelCased label}}s{{#not_last}},{{/not_last}}
+{{/unless}}
+{{/zcl_command_arguments}}
+    );
+
+{{/zcl_commands_source_server}}
+{{#zcl_commands_source_client}}
+{{#first}}
+    void handleClusterSpecificCommand(const ZclHeader& header, ZclStream& stream) override;
+
+    void addClusterListener(std::weak_ptr<IListener> listener);
+
+private:
+    std::vector<std::weak_ptr<IListener>> listeners_;
+{{/first}}
+{{/zcl_commands_source_client}}
+};
+
+{{/zcl_clusters}}
+
+} // namespace zigbee::zcl

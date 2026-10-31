@@ -1,0 +1,151 @@
+{
+    "audiod": {
+        "brokenMicDetector": {
+            "enabled": true
+        },
+        "affinityMask": 1,
+        "capturedChannels": [
+            "*"
+        ],
+        "vqePerfLogs": {
+            "enabled": false,
+            "periodSec": 10
+        },
+        "defaultVqeType": "yandex",
+        "yandex_vqe": {
+            "name": "vqe",
+            "periodSize": 1024,
+            "spkChannels": 6,
+            "preset": "yandexstation_2_rev1",
+            "VQEtype": "yandex",
+            "omniMode": true
+        },
+        "omniMode": true,
+        "micConfig": {
+            "periodSize": 3072,
+            "periodCount": 4,
+            "cardNumber": 0,
+            "deviceNumber": 1,
+            "micChannels": 8,
+            "spkChannels": 0,
+            "inRate": 48000,
+            "sampleSize": 2
+        },
+        "spkConfig": {
+            "periodSize": 3072,
+            "periodCount": 4,
+            "cardNumber": 0,
+            "deviceNumber": 0,
+            "micChannels": 0,
+            "spkChannels": 2,
+            "inRate": 48000,
+            "sampleSize": 2
+        },
+        "loopbackConfig": {
+            "periodSize": 3072,
+            "periodCount": 4,
+            "cardNumber": 1,
+            "deviceNumber": 1,
+            "micChannels": 0,
+            "spkChannels": 2,
+            "inRate": 48000,
+            "sampleSize": 2
+        },
+        "hdmiLoopbackConfig": {
+            "periodSize": 3072,
+            "periodCount": 4,
+            "cardNumber": 1,
+            "deviceNumber": 0,
+            "micChannels": 0,
+            "spkChannels": 2,
+            "inRate": 48000,
+            "sampleSize": 2
+        },
+        "dumpPath": "/mnt/",
+        "mainChannel": "vqe"
+    },
+    "audioclient": {
+        "controller": {
+            "playbackParams": {
+                "MP3": {
+                    "gstPipeline": " souphttpsrc name=yio_souphttpsrc user-agent=\"YandexStation_2/__QUASAR_VERSION_PLACEHOLDER__ (YandexIO)\" location={uri} !  id3demux name=yio_id3demux ! decodebin use-buffering=true ! {opt_normalization} ! volume name=volume0 ! audioconvert ! audioresample ! capsfilter name=capsfilter0 caps=\"audio/x-raw\" ! volume name=equalizer-preamp ! equalizer-nbands name=equalizer ! spectrum interval=40000000 bands=513 threshold=-80 ! openslessink {sink_options}"
+                },
+                "PCM_STREAM": {
+                    "gstPipeline": "appsrc name=stream-src format=time ! {input_media_type} ! volume name=volume0 ! audioresample ! openslessink {sink_options}",
+                    "streamMode": true
+                },
+                "AUDIO_FILE": {
+                    "deviceName": "default",
+                    "gstPipeline": "filesrc location={file_path} ! decodebin ! audioconvert ! audioresample ! volume name=volume0 ! openslessink {sink_options}"
+                }
+            }
+        }
+    },
+    "mediad": {
+        "playbackParams": {
+            "gstPipeline": " souphttpsrc name=yio_souphttpsrc {souphttpsrc_config} user-agent=\"YandexStation_2/__QUASAR_VERSION_PLACEHOLDER__ (YandexIO)\" location={uri} ! decodebin use-buffering=true ! {opt_normalization} ! volume name=volume0 ! audioconvert ! audioresample ! capsfilter name=capsfilter0 caps=\"audio/x-raw\" ! volume name=equalizer-preamp ! equalizer-nbands name=equalizer ! spectrum interval=40000000 bands=513 threshold=-80 ! openslessink {sink_options}"
+        },
+        "Logging": {
+            "level": "info"
+        },
+        "Minidump": {
+            "moveToMetrica": true,
+            "saveExceptionMessage": true
+        },
+        "disconnectBtOnStop": true
+    },
+    "multiroomd": {
+        "latency_ms": -115
+    },
+    "soundd": {
+        "soundsPath": "${QUASAR}/sounds"
+    },
+    "sound_initd": {
+        "firstrundHttpClientTimeoutSec": 130
+    },
+    "audiosender": {
+        "availableChannels": [
+            "raw_mic_0",
+            "raw_mic_1",
+            "raw_mic_2",
+            "raw_mic_3",
+            "raw_mic_4",
+            "raw_mic_5",
+            "raw_mic_6",
+            "raw_spk_0",
+            "raw_spk_1",
+            "vqe",
+            "raw_rcu",
+            "lb_0",
+            "lb_1"
+        ],
+        "dumpingChannels": [
+            "raw_mic_0",
+            "raw_mic_1",
+            "raw_mic_2",
+            "raw_mic_3",
+            "raw_mic_4",
+            "raw_mic_5",
+            "raw_mic_6",
+            "raw_spk_0",
+            "raw_spk_1",
+            "vqe",
+            "lb_0",
+            "lb_1"
+        ],
+        "historySeconds": 10,
+        "playerChannelName": "vqe",
+        "spotterChannelName": "vqe",
+        "logLevel": "debug",
+        "spotterModelPath": "${QUASAR}/spotter_models/activation/alisa"
+    },
+    "spectrogram_animation": {
+        "port": 9923
+    },
+    "led_screen": {
+        "port": 9918
+    },
+    "personalization": {
+        "storagePath": "${DATA}/data/bio_storage.json"
+    }
+}

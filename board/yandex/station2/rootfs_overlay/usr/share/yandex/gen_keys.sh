@@ -1,0 +1,46 @@
+#!/system/bin/sh
+
+cd /data/quasar
+
+# FIXME: either add openssl and generate keys or get rid of them altogether
+# openssl genrsa -out private.pem 2048
+# openssl rsa -in private.pem -outform PEM -pubout -out public.pem
+
+# FIXME: I have just generated these keys, OK for current stage of device development
+echo '-----BEGIN RSA PRIVATE KEY-----
+MIIEpQIBAAKCAQEAwwxpQm8EsMg5SeuPZudE2D/mUq6KIqaiQWVs+RCEI5yLg+3o
+17ZZd8X6XGWqmljqLUg9g4b7Yl1Oxe/TnA6J1P1UZEnZQYm74/pfb7N3Q+iYi97F
+7gxwZQQWV/EeCJdxveGjE4yUrVHR1yWOoxpfy+CBfMnOW11AlmA7GWreJP02OyBl
+3ts5JQOraFRlZtHo94rMpoyr9z5f7vDGoYoQFbO22jNnvEFhMr3BJRETOoyVyCxC
+8jdXo6FeefBKUDW/9qnln/+M4LwRKLWY1Ixr4SVUV1uMHewnFb/jy4wqw7Mnw9vI
+oDqNSj7JBpyolnraUorjpqoNZrerdV5XiKf+gwIDAQABAoIBABrNo9FbTDu26Bh+
+ZHBxq4ZEEbSfA6CLYZS3CWiYmnACXTG+CddK2bSZ4jO8TNt1CIk8eieO7xCvXdnZ
+gSza2poITgaSF2boNIe5qk/BS8xrNDtUW8LAttlK3H8tRUFM/nZngW94TB4dNkbo
+hFdpkmyD54dsfA0WHYAMrVJq2ygd3k8F1aPxl5lcSsbVnXpjGUc3e/82YJ45jySY
+FzNF6iUGpiT7nSlGZhMQCKbcsW8bcvzgAiL+K/gzQDmBKFqP17XQOH9ngjgTA47k
+t59Vf8BqewcFSGnZO5acAWwMGc2k8i/0Oo6b/hY0705pUdGEsnItxO6VZ8FpM1MA
+MQJGi1ECgYEA6qKqH9c8DZbMuJsOoke53oMdxzHnVdzPIGCp1e2t456Ik3dT/sdl
+UwULLFb+ijvB+DKyD0/nFPzJKOYORugQH1lcJ2v2ODo8Ye/0rtzP7rscQ9jqPCkt
+4KRvbaO9B++imAc9lt8ajmtMxPFuJXmIQgZ+zMfsiEDyC6YLIHyqyoUCgYEA1M76
+YFurWWg9xEQF6N7V/VAwqvxlNpc3qnz1l6KaPjuuCGR4rRh1+DFGr6uGj0ErFsfu
+xjlqKDSYo0dSd/WWL0Nsmq6bZD1KFZzqzGdcGHfH0LimMyhCo+j/RwZH1b7lE0Ov
+HxVczm2cwNi7NjoKap7uClpTJGu6deeryeExZ2cCgYEAzxmgu9YIxZ3TOSZztj1F
+C+gDQq0Dmb/6eoOXpKHTmFN4DWGIHBv3jV2oTQzEQ1MXlHF6xRUrzFSLYbQd6ewv
+PtxrAMjEXUDZx0A7YpS4W+l/u0sdBNj8C4pYaBfcY8LaawIJFL/7+rUu366SIDWz
+VUPSbAIS/vkEK8/1hklDntkCgYEAxZ8gK/N1ACYpleWFh2fIWODrER4p77Ql4ZEB
+kLtTeY96YhjLaBNbGgzIk8I5xzbBiPpJ5pLS3ltZk+db0kKiIWn/pPWZIFE6Ry/d
+a8xgXeh+Cnou/TraB9ULmy1d8ETB/k3QhpEUCi8Ibp3V3NmxaqoEbGDM7PmNwohN
+o8AYXOkCgYEAzYB4U5RWL1Xog/R/do2VHLLwZ4maYNQ4uErMCNYjB9xPudlL63rr
+BuvCcWfn2jcpDUFoTA1Cefyuby40/OpJKxpVsxFMxswjLcbjCVG/yOyXU6jPSrkC
+c31ZxbFmWwib+Ywfnttq3L0FjVNrK+eTSgt8OFM3RpHkvA4EE8J+UfU=
+-----END RSA PRIVATE KEY-----' > private.pem
+
+echo '-----BEGIN PUBLIC KEY-----
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAwwxpQm8EsMg5SeuPZudE
+2D/mUq6KIqaiQWVs+RCEI5yLg+3o17ZZd8X6XGWqmljqLUg9g4b7Yl1Oxe/TnA6J
+1P1UZEnZQYm74/pfb7N3Q+iYi97F7gxwZQQWV/EeCJdxveGjE4yUrVHR1yWOoxpf
+y+CBfMnOW11AlmA7GWreJP02OyBl3ts5JQOraFRlZtHo94rMpoyr9z5f7vDGoYoQ
+FbO22jNnvEFhMr3BJRETOoyVyCxC8jdXo6FeefBKUDW/9qnln/+M4LwRKLWY1Ixr
+4SVUV1uMHewnFb/jy4wqw7Mnw9vIoDqNSj7JBpyolnraUorjpqoNZrerdV5XiKf+
+gwIDAQAB
+-----END PUBLIC KEY-----' > public.pem

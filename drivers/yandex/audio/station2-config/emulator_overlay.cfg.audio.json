@@ -1,0 +1,24 @@
+{
+    "audiod": {
+        "audioDevice": {
+            "device": "tcp",
+            "bind": "0.0.0.0",
+            "port": 10000
+        },
+        "brokenMicDetector": {
+            "enabled": false
+        },
+        "defaultVqeType": "no"
+    },
+    "common": {
+        "deviceType": "development",
+        "cryptography": {
+            "cryptographyType": "plainFile",
+            "devicePrivateKeyPath": "${DATA}/private.pem",
+            "devicePublicKeyPath": "${DATA}/public.pem",
+            "privateKeyPath": "${DATA}/private.pem",
+            "publicKeyPath": "${DATA}/public.pem",
+            "plainFileRsaPadding": "4"
+        }
+    }
+}
