@@ -1,0 +1,78 @@
+#pragma once
+
+#include <smart_devices/libs/zigbee/zigbee.h>
+#include <smart_devices/libs/zigbee/zcl/i_cluster.h>
+#include <smart_devices/libs/zigbee/zcl/types.h>
+
+namespace zigbee {
+
+    class Endpoint;
+
+} // namespace zigbee
+
+namespace zigbee::zcl {
+
+class GenericCluster : public ICluster {
+public:
+    enum class CommandId : uint8_t {
+{{#zcl_global_commands}}
+        {{label}} = {{asHex code 2}},
+{{/zcl_global_commands}}
+    };
+
+public:
+    GenericCluster(std::weak_ptr<Endpoint> endpoint, uint16_t clusterId, ZclDirection direction);
+    GenericCluster(std::weak_ptr<Endpoint> endpoint, uint16_t clusterId, std::optional<uint16_t> manufacturerCode, ZclDirection direction);
+
+    uint16_t getClusterId() const override;
+    std::optional<uint16_t> getManufacturerCode() const override;
+    ZclDirection getDirection() const override;
+
+    void handleCommand(const ZclHeader& header, const std::vector<uint8_t>& payload) override;
+
+    void bind() override;
+
+protected:
+    void sendCommand(ZclFrameType frameType, uint8_t commandId, const std::vector<uint8_t>& payload) override;
+
+private:
+    void handleGlobalCommand(const ZclHeader& header, ZclStream& stream);
+    virtual void handleClusterSpecificCommand(const ZclHeader& header, ZclStream& stream);
+
+public:
+{{#zcl_global_commands}}
+    void {{asCamelCased label}}(
+{{#zcl_command_arguments}}
+{{#unless isArray}}
+        zcl::{{asCamelCased type false}} {{asCamelCased label}}{{#not_last}},{{/not_last}}
+{{else}}
+        std::vector<zcl::{{asCamelCased type false}}> {{asCamelCased label}}s{{#not_last}},{{/not_last}}
+{{/unless}}
+{{/zcl_command_arguments}}
+    );
+
+{{/zcl_global_commands}}
+
+public:
+{{#zcl_global_commands}}
+    virtual void on{{label}}(
+{{#zcl_command_arguments}}
+{{#unless isArray}}
+        zcl::{{asCamelCased type false}} {{asCamelCased label}}{{#not_last}},{{/not_last}}
+{{else}}
+        std::vector<zcl::{{asCamelCased type false}}> {{asCamelCased label}}s{{#not_last}},{{/not_last}}
+{{/unless}}
+{{/zcl_command_arguments}}
+    );
+
+{{/zcl_global_commands}}
+
+private:
+    std::weak_ptr<Endpoint> endpoint_;
+
+    uint16_t clusterId_;
+    std::optional<uint16_t> manufacturerCode_;
+    ZclDirection direction_;
+};
+
+} // namespace zigbee::zcl

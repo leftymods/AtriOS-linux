@@ -19,26 +19,132 @@ HEIGHT = 16
 BPP = 3
 FRAME_SIZE = WIDTH * HEIGHT * BPP
 
-# 5x13 seven-segment clock face.  The 25x16 panel is tall, so use the
-# height: 2-row horizontal bars, 1-pixel vertical strokes and a 2-row
-# colon.  The glyphs keep blank side bearings, so adjacent minute digits
-# still read as separate characters.
-FONT = {
-    '0': [0b01110, 0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110, 0b01110],
-    '1': [0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110, 0b01110],
-    '2': [0b01110, 0b01110, 0b10001, 0b00001, 0b00001, 0b00010, 0b00100, 0b01000, 0b10000, 0b10000, 0b10000, 0b11111, 0b11111],
-    '3': [0b11110, 0b11110, 0b00001, 0b00001, 0b00001, 0b01110, 0b01110, 0b00001, 0b00001, 0b00001, 0b00001, 0b11110, 0b11110],
-    '4': [0b00010, 0b00110, 0b01010, 0b10010, 0b10010, 0b10010, 0b11111, 0b11111, 0b00010, 0b00010, 0b00010, 0b00010, 0b00010],
-    '5': [0b11111, 0b11111, 0b10000, 0b10000, 0b10000, 0b11110, 0b11110, 0b00001, 0b00001, 0b00001, 0b00001, 0b11110, 0b11110],
-    '6': [0b00110, 0b01100, 0b10000, 0b10000, 0b10000, 0b11110, 0b11110, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110, 0b01110],
-    '7': [0b11111, 0b11111, 0b00001, 0b00010, 0b00010, 0b00100, 0b00100, 0b01000, 0b01000, 0b01000, 0b01000, 0b01000, 0b01000],
-    '8': [0b01110, 0b01110, 0b10001, 0b10001, 0b10001, 0b01110, 0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110, 0b01110],
-    '9': [0b01110, 0b01110, 0b10001, 0b10001, 0b10001, 0b01111, 0b01111, 0b00001, 0b00001, 0b00001, 0b00010, 0b01100, 0b01100],
+# Official 5x9 digits from Yandex clock_large.gif font:
+# 4 digits (5px wide) + 1 colon (1px wide) + 4 spaces (1px wide) = 25px total width!
+# Perfectly fills and balances across all 25 columns of the matrix.
+FONT_LARGE_5X9 = {
+    '0': [
+        0b01110,
+        0b10001,
+        0b10001,
+        0b10001,
+        0b10001,
+        0b10001,
+        0b10001,
+        0b10001,
+        0b01110,
+    ],
+    '1': [
+        0b00100,
+        0b01100,
+        0b00100,
+        0b00100,
+        0b00100,
+        0b00100,
+        0b00100,
+        0b00100,
+        0b01110,
+    ],
+    '2': [
+        0b01110,
+        0b10001,
+        0b00001,
+        0b00001,
+        0b00110,
+        0b01000,
+        0b10000,
+        0b10000,
+        0b11111,
+    ],
+    '3': [
+        0b01110,
+        0b10001,
+        0b00001,
+        0b00001,
+        0b01110,
+        0b00001,
+        0b00001,
+        0b10001,
+        0b01110,
+    ],
+    '4': [
+        0b10001,
+        0b10001,
+        0b10001,
+        0b10001,
+        0b01111,
+        0b00001,
+        0b00001,
+        0b00001,
+        0b00001,
+    ],
+    '5': [
+        0b11111,
+        0b10000,
+        0b10000,
+        0b11110,
+        0b00001,
+        0b00001,
+        0b00001,
+        0b10001,
+        0b01110,
+    ],
+    '6': [
+        0b01110,
+        0b10001,
+        0b10000,
+        0b10000,
+        0b11110,
+        0b10001,
+        0b10001,
+        0b10001,
+        0b01110,
+    ],
+    '7': [
+        0b11111,
+        0b00001,
+        0b00001,
+        0b00010,
+        0b00010,
+        0b00100,
+        0b00100,
+        0b00100,
+        0b00100,
+    ],
+    '8': [
+        0b01110,
+        0b10001,
+        0b10001,
+        0b10001,
+        0b01110,
+        0b10001,
+        0b10001,
+        0b10001,
+        0b01110,
+    ],
+    '9': [
+        0b01110,
+        0b10001,
+        0b10001,
+        0b10001,
+        0b01111,
+        0b00001,
+        0b00001,
+        0b10001,
+        0b01110,
+    ],
+    ':': [
+        0b0,
+        0b0,
+        0b1,
+        0b0,
+        0b0,
+        0b0,
+        0b1,
+        0b0,
+        0b0,
+    ],
 }
-
-# Single centered colon, 2-row dots, matching the 13-row digits.
-CLOCK_COLON = [0b000, 0b000, 0b010, 0b010, 0b000, 0b000, 0b000, 0b010, 0b010, 0b000, 0b000, 0b000, 0b000]
-CLOCK_COLON_WIDTH = 3
 
 def set_pixel(buf, x, y, brightness):
     if 0 <= x < WIDTH and 0 <= y < HEIGHT:
@@ -58,23 +164,23 @@ def send_frame(buf):
 
 def main():
     last_rendered = ""
+    # Positions across 25 columns:
+    # D0: 0..4, gap: 5, D1: 6..10, gap: 11, : at 12, gap: 13, D2: 14..18, gap: 19, D3: 20..24
+    x_positions = [0, 6, 12, 14, 20]
+
     while True:
         now = time.strftime("%H:%M")
         if now != last_rendered:
             buf = bytearray(FRAME_SIZE)
-            x_positions = [0, 6, 12, 15, 20]
             for char, x_start in zip(now, x_positions):
-                if char == ':':
-                    glyph = CLOCK_COLON
-                    width = CLOCK_COLON_WIDTH
-                else:
-                    glyph = FONT.get(char, [0]*13)
-                    width = 5
+                glyph = FONT_LARGE_5X9.get(char, [0]*9)
+                width = 1 if char == ':' else 5
+                # Center vertically: 9 rows inside 16 -> start at y = 3 (rows 3..11)
                 for row_idx, row_bits in enumerate(glyph):
-                    y = 1 + row_idx
+                    y = 3 + row_idx
                     for col_idx in range(width):
                         if (row_bits >> (width - 1 - col_idx)) & 1:
-                            set_pixel(buf, x_start + col_idx, y, 200)
+                            set_pixel(buf, x_start + col_idx, y, 220)
             send_frame(buf)
             last_rendered = now
         time.sleep(10)
