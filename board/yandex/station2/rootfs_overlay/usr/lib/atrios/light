@@ -539,7 +539,7 @@ def ring_rainbow(speed=0.05, duration=5.0):
         pass
     ring_clear()
 
-def ring_volume(pct):
+def ring_volume(pct, fade=True):
     pct = max(0, min(100, int(pct)))
     active = int(round(RING_LEDS * (pct / 100.0)))
     frame = bytearray(RING_SIZE)
@@ -551,6 +551,18 @@ def ring_volume(pct):
             frame[i * 3 + 2] = 255
     ring_send_frame(frame)
     print(f"[Ring] Volume arc: {pct}% ({active}/{RING_LEDS} LEDs lit).", flush=True)
+    if fade and active > 0:
+        time.sleep(1.0)
+        steps = 15
+        for s in range(steps):
+            prog = (s + 1) / float(steps)
+            b = 0.5 * (1.0 + math.cos(math.pi * prog))
+            dimmed = bytearray(RING_SIZE)
+            for j in range(RING_SIZE):
+                dimmed[j] = int(frame[j] * b)
+            ring_send_frame(dimmed)
+            time.sleep(0.04)
+        ring_clear()
 
 def main():
     parser = argparse.ArgumentParser(description="AtriOS Unified Light & Display Controller")

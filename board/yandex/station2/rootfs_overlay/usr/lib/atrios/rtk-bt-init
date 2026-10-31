@@ -32,6 +32,7 @@ def reset_bt_rfkill():
     global UART_DEV
     UART_DEV = find_uart_dev()
     reset_ok = False
+    # 1. Pulse Linux kernel rfkill subsystem: state 0 = BLOCKED (OFF), state 1 = UNBLOCKED (ON)
     for rf in glob.glob("/sys/class/rfkill/rfkill*"):
         p_type = rf + "/type"
         p_state = rf + "/state"
@@ -39,32 +40,27 @@ def reset_bt_rfkill():
             try:
                 t = open(p_type).read().strip()
                 if t == "bluetooth":
-                    # rfkill state 0 = unblocked -> bt_set_block(blocked=0)
-                    # -> "BT_RADIO going: on" + bt_power_on().  State 1 is
-                    # blocked and powers the chip down, so the sequence must
-                    # finish on 0 or the UART stays silent.
                     with open(p_state, "w") as f:
-                        f.write("1\n")          # blocked -> power off
+                        f.write("0\n")          # blocked -> power off
                     time.sleep(0.15)
                     with open(p_state, "w") as f:
-                        f.write("0\n")          # unblocked -> power on
+                        f.write("1\n")          # unblocked -> power on
                     time.sleep(0.50)
                     state = open(p_state).read().strip()
-                    if state != "0":
+                    if state != "1":
                         with open(p_state, "w") as f:
-                            f.write("0\n")
+                            f.write("1\n")
                         time.sleep(0.50)
                         state = open(p_state).read().strip()
                     print(f"[BT] rfkill {os.path.basename(rf)} state={state}",
                           flush=True)
-                    reset_ok = (state == "0")
-                    if reset_ok:
-                        return True
+                    if state == "1":
+                        reset_ok = True
             except Exception:
                 pass
 
-    # Fallback to direct sysfs GPIO pulse if rfkill is absent or failed (GPIOX_18 / Pin 84)
-    for gpio_num in (494, 493, 84):
+    # 2. Hardware reset via direct sysfs GPIO pulse (Pin 84 = GPIOX_18 BT_EN)
+    for gpio_num in (84, 494, 493):
         p_dir = f"/sys/class/gpio/gpio{gpio_num}/direction"
         p_val = f"/sys/class/gpio/gpio{gpio_num}/value"
         if not os.path.exists(p_val):
@@ -84,7 +80,8 @@ def reset_bt_rfkill():
                     f.write("1\n")
                 time.sleep(0.40)
                 print(f"[BT] Pulsed hardware reset via gpio{gpio_num}", flush=True)
-                return True
+                reset_ok = True
+                break
             except Exception:
                 pass
     return reset_ok
