@@ -226,10 +226,14 @@ def apply_saved_volume():
 
 
 def adjust_volume(step):
-    global current_volume, volume_dirty, last_volume_change_time, ring_active, is_fading, last_volume_time
+    global current_volume, display_volume, volume_dirty, last_volume_change_time, ring_active, is_fading, last_volume_time
     current_volume = max(0, min(100, current_volume + step))
-    ring_active = True
-    is_fading = False
+    if current_volume <= 0:
+        display_volume = 0.0
+        clear_ring()
+    else:
+        ring_active = True
+        is_fading = False
     last_volume_time = time.time()
     save_state_volume(current_volume)
     set_volume(current_volume)
@@ -281,26 +285,54 @@ def show_mute_ring():
     set_ring_frame(b"\x00" * (NUM_LEDS * 3))
 
 
+def get_volume_color(pct):
+    """Authentic Yandex Station 2/Max volume gradient (from vendor volume.led):
+    0..25%:   Cyan -> Mint       (0, 154, 69) -> (41, 236, 69)
+    25..50%:  Mint -> Yellow-Grn (41, 236, 69) -> (128, 255, 69)
+    50..75%:  Yellow -> Amber    (241, 255, 69) -> (255, 201, 39)
+    75..90%:  Amber -> Orange    (255, 201, 39) -> (251, 127, 6)
+    90..100%: Orange -> Red     (245, 85, 0) -> (227, 9, 0)
+    """
+    p = max(0.0, min(100.0, float(pct))) / 100.0
+    if p < 0.25:
+        t = p / 0.25
+        return (int(0 + 41 * t), int(154 + 82 * t), int(69))
+    elif p < 0.50:
+        t = (p - 0.25) / 0.25
+        return (int(41 + 87 * t), int(236 + 19 * t), int(69))
+    elif p < 0.75:
+        t = (p - 0.50) / 0.25
+        return (int(128 + 127 * t), int(255 - 54 * t), int(69 - 30 * t))
+    elif p < 0.90:
+        t = (p - 0.75) / 0.15
+        return (int(255 - 4 * t), int(201 - 74 * t), int(39 - 33 * t))
+    else:
+        t = (p - 0.90) / 0.10
+        return (int(251 - 24 * t), int(127 - 118 * t), int(6 * (1.0 - t)))
+
+
 def show_volume_ring(vol_pct, brightness=1.0):
     b = max(0.0, min(1.0, float(brightness)))
-    if vol_pct <= 0 or b <= 0.001:
+    if vol_pct <= 0.1 or b <= 0.001:
         set_ring_frame(b"\x00" * (NUM_LEDS * 3))
         return
 
-    exact = NUM_LEDS * max(0, min(100, vol_pct)) / 100.0
+    exact = NUM_LEDS * max(0.0, min(100.0, float(vol_pct))) / 100.0
     full = int(exact)
     frac = exact - full
     frame = bytearray(NUM_LEDS * 3)
-    for i in range(full):
-        ratio = i / max(1, NUM_LEDS - 1)
-        frame[i * 3 + 0] = int(180 * ratio * b)
-        frame[i * 3 + 1] = int(220 * (1.0 - ratio) * b)
-        frame[i * 3 + 2] = int(255 * b)
-    if full < NUM_LEDS and frac > 0:
-        ratio = full / max(1, NUM_LEDS - 1)
-        frame[full * 3 + 0] = int(180 * ratio * frac * b)
-        frame[full * 3 + 1] = int(220 * (1.0 - ratio) * frac * b)
-        frame[full * 3 + 2] = int(255 * frac * b)
+    r, g, b_col = get_volume_color(vol_pct)
+
+    for i in range(min(full, NUM_LEDS)):
+        frame[i * 3 + 0] = int(r * b)
+        frame[i * 3 + 1] = int(g * b)
+        frame[i * 3 + 2] = int(b_col * b)
+
+    if full < NUM_LEDS and frac > 0.04:
+        frame[full * 3 + 0] = int(r * frac * b)
+        frame[full * 3 + 1] = int(g * frac * b)
+        frame[full * 3 + 2] = int(b_col * frac * b)
+
     set_ring_frame(frame)
 
 
@@ -436,28 +468,32 @@ def main():
 
             # Smooth animation & fade-out of volume ring
             if ring_active and not mic_muted:
-                # 1. Smoothly interpolate display_volume towards current_volume (60 FPS glide)
-                diff = current_volume - display_volume
-                if abs(diff) > 0.1:
-                    display_volume += diff * 0.35
+                if current_volume <= 0:
+                    display_volume = 0.0
+                    clear_ring()
                 else:
-                    display_volume = float(current_volume)
-
-                # 2. Fade out handling
-                if not is_fading:
-                    if now - last_volume_time >= FADE_IDLE_DELAY:
-                        is_fading = True
-                        fade_start_time = now
-                    show_volume_ring(display_volume, brightness=1.0)
-                else:
-                    elapsed = now - fade_start_time
-                    if elapsed >= FADE_DURATION:
-                        clear_ring()
+                    # 1. Smoothly interpolate display_volume towards current_volume (60 FPS glide)
+                    diff = current_volume - display_volume
+                    if abs(diff) > 0.1:
+                        display_volume += diff * 0.40
                     else:
-                        progress = elapsed / FADE_DURATION
-                        # Smooth S-curve easing
-                        brightness = 0.5 * (1.0 + math.cos(math.pi * progress))
-                        show_volume_ring(display_volume, brightness=brightness)
+                        display_volume = float(current_volume)
+
+                    # 2. Fade out handling
+                    if not is_fading:
+                        if now - last_volume_time >= FADE_IDLE_DELAY:
+                            is_fading = True
+                            fade_start_time = now
+                        show_volume_ring(display_volume, brightness=1.0)
+                    else:
+                        elapsed = now - fade_start_time
+                        if elapsed >= FADE_DURATION:
+                            clear_ring()
+                        else:
+                            progress = elapsed / FADE_DURATION
+                            # Smooth S-curve easing
+                            brightness = 0.5 * (1.0 + math.cos(math.pi * progress))
+                            show_volume_ring(display_volume, brightness=brightness)
 
             for fd in rlist:
                 try:

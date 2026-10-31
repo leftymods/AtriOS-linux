@@ -44,11 +44,12 @@ case "$1" in
     for rfk in /sys/class/rfkill/rfkill*; do
       [ -f "$rfk/state" ] || continue
       [ "$(cat "$rfk/type" 2>/dev/null)" = "bluetooth" ] || continue
-      echo 1 > "$rfk/state" 2>/dev/null || true
-      usleep 150000 2>/dev/null || sleep 1
+      # Amlogic rfkill polarity: state=1 is POWER ON (AML_BT: going ON), state=0 is POWER OFF
       echo 0 > "$rfk/state" 2>/dev/null || true
+      usleep 150000 2>/dev/null || sleep 1
+      echo 1 > "$rfk/state" 2>/dev/null || true
       usleep 400000 2>/dev/null || sleep 1
-      echo "[AtriOS] Bluetooth rfkill state=$(cat "$rfk/state" 2>/dev/null)"
+      echo "[AtriOS] Bluetooth rfkill state=$(cat "$rfk/state" 2>/dev/null) (powered on)"
       BT_RESET_DONE=1
     done
     if [ "$BT_RESET_DONE" -eq 0 ]; then
