@@ -275,15 +275,27 @@ def show_volume_ring(vol_pct):
     frame = bytearray(NUM_LEDS * 3)
     for i in range(full):
         ratio = i / max(1, NUM_LEDS - 1)
-        frame[i * 3 + 0] = int(180 * ratio)
-        frame[i * 3 + 1] = int(220 * (1.0 - ratio))
-        frame[i * 3 + 2] = 255
+        if ratio < 0.5:
+            r = int(255 * (ratio * 2.0))
+            g = 255
+        else:
+            r = 255
+            g = int(255 * (2.0 - ratio * 2.0))
+        frame[i * 3 + 0] = r
+        frame[i * 3 + 1] = g
+        frame[i * 3 + 2] = 0
     if full < NUM_LEDS and frac > 0.01:
         eased_frac = frac ** 2.2
         ratio = full / max(1, NUM_LEDS - 1)
-        frame[full * 3 + 0] = int(180 * ratio * eased_frac)
-        frame[full * 3 + 1] = int(220 * (1.0 - ratio) * eased_frac)
-        frame[full * 3 + 2] = int(255 * eased_frac)
+        if ratio < 0.5:
+            r = int(255 * (ratio * 2.0))
+            g = 255
+        else:
+            r = 255
+            g = int(255 * (2.0 - ratio * 2.0))
+        frame[full * 3 + 0] = int(r * eased_frac)
+        frame[full * 3 + 1] = int(g * eased_frac)
+        frame[full * 3 + 2] = 0
     set_ring_frame(frame)
 
 
