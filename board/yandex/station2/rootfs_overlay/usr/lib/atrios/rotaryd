@@ -29,7 +29,7 @@ import math
 FB_RING = "/dev/fb5"
 NUM_LEDS = 24
 CARD = "AMLAUGESOUND"
-VOLUME_STEP = 4  # percent per detent; ring fills a full circle in 25 detents
+VOLUME_STEP = 2  # percent per detent; finer volume control (50 detents full scale)
 STATE_DIR = "/var/lib/atrios"
 STATE_FILE = STATE_DIR + "/volume"
 DEFAULT_VOLUME = 60
@@ -264,21 +264,22 @@ def show_mute_ring():
     set_ring_frame(b"\x00" * (NUM_LEDS * 3))
 
 
-def calc_led_color(ratio):
-    """Return (r, g, 0) for a given ratio 0.0..1.0 along the ring.
-    0.00..0.30: Green -> Yellow
-    0.30..0.60: Yellow -> Red
-    0.60..1.00: Continued solid Red across the top volume sector
+def calc_led_color(ratio, vol_pct):
+    """Return (r, g, 0) for a given ratio (0.0..1.0) and volume percent (0..100).
+    As volume approaches 100%, the red front advances backwards around the ring,
+    looping around to turn the entire ring solid red at 100%.
     """
-    if ratio < 0.30:
-        r = int(255 * (ratio / 0.30))
+    red_advance = max(0.0, min(1.0, (float(vol_pct) - 50.0) / 50.0))
+    red_threshold = 1.0 - red_advance
+    if ratio >= red_threshold:
+        return 255, 0, 0
+    rel = ratio / max(0.01, red_threshold)
+    if rel < 0.5:
+        r = int(255 * (rel * 2.0))
         g = 255
-    elif ratio < 0.60:
-        r = 255
-        g = int(255 * (1.0 - (ratio - 0.30) / 0.30))
     else:
         r = 255
-        g = 0
+        g = int(255 * (2.0 - rel * 2.0))
     return r, g, 0
 
 
@@ -287,21 +288,20 @@ def show_volume_ring(vol_pct, brightness=1.0):
         set_ring_frame(b"\x00" * (NUM_LEDS * 3))
         return
     brightness = max(0.0, min(1.0, float(brightness)))
-    # Fractional last LED with perceptual gamma easing for smooth turn-on
     exact = NUM_LEDS * max(0.0, min(100.0, float(vol_pct))) / 100.0
     full = int(exact)
     frac = exact - full
     frame = bytearray(NUM_LEDS * 3)
     for i in range(full):
         ratio = i / max(1, NUM_LEDS - 1)
-        r, g, _ = calc_led_color(ratio)
+        r, g, _ = calc_led_color(ratio, vol_pct)
         frame[i * 3 + 0] = int(r * brightness)
         frame[i * 3 + 1] = int(g * brightness)
         frame[i * 3 + 2] = 0
     if full < NUM_LEDS and frac > 0.01:
         eased_frac = (frac ** 2.2) * brightness
         ratio = full / max(1, NUM_LEDS - 1)
-        r, g, _ = calc_led_color(ratio)
+        r, g, _ = calc_led_color(ratio, vol_pct)
         frame[full * 3 + 0] = int(r * eased_frac)
         frame[full * 3 + 1] = int(g * eased_frac)
         frame[full * 3 + 2] = 0
@@ -399,14 +399,14 @@ def main():
     last_enforce = time.time()
     last_scan = time.time()
 
-    FADE_START_DELAY = 1.3
-    FADE_DURATION = 0.7
+    FADE_START_DELAY = 0.8
+    FADE_DURATION = 0.45
 
     try:
         while True:
             now = time.time()
             in_fade = (not mic_muted and last_volume_time > 0 and (now - last_volume_time > FADE_START_DELAY))
-            poll_timeout = 0.03 if in_fade else 0.15
+            poll_timeout = 0.015 if in_fade else 0.1
             fds_to_watch = list(open_fds.keys())
             rlist, _, _ = select.select(fds_to_watch, [], [], poll_timeout) if fds_to_watch else ([], [], poll_timeout)
             now = time.time()
@@ -417,7 +417,7 @@ def main():
 
             # Watchdog: enforce saved volume only when knob is idle
             if now - last_enforce > 1.0:
-                if not volume_dirty and (now - last_volume_time > 2.2):
+                if not volume_dirty and (now - last_volume_time > 1.8):
                     enforce_volume()
                 last_enforce = now
 
@@ -426,13 +426,13 @@ def main():
                 scan_and_open_devices(open_fds)
                 last_scan = now
 
-            # Smooth fade-out of volume bar on inactivity
+            # Smooth cubic fade-out of volume bar on inactivity
             if not mic_muted and last_volume_time > 0:
                 elapsed = now - last_volume_time
                 if elapsed > FADE_START_DELAY:
-                    fade_prog = (elapsed - FADE_START_DELAY) / FADE_DURATION
-                    if fade_prog < 1.0:
-                        fade_factor = (1.0 - fade_prog) ** 1.8
+                    t = min(1.0, (elapsed - FADE_START_DELAY) / FADE_DURATION)
+                    if t < 1.0:
+                        fade_factor = 1.0 - (3.0 * t * t - 2.0 * t * t * t)
                         show_volume_ring(current_volume, brightness=fade_factor)
                     else:
                         clear_ring()

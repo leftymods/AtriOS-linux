@@ -543,18 +543,21 @@ def ring_volume(pct):
     pct = max(0, min(100, int(pct)))
     active = int(round(RING_LEDS * (pct / 100.0)))
     frame = bytearray(RING_SIZE)
+    red_advance = max(0.0, min(1.0, (float(pct) - 50.0) / 50.0))
+    red_threshold = 1.0 - red_advance
     for i in range(RING_LEDS):
         if i < active:
             ratio = i / max(1, RING_LEDS - 1)
-            if ratio < 0.30:
-                r = int(255 * (ratio / 0.30))
-                g = 255
-            elif ratio < 0.60:
-                r = 255
-                g = int(255 * (1.0 - (ratio - 0.30) / 0.30))
+            if ratio >= red_threshold:
+                r, g = 255, 0
             else:
-                r = 255
-                g = 0
+                rel = ratio / max(0.01, red_threshold)
+                if rel < 0.5:
+                    r = int(255 * (rel * 2.0))
+                    g = 255
+                else:
+                    r = 255
+                    g = int(255 * (2.0 - rel * 2.0))
             frame[i * 3 + 0] = r
             frame[i * 3 + 1] = g
             frame[i * 3 + 2] = 0
