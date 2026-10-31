@@ -173,6 +173,17 @@ case "$CMD" in
           hciconfig hci0 class 0x240414 2>/dev/null || true
           hciconfig hci0 name "Yandex Station Max" 2>/dev/null || true
           hciconfig hci0 piscan 2>/dev/null || true
+          hciconfig hci0 sspmode 1 2>/dev/null || true
+          hciconfig hci0 noauth 2>/dev/null || true
+          command -v gdbus >/dev/null 2>&1 && {
+            gdbus call --system --dest org.bluez --object-path /org/bluez/hci0 --method org.freedesktop.DBus.Properties.Set org.bluez.Adapter1 Pairable '<true>' >/dev/null 2>&1 || true
+            gdbus call --system --dest org.bluez --object-path /org/bluez/hci0 --method org.freedesktop.DBus.Properties.Set org.bluez.Adapter1 Discoverable '<true>' >/dev/null 2>&1 || true
+          }
+          if [ -x /usr/lib/atrios/bt-agent ] && ! pgrep -f /usr/lib/atrios/bt-agent >/dev/null 2>&1; then
+            echo "Starting BlueZ auto-pairing agent..."
+            python3 /usr/lib/atrios/bt-agent &
+            sleep 0.5
+          fi
           if ! pidof bluetoothd >/dev/null 2>&1; then
             echo "Starting BlueZ bluetoothd daemon..."
             /usr/libexec/bluetooth/bluetoothd -C &
@@ -186,6 +197,17 @@ case "$CMD" in
           hciconfig hci0 class 0x240414 2>/dev/null || true
           hciconfig hci0 name "Yandex Station Max" 2>/dev/null || true
           hciconfig hci0 piscan 2>/dev/null || true
+          hciconfig hci0 sspmode 1 2>/dev/null || true
+          hciconfig hci0 noauth 2>/dev/null || true
+          command -v gdbus >/dev/null 2>&1 && {
+            gdbus call --system --dest org.bluez --object-path /org/bluez/hci0 --method org.freedesktop.DBus.Properties.Set org.bluez.Adapter1 Pairable '<true>' >/dev/null 2>&1 || true
+            gdbus call --system --dest org.bluez --object-path /org/bluez/hci0 --method org.freedesktop.DBus.Properties.Set org.bluez.Adapter1 Discoverable '<true>' >/dev/null 2>&1 || true
+          }
+          if [ -x /usr/lib/atrios/bt-agent ] && ! pgrep -f /usr/lib/atrios/bt-agent >/dev/null 2>&1; then
+            echo "Starting BlueZ auto-pairing agent..."
+            python3 /usr/lib/atrios/bt-agent &
+            sleep 0.5
+          fi
           echo "[OK] Bluetooth Speaker Mode ACTIVE!"
           echo "[OK] Discoverable as: 'Yandex Station Max'"
           echo "[OK] You can now connect from your phone or PC."

@@ -108,6 +108,9 @@ def main():
 
     # 4. Open PTY and attach kernel N_HCI (proto 0 = H4)
     master, slave = pty.openpty()
+    import tty
+    tty.setraw(master)
+    tty.setraw(slave)
     slave_name = os.ttyname(slave)
     print(f"[rtk-bt-bridge] Created PTY {slave_name}, attaching N_HCI discipline...", flush=True)
     fcntl.ioctl(slave, termios.TIOCSETD, struct.pack('i', 15))
@@ -139,10 +142,23 @@ def main():
                                 b0, b1, b2, b3 = dec[0], dec[1], dec[2], dec[3]
                                 plen = ((b1 >> 4) & 0x0F) | (b2 << 4)
                                 ptype = b1 & 0x0F
+                                min_len = 4 + plen + (2 if (b0 & 0x40) else 0)
+                                if len(dec) < min_len:
+                                    continue
+                                if b0 & 0x40:
+                                    calc_crc = bitrev16(crc16_x25(dec[:4 + plen]))
+                                    pkt_crc = (dec[4 + plen] << 8) | dec[4 + plen + 1]
+                                    if calc_crc != pkt_crc:
+                                        continue
                                 payload = dec[4:4 + plen]
 
                                 if b0 & 0x80: # reliable packet, send ACK
-                                    rx_seq = ((b0 & 7) + 1) & 7
+                                    pkt_seq = b0 & 7
+                                    if pkt_seq != rx_seq:
+                                        # Duplicate from controller: re-ACK with current expected seq, do not re-deliver
+                                        os.write(uart_fd, make_ack(rx_seq))
+                                        continue
+                                    rx_seq = (rx_seq + 1) & 7
                                     os.write(uart_fd, make_ack(rx_seq))
 
                                 if ptype == 0x0F: # Link control / keepalive

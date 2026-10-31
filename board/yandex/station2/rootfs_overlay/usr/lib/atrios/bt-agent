@@ -1,0 +1,190 @@
+#!/usr/bin/env python3
+import socket
+import os
+import struct
+import binascii
+import sys
+import time
+import select
+
+def encode_str(s):
+    b = s.encode('utf-8')
+    return struct.pack('<I', len(b)) + b + b'\x00'
+
+def encode_obj(s):
+    return encode_str(s)
+
+def pad(buf, n=8):
+    rem = len(buf) % n
+    if rem != 0:
+        buf.extend(b'\x00' * (n - rem))
+
+class DBusClient:
+    def __init__(self):
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.connect("/var/run/dbus/system_bus_socket")
+        uid = binascii.hexlify(str(os.getuid()).encode('ascii'))
+        self.sock.sendall(b"\0AUTH EXTERNAL " + uid + b"\r\n")
+        resp = self.sock.recv(1024)
+        if not resp.startswith(b"OK"):
+            raise RuntimeError(f"DBus auth failed: {resp}")
+        self.sock.sendall(b"BEGIN\r\n")
+        self.serial = 1
+        self.unique_name = self.hello()
+
+    def make_header(self, msg_type, serial, fields, body_len=0):
+        fields_buf = bytearray()
+        for code, sig, val in fields:
+            pad(fields_buf, 8)
+            fields_buf.append(code)
+            sig_b = sig.encode('ascii')
+            fields_buf.append(len(sig_b))
+            fields_buf.extend(sig_b + b'\x00')
+            if sig in ('s', 'o'):
+                pad(fields_buf, 4)
+            elif sig in ('u',):
+                pad(fields_buf, 4)
+            fields_buf.extend(val)
+
+        hdr_len = len(fields_buf)
+        hdr = bytearray(struct.pack('<BBBBIII', ord('l'), msg_type, 0, 1, body_len, serial, hdr_len))
+        hdr.extend(fields_buf)
+        pad(hdr, 8)
+        return bytes(hdr)
+
+    def hello(self):
+        fields = [
+            (1, 'o', encode_obj('/org/freedesktop/DBus')),
+            (6, 's', encode_str('org.freedesktop.DBus')),
+            (2, 's', encode_str('org.freedesktop.DBus')),
+            (3, 's', encode_str('Hello')),
+        ]
+        pkt = self.make_header(1, self.serial, fields)
+        self.serial += 1
+        self.sock.sendall(pkt)
+        reply = self.read_msg()
+        body = reply['body']
+        if len(body) >= 4:
+            slen = struct.unpack('<I', body[:4])[0]
+            name = body[4:4+slen].decode('utf-8', errors='replace')
+            return name
+        return ""
+
+    def read_msg(self):
+        raw_hdr = bytearray()
+        while len(raw_hdr) < 16:
+            c = self.sock.recv(16 - len(raw_hdr))
+            if not c: return None
+            raw_hdr.extend(c)
+
+        endian, mtype, flags, proto, body_len, serial, fields_len = struct.unpack('<BBBBIII', raw_hdr[:16])
+        rem_hdr = fields_len + (8 - (fields_len % 8)) if (fields_len % 8) != 0 else fields_len
+        full_fields = bytearray()
+        while len(full_fields) < rem_hdr:
+            c = self.sock.recv(rem_hdr - len(full_fields))
+            if not c: return None
+            full_fields.extend(c)
+
+        body = bytearray()
+        while len(body) < body_len:
+            c = self.sock.recv(body_len - len(body))
+            if not c: return None
+            body.extend(c)
+
+        fields_dict = {}
+        idx = 0
+        while idx < fields_len:
+            idx = (idx + 7) & ~7
+            if idx >= fields_len: break
+            code = full_fields[idx]
+            idx += 1
+            if idx >= fields_len: break
+            slen = full_fields[idx]
+            idx += 1
+            sig = full_fields[idx:idx+slen].decode('ascii', errors='replace')
+            idx += slen + 1
+            if sig in ('s', 'o'):
+                idx = (idx + 3) & ~3
+                if idx + 4 > len(full_fields): break
+                vlen = struct.unpack_from('<I', full_fields, idx)[0]
+                idx += 4
+                val = full_fields[idx:idx+vlen].decode('utf-8', errors='replace')
+                idx += vlen + 1
+                fields_dict[code] = val
+            elif sig == 'u':
+                idx = (idx + 3) & ~3
+                val = struct.unpack_from('<I', full_fields, idx)[0]
+                idx += 4
+                fields_dict[code] = val
+            else:
+                break
+
+        return {
+            'type': mtype,
+            'serial': serial,
+            'path': fields_dict.get(1),
+            'interface': fields_dict.get(2),
+            'member': fields_dict.get(3),
+            'reply_serial': fields_dict.get(5),
+            'sender': fields_dict.get(7),
+            'body': bytes(body)
+        }
+
+    def send_method_return(self, dest, reply_serial):
+        fields = [
+            (6, 's', encode_str(dest)),
+            (5, 'u', struct.pack('<I', reply_serial)),
+        ]
+        pkt = self.make_header(2, self.serial, fields)
+        self.serial += 1
+        self.sock.sendall(pkt)
+
+    def register_agent(self, path="/atrios/agent", capability="NoInputNoOutput"):
+        body = bytearray()
+        body.extend(encode_obj(path))
+        pad(body, 4)
+        body.extend(encode_str(capability))
+
+        fields = [
+            (1, 'o', encode_obj('/org/bluez')),
+            (6, 's', encode_str('org.bluez')),
+            (2, 's', encode_str('org.bluez.AgentManager1')),
+            (3, 's', encode_str('RegisterAgent')),
+            (8, 'g', b'\x02os\x00'),
+        ]
+        pkt = self.make_header(1, self.serial, fields, body_len=len(body))
+        self.serial += 1
+        self.sock.sendall(pkt + bytes(body))
+        reply = self.read_msg()
+
+        body = bytearray(encode_obj(path))
+        fields = [
+            (1, 'o', encode_obj('/org/bluez')),
+            (6, 's', encode_str('org.bluez')),
+            (2, 's', encode_str('org.bluez.AgentManager1')),
+            (3, 's', encode_str('RequestDefaultAgent')),
+            (8, 'g', b'\x01o\x00'),
+        ]
+        pkt = self.make_header(1, self.serial, fields, body_len=len(body))
+        self.serial += 1
+        self.sock.sendall(pkt + bytes(body))
+        reply = self.read_msg()
+
+    def loop(self):
+        print("[bt-agent] Agent running and auto-accepting pairing...", flush=True)
+        while True:
+            rlist, _, _ = select.select([self.sock], [], [], 5.0)
+            if self.sock in rlist:
+                msg = self.read_msg()
+                if not msg:
+                    break
+                if msg['type'] == 1:
+                    sender = msg['sender'] or "org.bluez"
+                    member = msg['member']
+                    print(f"[bt-agent] Auto-confirming {member} from {sender}", flush=True)
+                    self.send_method_return(sender, msg['serial'])
+
+if __name__ == '__main__':
+    client = DBusClient()
+    client.register_agent()
+    client.loop()
