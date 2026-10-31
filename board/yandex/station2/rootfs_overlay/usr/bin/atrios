@@ -31,7 +31,7 @@ AtriOS - Yandex Station Max tools
 
   Wireless:
     atrios wifi [scan|connect SSID PASS|power 1|0]
-    atrios bt [init|scan]
+    atrios bt [init|scan|speaker [on|off]]
     atrios zigbee [reset|ping]
 
   Buttons / knob monitor:

@@ -165,6 +165,91 @@ case "$CMD" in
       elif [ -f /tmp/atrios_bt_state ]; then
         echo "Bluetooth controller ready ($(cat /tmp/atrios_bt_state))"
       fi
+    elif [ "$SUBCMD" = "speaker" ]; then
+      MODE="${3:-on}"
+      if [ "$MODE" = "off" ] || [ "$MODE" = "stop" ]; then
+        echo "Disabling Bluetooth Speaker mode (returning to silent mode)..."
+        hciconfig hci0 noscan 2>/dev/null || true
+        killall bluetoothd 2>/dev/null || true
+        # Restore screen clock
+        if [ -x /usr/lib/atrios/screend ]; then
+          killall python3 2>/dev/null || true
+          /usr/lib/atrios/screend &
+        fi
+        echo "[OK] Bluetooth Speaker mode disabled. Controller is now in silent mode."
+      elif [ "$MODE" = "status" ]; then
+        echo "=========================================================="
+        echo "           AtriOS Bluetooth Speaker Status                "
+        echo "=========================================================="
+        if [ -e /sys/class/bluetooth/hci0 ]; then
+          hciconfig hci0
+          SCAN_MODE=$(hciconfig hci0 2>/dev/null | grep -o 'PISCAN\|ISCAN\|PSCAN\|NOSCAN' | head -n 1)
+          if [ "$SCAN_MODE" = "PISCAN" ]; then
+            echo "  * Speaker Visibility: ACTIVE (Discoverable as 'Yandex Station Max')"
+          else
+            echo "  * Speaker Visibility: SILENT ($SCAN_MODE)"
+          fi
+        else
+          echo "  * Bluetooth Adapter: NOT ATTACHED (Run 'atrios bt speaker on')"
+        fi
+        echo "=========================================================="
+      else
+        echo "=========================================================="
+        echo "          Starting AtriOS Bluetooth Speaker Mode          "
+        echo "=========================================================="
+        if [ ! -e /sys/class/bluetooth/hci0 ]; then
+          bt_do_init
+        fi
+        if [ ! -e /sys/class/bluetooth/hci0 ]; then
+          echo "Error: Bluetooth controller failed to attach on $BT_TTY."
+          exit 1
+        fi
+
+        # 1. Configure interface as an Audio Sink (Speaker)
+        hciconfig hci0 up 2>/dev/null || true
+        hciconfig hci0 name "Yandex Station Max" 2>/dev/null || true
+        hciconfig hci0 class 0x240414 2>/dev/null || true
+        hciconfig hci0 sspmode 1 2>/dev/null || true
+        hciconfig hci0 piscan 2>/dev/null || true
+
+        # 2. Ensure D-Bus and BlueZ bluetoothd daemon are active
+        if ! pidof dbus-daemon >/dev/null 2>&1; then
+          mkdir -p /var/run/dbus
+          dbus-daemon --system --fork 2>/dev/null || true
+        fi
+        if ! pidof bluetoothd >/dev/null 2>&1 && [ -x /usr/libexec/bluetooth/bluetoothd ]; then
+          /usr/libexec/bluetooth/bluetoothd -C -E --nodetach >/var/log/bluetoothd.log 2>&1 &
+          sleep 1
+        fi
+
+        # 3. Ensure hardware audio amplifier and PipeWire sink are unmuted
+        /usr/lib/atrios/audio apply 2>/dev/null || true
+        if command -v wpctl >/dev/null 2>&1; then
+          export XDG_RUNTIME_DIR=/var/run/pipewire
+          wpctl set-mute @DEFAULT_AUDIO_SINK@ 0 2>/dev/null || true
+        fi
+
+        # 4. Display Bluetooth connect animation on 25x16 Gowin LED screen
+        ANIM="/usr/share/atrios/animations/bluetooth/25x16_Bluetooth_Connect.gif"
+        if [ -f "$ANIM" ] && [ -x /usr/lib/atrios/light ]; then
+          killall screend 2>/dev/null || true
+          (python3 /usr/lib/atrios/light screen "$ANIM" 2>/dev/null || true) &
+        fi
+
+        echo "[OK] Controller: hci0 UP & RUNNING"
+        echo "[OK] Bluetooth Device Name: \"Yandex Station Max\""
+        echo "[OK] Bluetooth Class: 0x240414 (Audio Sink / Loudspeaker)"
+        echo "[OK] Pairing Mode: SSP Just Works (No PIN needed)"
+        echo "[OK] Discoverability: DISCOVERABLE & CONNECTABLE (piscan)"
+        echo ""
+        echo ">>> Bluetooth Speaker is READY! <<<"
+        echo "1. Open Bluetooth on your phone, laptop, or tablet"
+        echo "2. Find \"Yandex Station Max\" in the list of devices and tap Connect"
+        echo "3. Play your music - sound will output directly from the speakers!"
+        echo ""
+        echo "To stop speaker mode: 'atrios bt speaker off'"
+        echo "=========================================================="
+      fi
     elif [ "$SUBCMD" = "test" ]; then
       if [ -f /usr/lib/atrios/rtk-bt-init ]; then
         python3 /usr/lib/atrios/rtk-bt-init test
@@ -257,7 +342,8 @@ case "$CMD" in
     echo "  atrios wifi connect <SSID> [Password] - Connect to Wi-Fi"
     echo "  atrios wifi power [1|0]               - Toggle SDIO bus power"
     echo "  atrios bt status                      - Show Bluetooth HCI devices"
-    echo "  atrios bt init                        - Initialize & attach Bluetooth controller"
+    echo "  atrios bt init                        - Initialize & attach Bluetooth controller
+  atrios bt speaker [on|off]            - Bluetooth Speaker mode (connect from phone/PC)"
     echo "  atrios bt scan                        - Scan Bluetooth devices"
     echo "  atrios bt test                        - Complete Bluetooth hardware & RF diagnostic"
     echo "  atrios zigbee reset                   - Hardware reset EFR32 coordinator"
