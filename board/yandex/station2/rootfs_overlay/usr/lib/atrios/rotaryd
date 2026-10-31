@@ -328,9 +328,9 @@ def show_volume_ring(vol_pct, brightness=1.0):
         frame[i * 3 + 1] = int(g * b)
         frame[i * 3 + 2] = int(b_col * b)
 
-    if full < NUM_LEDS and frac > 0.01:
-        # Perceptual gamma easing for silky smooth tip LED illumination
-        lead_b = (frac ** 1.8) * b
+    if full < NUM_LEDS and frac > 0.005:
+        # True cubic gamma easing (Y ~ (L*)^3) for continuous, silky-soft LED emergence
+        lead_b = (frac ** 2.4) * b
         frame[full * 3 + 0] = int(r * lead_b)
         frame[full * 3 + 1] = int(g * lead_b)
         frame[full * 3 + 2] = int(b_col * lead_b)
@@ -475,12 +475,12 @@ def main():
                     display_volume = 0.0
                     clear_ring()
                 else:
-                    # 1. Smoothly interpolate display_volume towards current_volume (100 FPS silky glide)
+                    # 1. Smoothly interpolate display_volume towards current_volume (fluid 250ms physical glide)
                     dt = min(0.05, max(0.001, now - last_anim_time))
                     last_anim_time = now
                     diff = current_volume - display_volume
-                    if abs(diff) > 0.05:
-                        display_volume += diff * (1.0 - math.exp(-dt * 14.0))
+                    if abs(diff) > 0.02:
+                        display_volume += diff * (1.0 - math.exp(-dt * 6.5))
                     else:
                         display_volume = float(current_volume)
 

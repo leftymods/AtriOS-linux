@@ -128,7 +128,14 @@ case "$CMD" in
       killall hciattach btattach rtk_hciattach 2>/dev/null || true
       usleep 200000 2>/dev/null || sleep 1
 
-      # 1. Power cycle radio cleanly via rfkill (state 1 = power on, 0 = power off)
+      # 1. Assert hardware BT_EN (GPIO 493) & BT_RST (GPIO 494) and cycle rfkill
+      for g in 493 494; do
+        [ -d "/sys/class/gpio/gpio$g" ] || echo "$g" > /sys/class/gpio/export 2>/dev/null || true
+        if [ -d "/sys/class/gpio/gpio$g" ]; then
+          echo out > "/sys/class/gpio/gpio$g/direction" 2>/dev/null || true
+          echo 1 > "/sys/class/gpio/gpio$g/value" 2>/dev/null || true
+        fi
+      done
       for rfk in /sys/class/rfkill/rfkill*; do
         [ -f "$rfk/state" ] || continue
         [ "$(cat "$rfk/type" 2>/dev/null)" = "bluetooth" ] || continue
@@ -153,6 +160,7 @@ case "$CMD" in
       # 3. Fallback: try python rtk-bt-init if rtk_hciattach did not create hci0
       if [ ! -d /sys/class/bluetooth/hci0 ]; then
         killall rtk_hciattach 2>/dev/null || true
+        [ -f /tmp/rtk_hciattach.log ] && cat /tmp/rtk_hciattach.log
         if [ -f /usr/lib/atrios/rtk-bt-init ]; then
           python3 /usr/lib/atrios/rtk-bt-init init
         fi
