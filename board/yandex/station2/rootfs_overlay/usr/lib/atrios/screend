@@ -12,12 +12,36 @@ Hardware:
 import sys
 import os
 import time
+import glob
 
-FB_SCREEN = "/dev/fb4"
 WIDTH = 25
 HEIGHT = 16
 BPP = 3
 FRAME_SIZE = WIDTH * HEIGHT * BPP
+
+def find_fb_by_name(keywords):
+    for path in sorted(glob.glob("/sys/class/graphics/fb*/name")):
+        try:
+            with open(path, "r") as f:
+                name = f.read().strip().lower()
+                for kw in keywords:
+                    if kw.lower() in name:
+                        dev = "/dev/" + os.path.basename(os.path.dirname(path))
+                        return dev
+        except Exception:
+            pass
+    return None
+
+def get_fb_screen():
+    dev = find_fb_by_name(["screen", "gowin", "panel"])
+    if dev and os.path.exists(dev):
+        return dev
+    for fallback in ("/dev/fb4", "/dev/fb3", "/dev/fb2", "/dev/fb1", "/dev/fb0"):
+        if os.path.exists(fallback):
+            return fallback
+    return "/dev/fb4"
+
+FB_SCREEN = get_fb_screen()
 
 # Official 5x9 digits from Yandex clock_large.gif font:
 # 4 digits (5px wide) + 1 colon (1px wide) + 4 spaces (1px wide) = 25px total width!
@@ -155,8 +179,9 @@ def set_pixel(buf, x, y, brightness):
         buf[offset + 2] = val
 
 def send_frame(buf):
+    fb = get_fb_screen()
     try:
-        with open(FB_SCREEN, "wb") as f:
+        with open(fb, "wb") as f:
             f.write(buf[:FRAME_SIZE])
             f.flush()
     except Exception:

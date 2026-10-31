@@ -32,7 +32,7 @@ def reset_bt_rfkill():
     global UART_DEV
     UART_DEV = find_uart_dev()
     reset_ok = False
-    # 1. Pulse Linux kernel rfkill subsystem: state 0 = BLOCKED (OFF), state 1 = UNBLOCKED (ON)
+    # 1. Pulse Linux kernel rfkill subsystem: state 1 = BLOCKED (OFF), state 0 = UNBLOCKED (ON)
     for rf in glob.glob("/sys/class/rfkill/rfkill*"):
         p_type = rf + "/type"
         p_state = rf + "/state"
@@ -41,20 +41,20 @@ def reset_bt_rfkill():
                 t = open(p_type).read().strip()
                 if t == "bluetooth":
                     with open(p_state, "w") as f:
-                        f.write("0\n")          # blocked -> power off
+                        f.write("1\n")          # pulse blocked -> power off
                     time.sleep(0.15)
                     with open(p_state, "w") as f:
-                        f.write("1\n")          # unblocked -> power on
+                        f.write("0\n")          # unblocked -> power on
                     time.sleep(0.50)
                     state = open(p_state).read().strip()
-                    if state != "1":
+                    if state != "0":
                         with open(p_state, "w") as f:
-                            f.write("1\n")
+                            f.write("0\n")
                         time.sleep(0.50)
                         state = open(p_state).read().strip()
                     print(f"[BT] rfkill {os.path.basename(rf)} state={state}",
                           flush=True)
-                    if state == "1":
+                    if state == "0":
                         reset_ok = True
             except Exception:
                 pass

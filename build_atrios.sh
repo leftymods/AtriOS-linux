@@ -126,19 +126,6 @@ for tool in "$DTC" "$MAKE_EXT4FS" "$AMPACK" python3 rsync tar; do
 done
 echo "[1/6] Build tools present (dtc, make_ext4fs, ampack, python3)"
 
-# Compile in-tree hardware drivers from source (Gowin, LED ring, screen, PCBA)
-if [ -d "$PROJECT_ROOT/drivers/yandex" ] && [ -d "/home/lmods/linux-amlogic-4.9" ]; then
-    echo "      Compiling Yandex drivers from source..."
-    make -C "$PROJECT_ROOT/drivers/yandex" KDIR=/home/lmods/linux-amlogic-4.9 -j"$JOBS"
-    for ko in "$PROJECT_ROOT/drivers/yandex"/*.ko; do
-        if [ -f "$ko" ]; then
-            cp -f "$ko" "$OVERLAY_DIR/lib/modules/4.9.113/"
-            echo "      Integrated compiled driver: $(basename "$ko")"
-        fi
-    done
-    depmod -b "$OVERLAY_DIR" 4.9.113 2>/dev/null || true
-fi
-
 VENDOR_KO_COUNT=$(find "$OVERLAY_DIR/lib/modules/4.9.113" -maxdepth 1 -name '*.ko' 2>/dev/null | wc -l)
 VENDOR_FW_COUNT=$(find "$OVERLAY_DIR/lib/firmware" -type f 2>/dev/null | wc -l)
 if [ "$VENDOR_KO_COUNT" -lt 51 ] || [ "$VENDOR_FW_COUNT" -lt 1 ]; then

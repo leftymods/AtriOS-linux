@@ -4,6 +4,7 @@
 case "$1" in
   start)
     echo "[AtriOS] Starting user interface daemons..."
+    mkdir -p /var/lib/atrios /var/log 2>/dev/null || true
     # keep the serial console quiet (hide driver debug spam)
     dmesg -n 4 2>/dev/null || true
     if [ -x /usr/lib/atrios/rotaryd ]; then
