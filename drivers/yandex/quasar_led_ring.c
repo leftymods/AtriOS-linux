@@ -100,11 +100,21 @@ static int ring_fb_check_var(struct fb_var_screeninfo *var, struct fb_info *info
 	return 0;
 }
 
-static const struct fb_ops ring_fb_ops = {
+static ssize_t ring_fb_write(struct fb_info *info, const char __user *buf,
+			     size_t count, loff_t *ppos)
+{
+	ssize_t ret = fb_sys_write(info, buf, count, ppos);
+	if (ret > 0)
+		ring_fb_sync(info);
+	return ret;
+}
+
+static struct fb_ops ring_fb_ops = {
 	.owner		= THIS_MODULE,
 	.fb_check_var	= ring_fb_check_var,
 	.fb_destroy	= ring_fb_destroy,
 	.fb_mmap	= ring_fb_mmap,
+	.fb_write	= ring_fb_write,
 	.fb_pan_display	= ring_fb_pan_display,
 	.fb_release	= ring_fb_release,
 	.fb_sync	= ring_fb_sync,
@@ -112,53 +122,60 @@ static const struct fb_ops ring_fb_ops = {
 
 /* ---- LED trigger ---- */
 
-static int led_ring_trigger_activate(struct led_classdev *led)
+static void led_ring_trigger_activate(struct led_classdev *led)
 {
 	struct led_ring_node *node;
 	const char *name;
+	const char *p;
+	int color_idx;
 	int led_num;
-	long long pos;
+	long long pos = 0;
 
 	if (led->max_brightness != 255) {
 		dev_err(led->dev,
 			"cannot activate led_ring_fb trigger for led with max_brightness != %d\n",
 			255);
-		return -EINVAL;
+		return;
 	}
 
 	name = led->name ? led->name : dev_name(led->dev);
 	if (!name)
-		return -EINVAL;
+		return;
 
-	if (strncmp(name, ":red:", 5) == 0)
-		led_num = 0;
-	else if (strncmp(name, ":green:", 7) == 0)
-		led_num = 1;
-	else if (strncmp(name, ":blue:", 6) == 0)
-		led_num = 2;
+	if (strstr(name, "red"))
+		color_idx = 0;
+	else if (strstr(name, "green"))
+		color_idx = 1;
+	else if (strstr(name, "blue"))
+		color_idx = 2;
 	else {
-		dev_err(led->dev, "failed to parse led name\n");
-		return -EINVAL;
+		dev_err(led->dev, "failed to parse led color in '%s'\n", name);
+		return;
 	}
 
-	name = strchr(name, ':');
-	if (!name)
-		return -EINVAL;
-	name = strchr(name + 1, ':');
-	if (!name)
-		return -EINVAL;
-	name++;
-
-	if (kstrtoll(name, 10, &pos) || pos < 1 || pos > 24) {
-		dev_err(led->dev, "failed to parse led name\n");
-		return -EINVAL;
+	p = strstr(name, "ring");
+	if (p) {
+		p += 4;
+	} else {
+		p = strrchr(name, ':');
+		if (p)
+			p++;
+		else
+			p = name;
+		while (*p && (*p < '0' || *p > '9'))
+			p++;
 	}
-	led_num += (pos - 1) * 3;
+
+	if (!p || kstrtoll(p, 10, &pos) || pos < 1 || pos > 24) {
+		dev_err(led->dev, "failed to parse led position in '%s'\n", name);
+		return;
+	}
+	led_num = color_idx + (int)(pos - 1) * 3;
 
 	node = kzalloc(sizeof(*node), GFP_KERNEL);
 	if (!node) {
 		dev_err(led->dev, "failed to allocate led_node\n");
-		return -ENOMEM;
+		return;
 	}
 
 	node->led = led;
@@ -167,8 +184,6 @@ static int led_ring_trigger_activate(struct led_classdev *led)
 	mutex_lock(&ring_priv.list_lock);
 	list_add_tail(&node->list, &ring_priv.led_list);
 	mutex_unlock(&ring_priv.list_lock);
-
-	return 0;
 }
 
 static void led_ring_trigger_deactivate(struct led_classdev *led)

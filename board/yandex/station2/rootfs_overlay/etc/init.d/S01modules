@@ -25,6 +25,9 @@ case "$1" in
     insmod /lib/modules/4.9.113/quasar_led_screen.ko 2>/dev/null || modprobe quasar_led_screen 2>/dev/null
     insmod /lib/modules/4.9.113/leds-is31fl32xx.ko 2>/dev/null || modprobe leds-is31fl32xx 2>/dev/null
     insmod /lib/modules/4.9.113/quasar_led_ring.ko 2>/dev/null || modprobe quasar_led_ring 2>/dev/null
+    for t in /sys/class/leds/*ring*/trigger /sys/class/leds/*led_ring*/trigger; do
+      [ -f "$t" ] && echo led_ring_fb > "$t" 2>/dev/null || true
+    done
 
     # 4. Wireless (Realtek RTL8822CS/ES) - Power up SDIO & BT reset GPIO before driver attachment
     if [ -x /usr/lib/atrios/wifi-power ]; then

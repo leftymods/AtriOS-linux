@@ -9,3 +9,11 @@ tools/fw_builder/.fw_build_work/
 __pycache__/
 tools/fw_builder/.system_from_rootfs
 tools/fw_builder/overlay/dts/*.dtb
+drivers/yandex/*.o
+drivers/yandex/*.ko
+drivers/yandex/.*.cmd
+drivers/yandex/*.mod.c
+drivers/yandex/*.mod.o
+drivers/yandex/Module.symvers
+drivers/yandex/modules.order
+drivers/yandex/.tmp_versions/

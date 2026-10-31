@@ -9,6 +9,7 @@
  * and firmware update support.
  */
 
+#include <linux/version.h>
 #include <linux/module.h>
 #include <linux/spi/spi.h>
 #include <linux/of.h>
@@ -239,8 +240,12 @@ static int uart_receive_data(struct gowin_priv *priv,
 	memset(t, 0, sizeof(t));
 	t[0].tx_buf = cmd;
 	t[0].len = 3;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 5, 0)
 	t[1].delay.value = 100;
 	t[1].delay.unit = SPI_DELAY_UNIT_USECS;
+#else
+	t[1].delay_usecs = 100;
+#endif
 	t[1].len = 0;
 	t[2].rx_buf = header;
 	t[2].len = 4;
@@ -265,7 +270,7 @@ static int uart_receive_data(struct gowin_priv *priv,
 	}
 }
 
-static int uart_flush_data_app_cmd(struct gowin_priv *priv)
+__maybe_unused static int uart_flush_data_app_cmd(struct gowin_priv *priv)
 {
 	u8 buf[3] = { CMD_UART_FLUSH_DATA, 0, 0 };
 	return lp_write(priv, buf, 3);
@@ -291,8 +296,8 @@ static int lp_gpio_get_value(struct gpio_chip *chip, unsigned int offset)
 	return (priv->gpio_cached >> offset) & 1;
 }
 
-static int lp_gpio_set_value(struct gpio_chip *chip, unsigned int offset,
-			     int value)
+static void lp_gpio_set_value(struct gpio_chip *chip, unsigned int offset,
+			      int value)
 {
 	struct gowin_priv *priv = gpiochip_get_data(chip);
 
@@ -302,13 +307,13 @@ static int lp_gpio_set_value(struct gpio_chip *chip, unsigned int offset,
 		priv->gpio_cached &= ~BIT(offset);
 
 	set_gpio_app_cmd(priv);
-	return 0;
 }
 
 static int lp_gpio_direction_output(struct gpio_chip *chip,
 				    unsigned int offset, int value)
 {
-	return lp_gpio_set_value(chip, offset, value);
+	lp_gpio_set_value(chip, offset, value);
+	return 0;
 }
 
 static int gpio_init(struct gowin_priv *priv)
@@ -325,7 +330,11 @@ static int gpio_init(struct gowin_priv *priv)
 	priv->gpio_chip.get = lp_gpio_get_value;
 	priv->gpio_chip.set = lp_gpio_set_value;
 	priv->gpio_chip.parent = dev;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 18, 0)
 	priv->gpio_chip.fwnode = dev_fwnode(dev);
+#else
+	priv->gpio_chip.of_node = dev->of_node;
+#endif
 	priv->gpio_chip.of_gpio_n_cells = 2;
 	priv->gpio_chip.can_sleep = true;
 
@@ -355,13 +364,18 @@ static void lp_uart_close(struct tty_struct *tty, struct file *filp)
 	tty_port_close(tty->port, tty, filp);
 }
 
-static unsigned int lp_uart_write_room(struct tty_struct *tty)
+static int lp_uart_write_room(struct tty_struct *tty)
 {
 	return GOWIN_TTY_BUF_SIZE;
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 14, 0)
 static ssize_t lp_uart_write(struct tty_struct *tty, const u8 *buf,
 			     size_t count)
+#else
+static int lp_uart_write(struct tty_struct *tty, const unsigned char *buf,
+			 int count)
+#endif
 {
 	struct gowin_priv *priv = container_of(tty->port, struct gowin_priv,
 					       tty_port);
@@ -391,10 +405,16 @@ static void lp_uart_rx_work(struct work_struct *work)
 	tty_flip_buffer_push(&priv->tty_port);
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 14, 0)
 static void lp_uart_poll(struct timer_list *t)
 {
 	struct gowin_priv *priv = container_of(t, struct gowin_priv,
 					       uart_timer);
+#else
+static void lp_uart_poll(unsigned long data)
+{
+	struct gowin_priv *priv = (struct gowin_priv *)data;
+#endif
 
 	if (priv->tty_port.tty)
 		schedule_work(&priv->uart_rx_work);
@@ -443,7 +463,11 @@ static int uart_init(struct gowin_priv *priv)
 		return ret;
 	}
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 14, 0)
 	timer_setup(&priv->uart_timer, lp_uart_poll, 0);
+#else
+	setup_timer(&priv->uart_timer, lp_uart_poll, (unsigned long)priv);
+#endif
 	mod_timer(&priv->uart_timer, jiffies + HZ / 10);
 
 	dev_info(dev, "uart ttyLP0 initialized\n");
@@ -452,7 +476,11 @@ static int uart_init(struct gowin_priv *priv)
 
 static void uart_exit(struct gowin_priv *priv)
 {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
 	timer_delete_sync(&priv->uart_timer);
+#else
+	del_timer_sync(&priv->uart_timer);
+#endif
 	flush_work(&priv->uart_rx_work);
 	tty_unregister_driver(priv->tty_drv);
 	tty_port_destroy(&priv->tty_port);
@@ -556,7 +584,7 @@ static void deinit_touch(struct gowin_priv *priv)
 	}
 }
 
-static void reset_touch_state(struct gowin_priv *priv)
+__maybe_unused static void reset_touch_state(struct gowin_priv *priv)
 {
 	priv->fb_open_count = 0;
 }
@@ -654,7 +682,7 @@ static int lp_fb_sync(struct fb_info *fbi)
 	return ret;
 }
 
-static const struct fb_ops fb_ops = {
+static struct fb_ops fb_ops = {
 	.owner = THIS_MODULE,
 	.fb_open = lp_fb_open,
 	.fb_release = lp_fb_release,
@@ -663,7 +691,9 @@ static const struct fb_ops fb_ops = {
 	.fb_pan_display = lp_fb_pan_display,
 	.fb_mmap = lp_fb_mmap,
 	.fb_sync = lp_fb_sync,
-	FB_DEFAULT_IOMEM_OPS,
+	.fb_fillrect = cfb_fillrect,
+	.fb_copyarea = cfb_copyarea,
+	.fb_imageblit = cfb_imageblit,
 };
 
 static int fb_init(struct gowin_priv *priv)
@@ -871,7 +901,7 @@ static int check_status_code(struct gowin_priv *priv)
 	return 0;
 }
 
-static int jtag_erase_flash(struct gowin_priv *priv)
+__maybe_unused static int jtag_erase_flash(struct gowin_priv *priv)
 {
 	jtag_write_inst(priv, 0x05);
 	usleep_range(1000, 2000);
@@ -1446,7 +1476,11 @@ err_gpio:
 	return ret;
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 18, 0)
 static void remove(struct spi_device *spi)
+#else
+static int remove(struct spi_device *spi)
+#endif
 {
 	struct gowin_priv *priv = spi_get_drvdata(spi);
 
@@ -1458,6 +1492,9 @@ static void remove(struct spi_device *spi)
 	gpio_exit(priv);
 
 	dev_info(priv->dev, "led panel removed\n");
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 18, 0)
+	return 0;
+#endif
 }
 
 static struct spi_driver led_device_driver = {

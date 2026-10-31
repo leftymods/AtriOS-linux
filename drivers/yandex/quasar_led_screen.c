@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
+#include <linux/version.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
@@ -582,9 +583,15 @@ static void qls_flush_work(struct work_struct *work)
 	mutex_unlock(&qls->sa->lock);
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 15, 0)
 static void qls_flush_timer(struct timer_list *t)
 {
 	struct qls_priv *qls = container_of(t, struct qls_priv, flush_timer);
+#else
+static void qls_flush_timer(unsigned long data)
+{
+	struct qls_priv *qls = (struct qls_priv *)data;
+#endif
 
 	if (!qls->flush_pending) {
 		qls->flush_pending = true;
@@ -607,7 +614,11 @@ static void qls_fb_destroy(struct fb_info *info)
 {
 	struct qls_priv *qls = info->par;
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
 	timer_delete_sync(&qls->flush_timer);
+#else
+	del_timer_sync(&qls->flush_timer);
+#endif
 	cancel_work_sync(&qls->flush_work);
 	vfree(qls->videomemory);
 }
@@ -666,7 +677,7 @@ static void qls_fb_imageblit(struct fb_info *info, const struct fb_image *image)
 	qls_draw_lines(info->par);
 }
 
-static const struct fb_ops qls_fb_ops = {
+static struct fb_ops qls_fb_ops = {
 	.owner        = THIS_MODULE,
 	.fb_open      = qls_fb_open,
 	.fb_release   = qls_fb_release,
@@ -720,6 +731,7 @@ static umode_t qls_hwmon_is_visible(const void *data,
 	return 0444;
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 10, 0)
 static const struct hwmon_channel_info *qls_hwmon_info[] = {
 	HWMON_CHANNEL_INFO(chip, HWMON_C_REGISTER_TZ),
 	HWMON_CHANNEL_INFO(temp, HWMON_T_INPUT),
@@ -735,6 +747,7 @@ static const struct hwmon_chip_info qls_hwmon_chip_info = {
 	.ops = &qls_hwmon_ops,
 	.info = qls_hwmon_info,
 };
+#endif
 
 /* ---- Firmware update ---- */
 
@@ -1015,7 +1028,11 @@ static int qls_probe(struct spi_device *spi)
 	qls->max_brightness = 200;
 	qls->brightness = 200;
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 15, 0)
 	timer_setup(&qls->flush_timer, qls_flush_timer, 0);
+#else
+	setup_timer(&qls->flush_timer, qls_flush_timer, (unsigned long)qls);
+#endif
 	INIT_WORK(&qls->flush_work, qls_flush_work);
 
 	spi_set_drvdata(spi, qls);
@@ -1119,6 +1136,7 @@ static int qls_probe(struct spi_device *spi)
 		return PTR_ERR(bl);
 	qls->bl = bl;
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 10, 0)
 	hwmon_dev = devm_hwmon_device_register_with_info(&spi->dev,
 							 "quasar_led_screen",
 							 qls,
@@ -1126,6 +1144,7 @@ static int qls_probe(struct spi_device *spi)
 							 NULL);
 	if (IS_ERR(hwmon_dev))
 		dev_warn(&spi->dev, "hwmon registration failed\n");
+#endif
 
 	ret = sysfs_create_group(&spi->dev.kobj, &qls_attr_group);
 	if (ret)
@@ -1137,16 +1156,21 @@ static int qls_probe(struct spi_device *spi)
 	return 0;
 }
 
-static void qls_remove(struct spi_device *spi)
+static int qls_remove(struct spi_device *spi)
 {
 	struct qls_priv *qls = spi_get_drvdata(spi);
 
 	sysfs_remove_group(&spi->dev.kobj, &qls_attr_group);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
 	timer_delete_sync(&qls->flush_timer);
+#else
+	del_timer_sync(&qls->flush_timer);
+#endif
 	cancel_work_sync(&qls->flush_work);
 
 	if (qls->fb)
 		unregister_framebuffer(qls->fb);
+	return 0;
 }
 
 static const struct of_device_id qls_of_match[] = {

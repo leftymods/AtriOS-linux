@@ -250,13 +250,14 @@ static int pcba_ids_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static void pcba_ids_remove(struct platform_device *pdev)
+static int pcba_ids_remove(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 
 	sysfs_remove_group(&dev->kobj, &pcba_ids_drv_group);
 
 	dev_info(dev, "pcba_ids driver removed\n");
+	return 0;
 }
 
 static const struct of_device_id pcba_ids_of_match[] = {

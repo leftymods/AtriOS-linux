@@ -5,9 +5,11 @@ obj-m += quasar_pcba_ids.o
 
 KDIR ?= /home/lmods/linux-amlogic-4.9
 PWD := $(shell pwd)
+ARCH ?= arm64
+CROSS_COMPILE ?= aarch64-linux-gnu-
 
 default:
-	$(MAKE) -C $(KDIR) M=$(PWD) modules
+	$(MAKE) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) -C $(KDIR) M=$(PWD) modules
 
 clean:
-	$(MAKE) -C $(KDIR) M=$(PWD) clean
+	$(MAKE) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) -C $(KDIR) M=$(PWD) clean

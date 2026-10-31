@@ -14,19 +14,36 @@ DEFAULT_VOLUME=60
 export XDG_RUNTIME_DIR="/var/run/pipewire"
 export DBUS_SESSION_BUS_ADDRESS="unix:path=/var/run/dbus/system_bus_socket"
 
-# Perceptual 0..100 -> ALSA raw curve.  zero_db_raw is 255 for the
-# SY6045S speaker masters and 191 for the ES8156 headphone DAC (255 would
-# be +32 dB on the headphone).  At 40% the speaker level is about -22 dB,
-# which is clearly audible; the old linear raw=pct*2.55 gave -76 dB.
+# Perceptual 0..100 -> ALSA raw curve using pure integer arithmetic (no awk math).
+# zero_db_raw is 255 for the SY6045S speaker masters and 191 for the ES8156 headphone DAC.
 volume_raw() {
-    awk -v p="$1" -v z="$2" 'BEGIN {
-        if (p <= 0) { print 1; exit }
-        db = -60 * (1 - sqrt(p / 100));
-        r = int(z + 2 * db + 0.5);
-        if (r < 1) r = 1;
-        if (r > z) r = z;
-        print r;
-    }'
+    p="$1"
+    z="$2"
+    [ -z "$p" ] && p=60
+    [ "$p" -le 0 ] && echo 0 && return
+    [ "$p" -ge 100 ] && echo "$z" && return
+
+    # Exact integer square root of 100 * p (p in 1..99)
+    n=$(( 100 * p ))
+    r=1
+    [ "$n" -ge 100 ] && r=10
+    [ "$n" -ge 400 ] && r=20
+    [ "$n" -ge 900 ] && r=30
+    [ "$n" -ge 1600 ] && r=40
+    [ "$n" -ge 2500 ] && r=50
+    [ "$n" -ge 3600 ] && r=60
+    [ "$n" -ge 4900 ] && r=70
+    [ "$n" -ge 6400 ] && r=80
+    [ "$n" -ge 8100 ] && r=90
+    [ "$n" -ge 10000 ] && r=100
+    r=$(( (r + n / r) / 2 ))
+    r=$(( (r + n / r) / 2 ))
+
+    two_db=$(( -120 * (100 - r) / 100 ))
+    val=$(( z + two_db ))
+    [ "$val" -lt 1 ] && val=1
+    [ "$val" -gt "$z" ] && val="$z"
+    echo "$val"
 }
 
 read_state_pct() {
@@ -48,30 +65,27 @@ write_state_pct() {
 apply_volume() {
     pct="$1"
     raw=$(volume_raw "$pct" 255)
-    raw_ch=$(awk -v r="$raw" 'BEGIN { c = int(r * 159 / 255 + 0.5); if (c < 0) c = 0; if (c > 159) c = 159; print c }')
     raw_hp=$(volume_raw "$pct" 191)
     sw=1
     mute_i2c="0x00"
-    mute_ch_i2c="0x00"
     mute_es="0x11"
     if [ "$pct" -le 0 ]; then
         sw=0
         raw=0
-        raw_ch=0
         raw_hp=0
         mute_i2c="0x08"
-        mute_ch_i2c="0x03"
         mute_es="0x00"
     fi
 
     # 1. ALSA hardware mixer controls (all speaker channels + headphone DAC)
+    # Note: Ch1/Ch2 are hardware channel trims (159 = 0 dB nominal). Master is user volume.
     for c in "$CARD" 0; do
         amixer -c "$c" cset name='Woofer Master Playback Volume' "$raw" 2>/dev/null || true
         amixer -c "$c" cset name='Tweeters Master Playback Volume' "$raw" 2>/dev/null || true
-        amixer -c "$c" cset name='Woofer Ch1 Playback Volume' "$raw_ch" 2>/dev/null || true
-        amixer -c "$c" cset name='Woofer Ch2 Playback Volume' "$raw_ch" 2>/dev/null || true
-        amixer -c "$c" cset name='Tweeters Ch1 Playback Volume' "$raw_ch" 2>/dev/null || true
-        amixer -c "$c" cset name='Tweeters Ch2 Playback Volume' "$raw_ch" 2>/dev/null || true
+        amixer -c "$c" cset name='Woofer Ch1 Playback Volume' 159 2>/dev/null || true
+        amixer -c "$c" cset name='Woofer Ch2 Playback Volume' 159 2>/dev/null || true
+        amixer -c "$c" cset name='Tweeters Ch1 Playback Volume' 159 2>/dev/null || true
+        amixer -c "$c" cset name='Tweeters Ch2 Playback Volume' 159 2>/dev/null || true
         amixer -c "$c" cset name='Headphone DAC Playback Volume' "$raw_hp" 2>/dev/null || true
         amixer -c "$c" cset name='Woofer Master Playback Switch' "$sw" 2>/dev/null || true
         amixer -c "$c" cset name='Woofer Ch1 Playback Switch' "$sw" 2>/dev/null || true
@@ -80,26 +94,25 @@ apply_volume() {
         amixer -c "$c" cset name='Tweeters Ch1 Playback Switch' "$sw" 2>/dev/null || true
         amixer -c "$c" cset name='Tweeters Ch2 Playback Switch' "$sw" 2>/dev/null || true
         amixer -c "$c" cset name='Headphone Headphone Switch' "$sw" 2>/dev/null || true
-        amixer -c "$c" cset name='SPK mute' 0 2>/dev/null || true
+        amixer -c "$c" cset name='SPK mute' $( [ "$pct" -le 0 ] && echo 1 || echo 0 ) 2>/dev/null || true
     done
 
     # 2. Direct hardware I2C registers on Bus 2 (SY6045S & ES8156)
     if command -v i2cset >/dev/null 2>&1; then
         hex_raw=$(printf "0x%02x" "$raw")
-        hex_ch=$(printf "0x%02x" "$raw_ch")
         hex_hp=$(printf "0x%02x" "$raw_hp")
         # Tweeters (0x2a)
         i2cset -y -f 2 0x2a 0x07 "$hex_raw" 2>/dev/null || true
-        i2cset -y -f 2 0x2a 0x08 "$hex_ch" 2>/dev/null || true
-        i2cset -y -f 2 0x2a 0x09 "$hex_ch" 2>/dev/null || true
+        i2cset -y -f 2 0x2a 0x08 0x9f 2>/dev/null || true
+        i2cset -y -f 2 0x2a 0x09 0x9f 2>/dev/null || true
         i2cset -y -f 2 0x2a 0x06 "$mute_i2c" 2>/dev/null || true
-        i2cset -y -f 2 0x2a 0x22 "$mute_ch_i2c" 2>/dev/null || true
+        i2cset -y -f 2 0x2a 0x22 0x00 2>/dev/null || true
         # Woofer (0x2b)
         i2cset -y -f 2 0x2b 0x07 "$hex_raw" 2>/dev/null || true
-        i2cset -y -f 2 0x2b 0x08 "$hex_ch" 2>/dev/null || true
-        i2cset -y -f 2 0x2b 0x09 "$hex_ch" 2>/dev/null || true
+        i2cset -y -f 2 0x2b 0x08 0x9f 2>/dev/null || true
+        i2cset -y -f 2 0x2b 0x09 0x9f 2>/dev/null || true
         i2cset -y -f 2 0x2b 0x06 "$mute_i2c" 2>/dev/null || true
-        i2cset -y -f 2 0x2b 0x22 "$mute_ch_i2c" 2>/dev/null || true
+        i2cset -y -f 2 0x2b 0x22 0x00 2>/dev/null || true
         # Headphone ES8156 (0x08)
         i2cset -y -f 2 0x08 0x14 "$hex_hp" 2>/dev/null || true
         i2cset -y -f 2 0x08 0x13 "$mute_es" 2>/dev/null || true
@@ -107,9 +120,8 @@ apply_volume() {
 
     # 3. Synchronize PipeWire software sink
     if command -v wpctl >/dev/null 2>&1 && pidof pipewire >/dev/null 2>&1; then
-        pw_vol=$(awk -v p="$pct" 'BEGIN { printf "%.2f", p/100 }')
         export XDG_RUNTIME_DIR=/var/run/pipewire
-        wpctl set-volume @DEFAULT_AUDIO_SINK@ "$pw_vol" 2>/dev/null || true
+        wpctl set-volume @DEFAULT_AUDIO_SINK@ "${pct}%" 2>/dev/null || true
         wpctl set-mute @DEFAULT_AUDIO_SINK@ $( [ "$pct" -le 0 ] && echo 1 || echo 0 ) 2>/dev/null || true
     fi
 }
