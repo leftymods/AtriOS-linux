@@ -29,7 +29,11 @@ declare DEFCFG_FOLDER="board/amlogic/defconfigs"
 declare BL33_PATH1="bl33"
 declare BL33_PATH2="bl33/v2019"
 
-declare BL33_TOOLCHAIN1="aarch64-none-elf-"
+if command -v aarch64-none-elf-gcc >/dev/null 2>&1; then
+    declare BL33_TOOLCHAIN1="aarch64-none-elf-"
+else
+    declare BL33_TOOLCHAIN1="aarch64-linux-gnu-"
+fi
 declare BL33_TOOLCHAIN2="/opt/gcc-linaro-7.3.1-2018.05-i686_aarch64-elf/bin/aarch64-elf-"
 
 declare BL33_DEFCFG1="${UBOOT_FOLDER}/${UBOOT_VERSION1}/${DEFCFG_FOLDER}"

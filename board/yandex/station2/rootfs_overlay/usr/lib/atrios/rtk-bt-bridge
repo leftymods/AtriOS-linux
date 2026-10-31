@@ -1,0 +1,214 @@
+#!/usr/bin/env python3
+import os, sys, time, struct, select, termios, fcntl, pty, signal
+
+PID_FILE = "/var/run/rtk-bt-bridge.pid"
+
+def crc16_x25(data):
+    crc = 0xFFFF
+    for b in data:
+        crc ^= b
+        for _ in range(8):
+            crc = (crc >> 1) ^ 0x8408 if (crc & 1) else (crc >> 1)
+    return crc & 0xFFFF
+
+def bitrev16(val):
+    out = 0
+    for i in range(16):
+        out = (out << 1) | ((val >> i) & 1)
+    return out
+
+def slip_encode(data):
+    out = bytearray([0xC0])
+    for b in data:
+        if b == 0xC0: out.extend([0xDB, 0xDC])
+        elif b == 0xDB: out.extend([0xDB, 0xDD])
+        else: out.append(b)
+    out.append(0xC0)
+    return bytes(out)
+
+def slip_decode(raw):
+    out = bytearray()
+    i = 0
+    while i < len(raw):
+        b = raw[i]
+        if b == 0xDB and i + 1 < len(raw):
+            nxt = raw[i + 1]
+            if nxt == 0xDC: out.append(0xC0)
+            elif nxt == 0xDD: out.append(0xDB)
+            else: out.append(nxt)
+            i += 2
+        else:
+            out.append(b)
+            i += 1
+    return bytes(out)
+
+def make_h5_frame(ptype, payload, seq=0, ack=0, reliable=True, use_crc=True):
+    b0 = (seq & 0x07) | ((ack & 0x07) << 3) | (0x80 if reliable else 0x00)
+    if use_crc and ptype in (1, 2):
+        b0 |= 0x40 # DIC=1
+    plen = len(payload)
+    b1 = (ptype & 0x0F) | ((plen & 0x0F) << 4)
+    b2 = (plen >> 4) & 0xFF
+    b3 = (~(b0 + b1 + b2)) & 0xFF
+    hdr = bytes([b0, b1, b2, b3])
+    raw = hdr + payload
+    if b0 & 0x40:
+        crc = bitrev16(crc16_x25(raw))
+        raw += bytes([(crc >> 8) & 0xFF, crc & 0xFF])
+    return slip_encode(raw)
+
+def make_ack(ack_seq):
+    b0 = ((ack_seq & 0x07) << 3)
+    b1 = 0
+    b2 = 0
+    b3 = (~b0) & 0xFF
+    return slip_encode(bytes([b0, b1, b2, b3]))
+
+running = True
+def sig_handler(sig, frame):
+    global running
+    running = False
+
+signal.signal(signal.SIGTERM, sig_handler)
+signal.signal(signal.SIGINT, sig_handler)
+
+def main():
+    global running
+    with open(PID_FILE, "w") as f:
+        f.write(f"{os.getpid()}\n")
+
+    # 1. Hardware reset
+    print("[rtk-bt-bridge] Resetting RTL8822CS module...", flush=True)
+    os.system("echo 0 > /sys/class/gpio/gpio493/value 2>/dev/null; echo 0 > /sys/class/gpio/gpio494/value 2>/dev/null; sleep 1; echo 1 > /sys/class/gpio/gpio493/value 2>/dev/null; sleep 0.2; echo 1 > /sys/class/gpio/gpio494/value 2>/dev/null; sleep 0.5")
+
+    # 2. Upload RAM firmware
+    print("[rtk-bt-bridge] Uploading firmware via rtk_hciattach...", flush=True)
+    ret = os.system("/usr/bin/rtk_hciattach -s 115200 /dev/ttyS1 rtk_h5 >/dev/null 2>&1")
+    if ret != 0:
+        print(f"[rtk-bt-bridge] rtk_hciattach failed (code {ret}), retrying once...", flush=True)
+        os.system("echo 0 > /sys/class/gpio/gpio493/value 2>/dev/null; echo 0 > /sys/class/gpio/gpio494/value 2>/dev/null; sleep 1; echo 1 > /sys/class/gpio/gpio493/value 2>/dev/null; sleep 0.2; echo 1 > /sys/class/gpio/gpio494/value 2>/dev/null; sleep 0.5")
+        ret = os.system("/usr/bin/rtk_hciattach -s 115200 /dev/ttyS1 rtk_h5 >/dev/null 2>&1")
+
+    # 3. Open UART at 3M baud 8E1
+    B3000000 = getattr(termios, "B3000000", 4109)
+    uart_fd = os.open("/dev/ttyS1", os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+    attrs = termios.tcgetattr(uart_fd)
+    cflag = termios.CS8 | termios.CREAD | termios.CLOCAL | termios.CRTSCTS | termios.PARENB
+    cflag &= ~getattr(termios, "PARODD", 0x200)
+    attrs[0] = 0
+    attrs[1] = 0
+    attrs[2] = cflag | B3000000
+    attrs[3] = 0
+    attrs[4] = B3000000
+    attrs[5] = B3000000
+    attrs[6][termios.VMIN] = 0
+    attrs[6][termios.VTIME] = 0
+    termios.tcsetattr(uart_fd, termios.TCSANOW, attrs)
+    termios.tcflush(uart_fd, termios.TCIOFLUSH)
+
+    # 4. Open PTY and attach kernel N_HCI (proto 0 = H4)
+    master, slave = pty.openpty()
+    slave_name = os.ttyname(slave)
+    print(f"[rtk-bt-bridge] Created PTY {slave_name}, attaching N_HCI discipline...", flush=True)
+    fcntl.ioctl(slave, termios.TIOCSETD, struct.pack('i', 15))
+    HCIUARTSETPROTO = 0x400455c8
+    fcntl.ioctl(slave, HCIUARTSETPROTO, 0) # H4
+
+    print("[rtk-bt-bridge] Bridge operational: Kernel H4 <-> Realtek H5 UART.", flush=True)
+
+    tx_seq = 0
+    rx_seq = 0
+    uart_rx_buf = bytearray()
+    master_rx_buf = bytearray()
+
+    while running:
+        rlist, _, _ = select.select([uart_fd, master], [], [], 0.5)
+
+        if uart_fd in rlist:
+            try:
+                chunk = os.read(uart_fd, 2048)
+                if chunk:
+                    uart_rx_buf.extend(chunk)
+                    while b"\xC0" in uart_rx_buf:
+                        idx = uart_rx_buf.find(b"\xC0")
+                        if idx > 0:
+                            raw_pkt = uart_rx_buf[:idx]
+                            uart_rx_buf = uart_rx_buf[idx + 1:]
+                            dec = slip_decode(raw_pkt)
+                            if len(dec) >= 4 and ((dec[0] + dec[1] + dec[2] + dec[3]) & 0xFF == 0xFF):
+                                b0, b1, b2, b3 = dec[0], dec[1], dec[2], dec[3]
+                                plen = ((b1 >> 4) & 0x0F) | (b2 << 4)
+                                ptype = b1 & 0x0F
+                                payload = dec[4:4 + plen]
+
+                                if b0 & 0x80: # reliable packet, send ACK
+                                    rx_seq = ((b0 & 7) + 1) & 7
+                                    os.write(uart_fd, make_ack(rx_seq))
+
+                                if ptype == 0x0F: # Link control / keepalive
+                                    if payload.startswith(b"\x05\xfa"):
+                                        os.write(uart_fd, make_h5_frame(0x0F, b"\x06\xf9", reliable=False, use_crc=False))
+                                    continue
+
+                                # Deliver HCI Events (0x04) and ACL (0x02) to kernel
+                                if ptype in (0x02, 0x03, 0x04):
+                                    os.write(master, bytes([ptype]) + payload)
+                        else:
+                            uart_rx_buf = uart_rx_buf[1:]
+            except Exception:
+                break
+
+        if master in rlist:
+            try:
+                chunk = os.read(master, 2048)
+                if chunk:
+                    master_rx_buf.extend(chunk)
+                    while len(master_rx_buf) >= 3:
+                        ptype = master_rx_buf[0]
+                        if ptype == 0x01: # Command
+                            if len(master_rx_buf) < 4: break
+                            plen = master_rx_buf[3]
+                            total = 4 + plen
+                            if len(master_rx_buf) < total: break
+                            payload = bytes(master_rx_buf[1:total])
+                            master_rx_buf = master_rx_buf[total:]
+                            h5_pkt = make_h5_frame(0x01, payload, seq=tx_seq, ack=rx_seq, reliable=True, use_crc=True)
+                            tx_seq = (tx_seq + 1) & 7
+                            os.write(uart_fd, h5_pkt)
+                        elif ptype == 0x02: # ACL Data
+                            if len(master_rx_buf) < 5: break
+                            plen = struct.unpack_from("<H", master_rx_buf, 3)[0]
+                            total = 5 + plen
+                            if len(master_rx_buf) < total: break
+                            payload = bytes(master_rx_buf[1:total])
+                            master_rx_buf = master_rx_buf[total:]
+                            h5_pkt = make_h5_frame(0x02, payload, seq=tx_seq, ack=rx_seq, reliable=True, use_crc=True)
+                            tx_seq = (tx_seq + 1) & 7
+                            os.write(uart_fd, h5_pkt)
+                        elif ptype == 0x03: # SCO Data
+                            if len(master_rx_buf) < 4: break
+                            plen = master_rx_buf[3]
+                            total = 4 + plen
+                            if len(master_rx_buf) < total: break
+                            payload = bytes(master_rx_buf[1:total])
+                            master_rx_buf = master_rx_buf[total:]
+                            h5_pkt = make_h5_frame(0x03, payload, seq=tx_seq, ack=rx_seq, reliable=True, use_crc=True)
+                            tx_seq = (tx_seq + 1) & 7
+                            os.write(uart_fd, h5_pkt)
+                        else:
+                            master_rx_buf = master_rx_buf[1:]
+            except Exception:
+                break
+
+    print("[rtk-bt-bridge] Shutting down...", flush=True)
+    try: os.close(slave)
+    except: pass
+    try: os.close(master)
+    except: pass
+    try: os.close(uart_fd)
+    except: pass
+    try: os.remove(PID_FILE)
+    except: pass
+
+if __name__ == "__main__":
+    main()

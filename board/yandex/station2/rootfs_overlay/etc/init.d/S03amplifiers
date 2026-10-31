@@ -24,7 +24,17 @@ case "$1" in
       echo "[AtriOS] 20V rail: ${rail_reg##*/} state=${rail_state:-?} ($(cat "$rail_reg/microvolts" 2>/dev/null) uV)"
     fi
     if [ -z "$rail_reg" ] || [ "$rail_state" != "enabled" ]; then
-      for g in 485; do
+      rail_gpio=485
+      for chip in /sys/class/gpio/gpiochip*; do
+        [ -d "$chip" ] || continue
+        base=$(cat "$chip/base" 2>/dev/null || true)
+        ngpio=$(cat "$chip/ngpio" 2>/dev/null || true)
+        if [ -n "$base" ] && [ -n "$ngpio" ] && [ "$ngpio" -gt 75 ]; then
+          rail_gpio=$((base + 75))
+          break
+        fi
+      done
+      for g in "$rail_gpio" 485; do
         if [ ! -d "/sys/class/gpio/gpio$g" ]; then
           (echo "$g" > /sys/class/gpio/export) 2>/dev/null || true
         fi
@@ -59,6 +69,7 @@ m = mmap.mmap(fd, 0x1000, mmap.MAP_SHARED, mmap.PROT_READ | mmap.PROT_WRITE, off
 struct.pack_into("<I", m, 0x24, 0x01110111)  # SM1 MST_PAD_CTRL1: SCLK/LRCLK -> mst_b
 struct.pack_into("<I", m, 0x20, 0x00000011)  # SM1 MST_PAD_CTRL0: MCLK -> mst_b
 m.flush()
+m.close()
 os.close(fd)
 ' 2>/dev/null; then
         # /dev/mem may be restricted by CONFIG_STRICT_DEVMEM.  BusyBox
@@ -152,7 +163,7 @@ os.close(fd)
     # Apply the persisted AtriOS user volume last.  S03 no longer writes
     # 255/193 and no longer restores the distro asound.state, so this is
     # the only volume source at boot and on every runtime S03 call.
-    /usr/lib/atrios/audio apply >/dev/null 2>&1 || true
+    /bin/sh /usr/lib/atrios/audio apply >/dev/null 2>&1 || true
 
     echo "[AtriOS] Audio amplifiers initialized."
     ;;

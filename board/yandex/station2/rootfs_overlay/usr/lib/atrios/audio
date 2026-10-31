@@ -49,13 +49,19 @@ apply_volume() {
     pct="$1"
     raw=$(volume_raw "$pct" 255)
     raw_hp=$(volume_raw "$pct" 191)
-    amixer -c "$CARD" cset name='Woofer Master Playback Volume' "$raw" 2>/dev/null || true
-    amixer -c "$CARD" cset name='Tweeters Master Playback Volume' "$raw" 2>/dev/null || true
-    amixer -c "$CARD" cset name='Headphone DAC Playback Volume' "$raw_hp" 2>/dev/null || true
-    amixer -c "$CARD" cset name='Woofer Master Playback Switch' 1 2>/dev/null || true
-    amixer -c "$CARD" cset name='Tweeters Master Playback Switch' 1 2>/dev/null || true
-    amixer -c "$CARD" cset name='Headphone Headphone Switch' 1 2>/dev/null || true
-    amixer -c "$CARD" cset name='SPK mute' 0 2>/dev/null || true
+    sw=1
+    if [ "$pct" -le 0 ]; then
+        sw=0
+    fi
+    for c in "$CARD" 0; do
+        amixer -c "$c" cset name='Woofer Master Playback Volume' "$raw" 2>/dev/null || true
+        amixer -c "$c" cset name='Tweeters Master Playback Volume' "$raw" 2>/dev/null || true
+        amixer -c "$c" cset name='Headphone DAC Playback Volume' "$raw_hp" 2>/dev/null || true
+        amixer -c "$c" cset name='Woofer Master Playback Switch' "$sw" 2>/dev/null || true
+        amixer -c "$c" cset name='Tweeters Master Playback Switch' "$sw" 2>/dev/null || true
+        amixer -c "$c" cset name='Headphone Headphone Switch' "$sw" 2>/dev/null || true
+        amixer -c "$c" cset name='SPK mute' 0 2>/dev/null || true
+    done
 }
 
 case "$ACTION" in
@@ -171,9 +177,24 @@ case "$ACTION" in
     ;;
 
   play)
-    WAV="${2:-/usr/share/sounds/alsa/Front_Center.wav}"
-    if [ ! -f "$WAV" ]; then
-      echo "File not found: $WAV"
+    WAV="${2:-}"
+    if [ -z "$WAV" ] || [ ! -f "$WAV" ]; then
+      if [ -n "$WAV" ] && [ ! -f "$WAV" ]; then
+        echo "Specified file not found: $WAV"
+        echo "Searching for default audio tracks..."
+      fi
+      WAV=""
+      for f in /root/music/*.wav \
+               /usr/share/sounds/atrios/test-music.wav \
+               /usr/share/sounds/alsa/Front_Center.wav; do
+        if [ -f "$f" ]; then
+          WAV="$f"
+          break
+        fi
+      done
+    fi
+    if [ -z "$WAV" ] || [ ! -f "$WAV" ]; then
+      echo "No audio file found. Place a WAV in /root/music/ or specify a file path."
       exit 1
     fi
     /etc/init.d/S03amplifiers start >/dev/null 2>&1 || true
@@ -181,7 +202,11 @@ case "$ACTION" in
     if command -v pw-play >/dev/null 2>&1 && pidof pipewire >/dev/null 2>&1; then
       pw-play "$WAV" 2>/dev/null && exit 0
     fi
-    aplay -D default "$WAV" 2>/dev/null || aplay -D "plughw:$CARD,0" "$WAV" 2>/dev/null || aplay -D "hw:$CARD,0" "$WAV"
+    aplay -D default "$WAV" 2>/dev/null || \
+    aplay -D "plughw:$CARD,0" "$WAV" 2>/dev/null || \
+    aplay -D "plughw:0,0" "$WAV" 2>/dev/null || \
+    aplay -D "hw:$CARD,0" "$WAV" 2>/dev/null || \
+    aplay -D "hw:0,0" "$WAV"
     ;;
 
   record)
@@ -191,17 +216,25 @@ case "$ACTION" in
     MIC_OK=0
     for dev in 0 3 1; do
       for ch in 8 4 2; do
-        if arecord -D "hw:$CARD,$dev" -c "$ch" -r 48000 -f S32_LE -d "$DUR" "$OUT" 2>/dev/null; then
-          MIC_OK=1
-          echo "Captured from hw:$CARD,$dev (${ch}ch)"
-          break 2
-        fi
+        for c in "$CARD" 0; do
+          if arecord -D "hw:$c,$dev" -c "$ch" -r 48000 -f S32_LE -d "$DUR" "$OUT" 2>/dev/null; then
+            MIC_OK=1
+            echo "Captured from hw:$c,$dev (${ch}ch)"
+            break 3
+          fi
+        done
       done
     done
     if [ "$MIC_OK" -eq 0 ]; then
-      arecord -D capture_plug -c 8 -r 48000 -f S32_LE -d "$DUR" "$OUT" 2>/dev/null || true
+      arecord -D capture_plug -c 8 -r 48000 -f S32_LE -d "$DUR" "$OUT" 2>/dev/null || \
+      arecord -D default -c 2 -r 48000 -f S16_LE -d "$DUR" "$OUT" 2>/dev/null || true
     fi
-    echo "Saved to $OUT ($(ls -l "$OUT" | awk '{print $5}') bytes)."
+    if [ -f "$OUT" ] && [ -s "$OUT" ]; then
+      echo "Saved to $OUT ($(ls -l "$OUT" | awk '{print $5}') bytes)."
+    else
+      echo "Error: Capture failed; output file was not created."
+      exit 1
+    fi
     ;;
 
   apply)
@@ -213,7 +246,11 @@ case "$ACTION" in
     VAL="$2"
     if [ -z "$VAL" ]; then
       PCT=$(read_state_pct)
-      RAW=$(amixer -c "$CARD" cget name='Woofer Master Playback Volume' 2>/dev/null | sed -n 's/.*: values=//p' | tr -dc '0-9')
+      RAW=""
+      for c in "$CARD" 0; do
+        RAW=$(amixer -c "$c" cget name='Woofer Master Playback Volume' 2>/dev/null | sed -n 's/.*: values=//p' | tr -dc '0-9')
+        [ -n "$RAW" ] && break
+      done
       if [ -n "$RAW" ]; then
         echo "Current volume: ${PCT}% (ALSA ${RAW}/255)"
       else
@@ -235,28 +272,46 @@ case "$ACTION" in
     ;;
 
   mute)
-    STATE="$2"
-    if [ "$STATE" = "off" ] || [ "$STATE" = "0" ] || [ "$STATE" = "unmute" ]; then
-      echo "Unmuting microphone array..."
-      amixer -c "$CARD" sset Capture unmute 2>/dev/null || true
-      amixer -c "$CARD" sset Capture 100% 2>/dev/null || true
-      for ctl in "Capture Switch" "ADC Capture Switch" "Mic Capture Switch" \
-                 "TDMIN_A Switch" "TDMIN_B Switch"; do
-        amixer -c "$CARD" cset name="$ctl" 1 2>/dev/null || true
+    STATE="${2:-}"
+    if [ -z "$STATE" ] || [ "$STATE" = "status" ]; then
+      is_muted=0
+      for c in "$CARD" 0; do
+        val=$(amixer -c "$c" cget name='Capture Switch' 2>/dev/null | sed -n 's/.*: values=//p' | tr -dc 'a-zA-Z0-9')
+        if [ "$val" = "off" ] || [ "$val" = "0" ]; then
+          is_muted=1
+          break
+        fi
       done
-      for i in 1 2 3 4; do
-        amixer -c "$CARD" cset name="Loopback ADC${i}_MUTE" 0 2>/dev/null || true
+      if [ "$is_muted" -eq 1 ]; then
+        echo "Microphone array is currently MUTED. (Use 'atrios mute off' to unmute)"
+      else
+        echo "Microphone array is currently UNMUTED. (Use 'atrios mute on' to mute)"
+      fi
+    elif [ "$STATE" = "off" ] || [ "$STATE" = "0" ] || [ "$STATE" = "unmute" ]; then
+      echo "Unmuting microphone array..."
+      for c in "$CARD" 0; do
+        amixer -c "$c" sset Capture unmute 2>/dev/null || true
+        amixer -c "$c" sset Capture 100% 2>/dev/null || true
+        for ctl in "Capture Switch" "ADC Capture Switch" "Mic Capture Switch" \
+                   "TDMIN_A Switch" "TDMIN_B Switch"; do
+          amixer -c "$c" cset name="$ctl" 1 2>/dev/null || true
+        done
+        for i in 1 2 3 4; do
+          amixer -c "$c" cset name="Loopback ADC${i}_MUTE" 0 2>/dev/null || true
+        done
       done
     else
       echo "Muting microphone array (playback is not touched)..."
-      amixer -c "$CARD" sset Capture mute 2>/dev/null || true
-      amixer -c "$CARD" sset Capture 0% 2>/dev/null || true
-      for ctl in "Capture Switch" "ADC Capture Switch" "Mic Capture Switch" \
-                 "TDMIN_A Switch" "TDMIN_B Switch"; do
-        amixer -c "$CARD" cset name="$ctl" 0 2>/dev/null || true
-      done
-      for i in 1 2 3 4; do
-        amixer -c "$CARD" cset name="Loopback ADC${i}_MUTE" 1 2>/dev/null || true
+      for c in "$CARD" 0; do
+        amixer -c "$c" sset Capture mute 2>/dev/null || true
+        amixer -c "$c" sset Capture 0% 2>/dev/null || true
+        for ctl in "Capture Switch" "ADC Capture Switch" "Mic Capture Switch" \
+                   "TDMIN_A Switch" "TDMIN_B Switch"; do
+          amixer -c "$c" cset name="$ctl" 0 2>/dev/null || true
+        done
+        for i in 1 2 3 4; do
+          amixer -c "$c" cset name="Loopback ADC${i}_MUTE" 1 2>/dev/null || true
+        done
       done
     fi
     ;;

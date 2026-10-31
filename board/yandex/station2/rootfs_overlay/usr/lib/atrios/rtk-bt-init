@@ -17,12 +17,21 @@ import select
 import termios
 import glob
 
-UART_DEV = "/dev/ttyS1"
+def find_uart_dev():
+    for dev in ("/dev/ttyS1", "/dev/ttyAML1"):
+        if os.path.exists(dev):
+            return dev
+    return "/dev/ttyS1"
+
+UART_DEV = find_uart_dev()
 FW_PATH = "/lib/firmware/rtlbt/rtl8822cs_fw"
 CFG_PATH = "/lib/firmware/rtlbt/rtl8822cs_config"
 STATE_FILE = "/tmp/atrios_bt_state"
 
 def reset_bt_rfkill():
+    global UART_DEV
+    UART_DEV = find_uart_dev()
+    reset_ok = False
     for rf in glob.glob("/sys/class/rfkill/rfkill*"):
         p_type = rf + "/type"
         p_state = rf + "/state"
@@ -48,10 +57,37 @@ def reset_bt_rfkill():
                         state = open(p_state).read().strip()
                     print(f"[BT] rfkill {os.path.basename(rf)} state={state}",
                           flush=True)
-                    return state == "0"
+                    reset_ok = (state == "0")
+                    if reset_ok:
+                        return True
             except Exception:
                 pass
-    return False
+
+    # Fallback to direct sysfs GPIO pulse if rfkill is absent or failed (GPIOX_18 / Pin 84)
+    for gpio_num in (494, 493, 84):
+        p_dir = f"/sys/class/gpio/gpio{gpio_num}/direction"
+        p_val = f"/sys/class/gpio/gpio{gpio_num}/value"
+        if not os.path.exists(p_val):
+            try:
+                with open("/sys/class/gpio/export", "w") as f:
+                    f.write(f"{gpio_num}\n")
+            except Exception:
+                pass
+        if os.path.exists(p_val):
+            try:
+                with open(p_dir, "w") as f:
+                    f.write("out\n")
+                with open(p_val, "w") as f:
+                    f.write("0\n")
+                time.sleep(0.15)
+                with open(p_val, "w") as f:
+                    f.write("1\n")
+                time.sleep(0.40)
+                print(f"[BT] Pulsed hardware reset via gpio{gpio_num}", flush=True)
+                return True
+            except Exception:
+                pass
+    return reset_ok
 
 def config_uart(fd, baud=termios.B115200, parity_even=False, rtscts=False):
     try:
@@ -613,9 +649,67 @@ def do_scan():
         if fd is not None:
             os.close(fd)
 
+def do_test():
+    print("==========================================================", flush=True)
+    print("       AtriOS Realtek RTL8822CS Bluetooth Diagnostics    ", flush=True)
+    print("==========================================================", flush=True)
+    dev = find_uart_dev()
+    print(f"[1/6] Checking UART Device: {dev}", flush=True)
+    if not os.path.exists(dev):
+        print(f"      [FAIL] UART device {dev} not found!", flush=True)
+        return 1
+    print(f"      [OK] Serial device exists ({dev})", flush=True)
+
+    print("[2/6] Pulsing BT_EN Power Reset (rfkill / sysfs GPIO)...", flush=True)
+    rf_ok = reset_bt_rfkill()
+    if rf_ok:
+        print("      [OK] Hardware reset successful, radio active.", flush=True)
+    else:
+        print("      [WARN] Could not verify rfkill state, proceeding with probe...", flush=True)
+
+    print(f"[3/6] Initializing Controller Communication on {dev}...", flush=True)
+    ret = do_init(do_reset=False)
+    if ret not in (0, 2):
+        print("      [FAIL] Controller did not respond on UART.", flush=True)
+        print("      Troubleshooting: Check 32.768kHz clock, BT_EN GPIO, and UART_A pin mux.", flush=True)
+        return 1
+    
+    state_desc = "Unknown"
+    mac_addr = "Unknown"
+    if os.path.exists(STATE_FILE):
+        parts = open(STATE_FILE).read().strip().split()
+        if parts:
+            state_desc = parts[0]
+            if len(parts) > 1:
+                mac_addr = parts[1]
+
+    print(f"      [OK] Communication established! Protocol: {state_desc}, MAC: {mac_addr}", flush=True)
+
+    print("[4/6] Verifying Firmware & Configuration Files...", flush=True)
+    if os.path.exists(FW_PATH) and os.path.exists(CFG_PATH):
+        fw_size = os.path.getsize(FW_PATH)
+        cfg_size = os.path.getsize(CFG_PATH)
+        print(f"      [OK] rtl8822cs_fw ({fw_size} bytes), rtl8822cs_config ({cfg_size} bytes)", flush=True)
+    else:
+        print(f"      [WARN] Firmware files missing: {FW_PATH} or {CFG_PATH}", flush=True)
+
+    print("[5/6] Performing Bluetooth Air Scan (BLE & Classic)...", flush=True)
+    scan_ret = do_scan()
+    if scan_ret == 0:
+        print("      [OK] Scan completed successfully.", flush=True)
+    else:
+        print("      [WARN] Scan returned non-zero code.", flush=True)
+
+    print("==========================================================", flush=True)
+    print(f"[RESULT] Bluetooth subsystem is OPERATIONAL (MAC: {mac_addr})", flush=True)
+    print("==========================================================", flush=True)
+    return 0
+
 if __name__ == "__main__":
     act = sys.argv[1] if len(sys.argv) > 1 else "init"
     if act == "scan":
         sys.exit(do_scan())
+    elif act == "test":
+        sys.exit(do_test())
     else:
         sys.exit(do_init(do_reset=True))

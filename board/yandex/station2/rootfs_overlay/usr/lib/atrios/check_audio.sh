@@ -356,7 +356,7 @@ audit_alsa() {
             log_verbose "  * ${sw}: ${sw_val} [OK]"
         else
             CHECK_ALSA_STATUS="FAIL"
-            CHECK_ALSA_MSG="${sw} is muted (${sw_val})"
+            CHECK_ALSA_MSG="${sw} is muted (${sw_val:-<missing>})"
             log_error "ALSA mixer muted: ${CHECK_ALSA_MSG}"
             return 1
         fi
@@ -460,12 +460,14 @@ audit_playback() {
         elif command -v aplay >/dev/null 2>&1 && [ -n "$TEST_AUDIO" ]; then
             log_verbose "  * Playing test audio via aplay: ${TEST_AUDIO}"
             play_output=$(aplay -D default "$TEST_AUDIO" 2>&1) || \
-            play_output=$(aplay -D "plughw:${ALSA_CARD_NAME},0" "$TEST_AUDIO" 2>&1) || play_err=$?
+            play_output=$(aplay -D "plughw:AMLAUGESOUND,0" "$TEST_AUDIO" 2>&1) || \
+            play_output=$(aplay -D "plughw:0,0" "$TEST_AUDIO" 2>&1) || play_err=$?
         # Priority 3: speaker-test finite 1-loop sine test tone
         elif command -v speaker-test >/dev/null 2>&1; then
             log_verbose "  * Playing 440Hz sine test tone via speaker-test..."
             play_output=$(speaker-test -D default -c 2 -r 48000 -t sine -f 440 -l 1 2>&1) || \
-            play_output=$(speaker-test -D "plughw:${ALSA_CARD_NAME},0" -c 2 -r 48000 -t sine -f 440 -l 1 2>&1) || play_err=$?
+            play_output=$(speaker-test -D "plughw:AMLAUGESOUND,0" -c 2 -r 48000 -t sine -f 440 -l 1 2>&1) || \
+            play_output=$(speaker-test -D "plughw:0,0" -c 2 -r 48000 -t sine -f 440 -l 1 2>&1) || play_err=$?
         fi
 
         # Inspect return code and output for underruns / xruns
