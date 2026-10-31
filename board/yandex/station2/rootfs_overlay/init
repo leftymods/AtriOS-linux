@@ -1,0 +1,22 @@
+#!/bin/sh
+# AtriOS Linux Init Wrapper
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+
+mount -t proc proc /proc 2>/dev/null
+mount -t sysfs sysfs /sys 2>/dev/null
+mount -t devtmpfs devtmpfs /dev 2>/dev/null
+
+echo "=========================================" > /dev/kmsg 2>/dev/null || true
+echo "  AtriOS Linux Init: Starting System...   " > /dev/kmsg 2>/dev/null || true
+echo "=========================================" > /dev/kmsg 2>/dev/null || true
+
+if [ -x /sbin/init ]; then
+    exec /sbin/init "$@"
+fi
+
+if [ -x /bin/busybox ]; then
+    exec /bin/busybox init "$@"
+fi
+
+echo "[!] Failed to execute /sbin/init, spawning emergency shell" > /dev/kmsg 2>/dev/null || true
+exec /bin/sh

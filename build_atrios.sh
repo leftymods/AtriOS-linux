@@ -213,9 +213,13 @@ tar -xf "$ROOTFS_TAR" -C "$SYSTEM_TREE"
 # --no-buildroot assembly still gets the current scripts.
 rsync -a "$OVERLAY_DIR"/ "$SYSTEM_TREE"/
 
-ln -sf sbin/init "$SYSTEM_TREE/init"
-chmod 755 "$SYSTEM_TREE/lib/ld-"* 2>/dev/null || true
+cp -f "$OVERLAY_DIR/init" "$SYSTEM_TREE/init"
+chmod 755 "$SYSTEM_TREE/init"
+chmod 755 "$SYSTEM_TREE/lib/ld-"* "$SYSTEM_TREE/lib64/ld-"* 2>/dev/null || true
 chmod 755 "$SYSTEM_TREE/bin/busybox" 2>/dev/null || true
+chmod -R 755 "$SYSTEM_TREE/bin" "$SYSTEM_TREE/sbin" "$SYSTEM_TREE/usr/bin" "$SYSTEM_TREE/usr/sbin" 2>/dev/null || true
+chmod -R 755 "$SYSTEM_TREE/etc/init.d" 2>/dev/null || true
+chmod 755 "$SYSTEM_TREE/usr/lib/atrios/screend" 2>/dev/null || true
 
 ROOTFS_KO_COUNT=$(find "$SYSTEM_TREE/lib/modules/4.9.113" -maxdepth 1 -name '*.ko' 2>/dev/null | wc -l)
 ROOTFS_FW_COUNT=$(find "$SYSTEM_TREE/lib/firmware" -type f 2>/dev/null | wc -l)
@@ -225,7 +229,7 @@ if [ "$ROOTFS_KO_COUNT" -lt 51 ] || [ "$ROOTFS_FW_COUNT" -lt 1 ]; then
 fi
 
 mkdir -p "$STAGING_DIR"
-"$MAKE_EXT4FS" -l "$SYSTEM_PARTITION_SIZE" -a system "$STAGING_DIR/system.PARTITION" "$SYSTEM_TREE"
+"$MAKE_EXT4FS" -l "$SYSTEM_PARTITION_SIZE" "$STAGING_DIR/system.PARTITION" "$SYSTEM_TREE"
 touch "$TOOLS_DIR/.system_from_rootfs"
 echo "      system.PARTITION: $(stat -c %s "$STAGING_DIR/system.PARTITION") bytes"
 echo "      Rootfs vendor payload: $ROOTFS_KO_COUNT kernel modules, $ROOTFS_FW_COUNT firmware files"
