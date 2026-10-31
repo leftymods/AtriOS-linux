@@ -51,9 +51,9 @@ def get_fb_ring():
 FB_RING = get_fb_ring()
 NUM_LEDS = 24
 CARD = "AMLAUGESOUND"
-VOLUME_STEP = 4  # percent per detent; 25 distinct steps (100% / 24 LEDs = ~4.16%), exactly 1 physical LED per click
-FADE_IDLE_DELAY = 1.0  # seconds to keep ring lit after knob stops moving
-FADE_DURATION = 0.6    # seconds for silky smooth cosine fade-out
+VOLUME_STEP = 2  # percent per detent; 25 distinct steps (100% / 24 LEDs = ~4.16%), exactly 1 physical LED per click
+FADE_IDLE_DELAY = 1.2  # seconds to keep ring lit after knob stops moving
+FADE_DURATION = 0.8    # seconds for silky smooth cosine fade-out
 STATE_DIR = "/var/lib/atrios"
 STATE_FILE = STATE_DIR + "/volume"
 DEFAULT_VOLUME = 60
@@ -70,6 +70,7 @@ KEY_PAGEDOWN = 109  # Knob CCW
 
 mic_muted = False
 current_volume = DEFAULT_VOLUME
+display_volume = float(DEFAULT_VOLUME)
 
 
 def volume_to_raw(pct, zero_db_raw):
@@ -158,17 +159,17 @@ def set_volume(pct, force_switches=False):
                     subprocess.run([AMIXER, "-c", card, "cset", f"name={ctl}", "159"],
                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-            if force_switches or pct == 0:
-                for ctl in (
-                    "Woofer Master Playback Switch", "Woofer Ch1 Playback Switch",
-                    "Woofer Ch2 Playback Switch", "Tweeters Master Playback Switch",
-                    "Tweeters Ch1 Playback Switch", "Tweeters Ch2 Playback Switch",
-                    "Headphone Headphone Switch",
-                ):
-                    subprocess.run([AMIXER, "-c", card, "cset", f"name={ctl}", sw],
-                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                subprocess.run([AMIXER, "-c", card, "cset", "name=SPK mute", "1" if pct == 0 else "0"],
+            # Always keep switches unmuted if pct > 0, mute only if pct == 0
+            for ctl in (
+                "Woofer Master Playback Switch", "Woofer Ch1 Playback Switch",
+                "Woofer Ch2 Playback Switch", "Tweeters Master Playback Switch",
+                "Tweeters Ch1 Playback Switch", "Tweeters Ch2 Playback Switch",
+                "Headphone Headphone Switch",
+            ):
+                subprocess.run([AMIXER, "-c", card, "cset", f"name={ctl}", sw],
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run([AMIXER, "-c", card, "cset", "name=SPK mute", "1" if pct == 0 else "0"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             break
         except Exception:
             pass
@@ -231,7 +232,6 @@ def adjust_volume(step):
     is_fading = False
     last_volume_time = time.time()
     save_state_volume(current_volume)
-    show_volume_ring(current_volume, brightness=1.0)
     set_volume(current_volume)
     volume_dirty = False
 
@@ -396,7 +396,7 @@ def init_ring_triggers():
 
 
 def main():
-    global current_volume, last_volume_time, ring_active, is_fading, fade_start_time, volume_dirty, last_volume_change_time
+    global current_volume, display_volume, last_volume_time, ring_active, is_fading, fade_start_time, volume_dirty, last_volume_change_time
     EVENT_FORMAT = "QQHHi"
     EVENT_SIZE = struct.calcsize(EVENT_FORMAT)
     open_fds = {}
@@ -415,7 +415,7 @@ def main():
             # 100 ms wakeup keeps the fade-out and watchdog responsive; input
             # events still wake select immediately.
             fds_to_watch = list(open_fds.keys())
-            select_timeout = 0.02 if (ring_active and is_fading) else 0.05
+            select_timeout = 0.016 if ring_active else 0.05
             rlist, _, _ = select.select(fds_to_watch, [], [], select_timeout) if fds_to_watch else ([], [], [])
             now = time.time()
 
@@ -434,20 +434,30 @@ def main():
                 scan_and_open_devices(open_fds)
                 last_scan = now
 
-            # Smooth fade-out of volume ring
+            # Smooth animation & fade-out of volume ring
             if ring_active and not mic_muted:
+                # 1. Smoothly interpolate display_volume towards current_volume (60 FPS glide)
+                diff = current_volume - display_volume
+                if abs(diff) > 0.1:
+                    display_volume += diff * 0.35
+                else:
+                    display_volume = float(current_volume)
+
+                # 2. Fade out handling
                 if not is_fading:
                     if now - last_volume_time >= FADE_IDLE_DELAY:
                         is_fading = True
                         fade_start_time = now
+                    show_volume_ring(display_volume, brightness=1.0)
                 else:
                     elapsed = now - fade_start_time
                     if elapsed >= FADE_DURATION:
                         clear_ring()
                     else:
                         progress = elapsed / FADE_DURATION
+                        # Smooth S-curve easing
                         brightness = 0.5 * (1.0 + math.cos(math.pi * progress))
-                        show_volume_ring(current_volume, brightness=brightness)
+                        show_volume_ring(display_volume, brightness=brightness)
 
             for fd in rlist:
                 try:

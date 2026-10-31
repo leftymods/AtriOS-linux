@@ -42,6 +42,8 @@ alias of:N*T*Carm,malit6xx mali
 alias of:N*T*Cti,pcm1774C* snd_soc_pcm1774_i2c
 alias of:N*T*Cti,pcm1774 snd_soc_pcm1774_i2c
 alias i2c:pcm1774 snd_soc_pcm1774_i2c
+alias spi:led_screen gowin_led_device
+alias spi:led_panel gowin_led_device
 alias of:N*T*Cya,led_screenC* gowin_led_device
 alias of:N*T*Cya,led_screen gowin_led_device
 alias of:N*T*Cya,led_panelC* gowin_led_device
@@ -55,8 +57,9 @@ alias of:N*T*Ceverest,es7210_4chC* snd_soc_es7210
 alias of:N*T*Ceverest,es7210_4ch snd_soc_es7210
 alias of:N*T*Ceverest,es7210_2chC* snd_soc_es7210
 alias of:N*T*Ceverest,es7210_2ch snd_soc_es7210
-alias of:N*T*Cquasar_led_screenC* quasar_led_screen
-alias of:N*T*Cquasar_led_screen quasar_led_screen
+alias of:N*T*Cya,led_screenC* quasar_led_screen
+alias of:N*T*Cya,led_screen quasar_led_screen
+alias spi:quasar_led_screen quasar_led_screen
 alias of:N*T*Cyandex,zigbee-controlC* zigbee_control
 alias of:N*T*Cyandex,zigbee-control zigbee_control
 alias of:N*T*Cti,tlv320adc3101C* snd_soc_tlv320adc3101
