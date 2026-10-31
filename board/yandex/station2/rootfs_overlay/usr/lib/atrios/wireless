@@ -208,6 +208,20 @@ case "$CMD" in
             python3 /usr/lib/atrios/bt-agent &
             sleep 0.5
           fi
+          if [ -x /usr/bin/bluealsa ] && ! pgrep -x bluealsa >/dev/null 2>&1; then
+            echo "Starting BlueALSA A2DP audio engine..."
+            /usr/bin/bluealsa -p a2dp-sink --a2dp-volume -i hci0 &
+            sleep 0.5
+          fi
+          if [ -x /usr/bin/bluealsa-aplay ] && ! pgrep -x bluealsa-aplay >/dev/null 2>&1; then
+            echo "Starting BlueALSA audio playback bridge..."
+            /usr/bin/bluealsa-aplay -v -D plughw:AMLAUGESOUND,0 -M AMLAUGESOUND --mixer-name='Woofer Master' >/tmp/bluealsa-aplay.log 2>&1 &
+            sleep 0.5
+          fi
+          if [ -x /usr/lib/atrios/bt-volume-sync ] && ! pgrep -f /usr/lib/atrios/bt-volume-sync >/dev/null 2>&1; then
+            echo "Starting Bluetooth volume synchronization daemon..."
+            python3 /usr/lib/atrios/bt-volume-sync &
+          fi
           echo "[OK] Bluetooth Speaker Mode ACTIVE!"
           echo "[OK] Discoverable as: 'Yandex Station Max'"
           echo "[OK] You can now connect from your phone or PC."
@@ -218,6 +232,7 @@ case "$CMD" in
         fi
       elif [ "$MODE" = "off" ] || [ "$MODE" = "stop" ]; then
         echo "Stopping Bluetooth Speaker Mode..."
+        killall bt-volume-sync bluealsa-aplay bluealsa bt-agent 2>/dev/null || true
         if command -v hciconfig >/dev/null 2>&1; then
           hciconfig hci0 noscan 2>/dev/null || true
         fi
