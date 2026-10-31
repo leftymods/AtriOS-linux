@@ -60,7 +60,7 @@ def reset_bt_rfkill():
                 pass
 
     # 2. Hardware reset via direct sysfs GPIO pulse (Pin 84 = GPIOX_18 BT_EN)
-    for gpio_num in (84, 494, 493):
+    for gpio_num in (494, 493):
         p_dir = f"/sys/class/gpio/gpio{gpio_num}/direction"
         p_val = f"/sys/class/gpio/gpio{gpio_num}/value"
         if not os.path.exists(p_val):
