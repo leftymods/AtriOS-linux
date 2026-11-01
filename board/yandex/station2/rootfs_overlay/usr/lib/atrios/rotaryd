@@ -49,18 +49,18 @@ current_volume = DEFAULT_VOLUME
 
 
 def volume_to_raw(pct, zero_db_raw):
-    """Map UI 0..100 to the raw ALSA value using a perceptual curve.
+    """Map UI 0..100 to the raw ALSA value using a wide dynamic range perceptual curve.
 
-    dB(p) = -60 * (1 - sqrt(p/100)), so 40% is about -22 dB (audible),
-    100% is 0 dB and 0% is effectively muted.  Speaker masters have their
-    0 dB point at raw 255; the ES8156 headphone DAC at raw 191.  Writing
-    255 to the headphone control would be +32 dB, so never share the raw
+    Provides true quiet night listening at 1-2% (-100 dB) up to 0 dB at 100%.
+    Speaker masters have their 0 dB point at raw 255; the ES8156 headphone DAC at raw 191.
+    Writing 255 to the headphone control would be +32 dB, so never share the raw
     value between the two.
     """
     pct = max(0, min(100, int(pct)))
     if pct <= 0:
         return 1
-    db = -60.0 * (1.0 - math.sqrt(pct / 100.0))
+    max_db = (zero_db_raw * 0.5) - 12.0
+    db = -max_db * (1.0 - math.sqrt(pct / 100.0))
     raw = int(round(zero_db_raw + 2.0 * db))
     return max(1, min(zero_db_raw, raw))
 

@@ -29,13 +29,14 @@ def read_state_volume():
     return 60
 
 def volume_to_raw(pct, max_val):
+    pct = max(0, min(100, int(pct)))
     if pct <= 0:
         return 0
     if pct >= 100:
         return max_val
-    r = (100.0 * float(pct)) ** 0.5
-    two_db = -120.0 * (100.0 - r) / 100.0
-    val = int(max_val + two_db)
+    max_db = (max_val * 0.5) - 12.0
+    db = -max_db * (1.0 - (float(pct) / 100.0) ** 0.5)
+    val = int(round(max_val + 2.0 * db))
     return max(1, min(max_val, val))
 
 def calc_led_color(ratio, vol_pct):

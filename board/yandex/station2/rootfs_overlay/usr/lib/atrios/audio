@@ -20,8 +20,9 @@ export DBUS_SESSION_BUS_ADDRESS="unix:path=/var/run/dbus/system_bus_socket"
 # which is clearly audible; the old linear raw=pct*2.55 gave -76 dB.
 volume_raw() {
     awk -v p="$1" -v z="$2" 'BEGIN {
-        if (p <= 0) { print 1; exit }
-        db = -60 * (1 - sqrt(p / 100));
+        if (p <= 0) { print 0; exit }
+        max_db = (z * 0.5) - 12.0;
+        db = -max_db * (1 - sqrt(p / 100));
         r = int(z + 2 * db + 0.5);
         if (r < 1) r = 1;
         if (r > z) r = z;
