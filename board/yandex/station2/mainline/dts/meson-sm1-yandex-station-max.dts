@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: (GPL-2.0+ OR MIT)
 /*
- * Device Tree Source for Yandex Station Max (Quasar 2 / Station 2)
+ * Device Tree Source for AtriOS-aml Station Max (leftymods) (Quasar 2 / Station 2)
  * Based on Amlogic Meson SM1 (S905X3) SoC
  * Compatible with Mainline Linux 6.x / 7.0+
  */
@@ -14,8 +14,8 @@
 #include <dt-bindings/sound/meson-g12a-tohdmitx.h>
 
 / {
-	compatible = "yandex,station-max", "amlogic,sm1";
-	model = "Yandex Station Max";
+	compatible = "leftymods,station-max", "amlogic,sm1";
+	model = "AtriOS-aml Station Max (leftymods)";
 
 	aliases {
 		serial0 = &uart_AO;
@@ -93,7 +93,7 @@
 
 	/* Zigbee Coordinator GPIO Control (zb-reset, zb-boot) */
 	zigbee: zigbee-control {
-		compatible = "yandex,zigbee-control";
+		compatible = "leftymods,zigbee-control";
 		status = "okay";
 		zb-reset-gpios = <&gpio GPIOX_16 GPIO_ACTIVE_HIGH>;
 		zb-boot-gpios = <&gpio GPIOX_10 GPIO_ACTIVE_HIGH>;
@@ -112,7 +112,7 @@
 	/* Mainline ASoC Sound Card */
 	sound {
 		compatible = "amlogic,axg-sound-card";
-		model = "YANDEX-STATION-MAX";
+		model = "ATRIOS-AML-SOUND";
 		audio-widgets =
 			"Headphone", "Headphone Jack",
 			"Speaker", "Woofer Speaker",
@@ -460,7 +460,7 @@
 /* USB 2.0 / 3.0 Controllers */
 &usb {
 	status = "okay";
-	dr_mode = "host";
+	dr_mode = "otg";
 };
 
 /* Ethernet MAC */

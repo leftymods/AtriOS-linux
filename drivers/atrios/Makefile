@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0
 #
-# Makefile for Yandex Station Max (Amlogic S905X3 / SM1) Hardware Drivers
+# Makefile for AtriOS-aml Station Max (leftymods) (Amlogic S905X3 / SM1) Hardware Drivers
 # Compatible with Mainline Linux 7.0+ and Amlogic Vendor 4.9.113
 #
 
