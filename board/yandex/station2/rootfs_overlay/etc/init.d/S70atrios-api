@@ -1,0 +1,26 @@
+#!/bin/sh
+# /etc/init.d/S70atrios-api - Start AtriOS REST API daemon for companion app
+
+case "$1" in
+  start)
+    echo "Starting AtriOS REST API daemon on port 8080..."
+    if [ -x /usr/lib/atrios/atrios-api ] && ! pgrep -f /usr/lib/atrios/atrios-api >/dev/null 2>&1; then
+      python3 /usr/lib/atrios/atrios-api >/var/log/atrios-api.log 2>&1 &
+    fi
+    ;;
+  stop)
+    echo "Stopping AtriOS REST API daemon..."
+    pkill -f /usr/lib/atrios/atrios-api 2>/dev/null || true
+    ;;
+  restart)
+    "$0" stop
+    sleep 1
+    "$0" start
+    ;;
+  *)
+    echo "Usage: $0 {start|stop|restart}"
+    exit 1
+    ;;
+esac
+
+exit 0
