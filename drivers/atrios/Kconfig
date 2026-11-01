@@ -4,6 +4,10 @@ menu "Yandex Station Max (Amlogic S905X3 / SM1) Hardware Drivers"
 config YANDEX_GOWIN_LED_DEVICE
 	tristate "Yandex Gowin 25x16 Monochrome LED Matrix Framebuffer"
 	depends on FB
+	select FB_CFB_FILLRECT
+	select FB_CFB_COPYAREA
+	select FB_CFB_IMAGEBLIT
+	select CRC_ITU_T
 	help
 	  Virtual RGB888 (24-bpp) framebuffer driver (/dev/fb) for the
 	  front 25x16 monochrome LED matrix driven via Gowin FPGA.
@@ -11,6 +15,10 @@ config YANDEX_GOWIN_LED_DEVICE
 config YANDEX_QUASAR_LED_SCREEN
 	tristate "Yandex Quasar Gowin FPGA SPI LED Screen Controller"
 	depends on SPI && YANDEX_GOWIN_LED_DEVICE
+	select FB_CFB_FILLRECT
+	select FB_CFB_COPYAREA
+	select FB_CFB_IMAGEBLIT
+	select CRC_ITU_T
 	help
 	  SPI driver for the Gowin FPGA LED screen controller on Yandex
 	  Station Max, including JTAG SRAM bitstream programming.

@@ -1,0 +1,32 @@
+kernel/fs/efivarfs/efivarfs.ko:
+kernel/crypto/crypto_engine.ko:
+kernel/crypto/cbc.ko:
+kernel/lib/crc/crc-itu-t.ko:
+kernel/drivers/video/fbdev/core/cfbfillrect.ko:
+kernel/drivers/video/fbdev/core/cfbcopyarea.ko:
+kernel/drivers/video/fbdev/core/cfbimgblt.ko:
+kernel/drivers/char/hw_random/rng-core.ko:
+kernel/drivers/char/hw_random/meson-rng.ko: kernel/drivers/char/hw_random/rng-core.ko
+kernel/drivers/char/hw_random/arm_smccc_trng.ko: kernel/drivers/char/hw_random/rng-core.ko
+kernel/drivers/net/mdio/mdio-mux.ko:
+kernel/drivers/net/mdio/mdio-mux-meson-g12a.ko: kernel/drivers/net/mdio/mdio-mux.ko
+kernel/drivers/net/mdio/mdio-mux-meson-gxl.ko: kernel/drivers/net/mdio/mdio-mux.ko
+kernel/drivers/net/wireless/realtek/rtw88/rtw88_core.ko:
+kernel/drivers/net/wireless/realtek/rtw88/rtw88_8822c.ko: kernel/drivers/net/wireless/realtek/rtw88/rtw88_core.ko
+kernel/drivers/net/wireless/realtek/rtw88/rtw88_8822cs.ko: kernel/drivers/net/wireless/realtek/rtw88/rtw88_8822c.ko kernel/drivers/net/wireless/realtek/rtw88/rtw88_sdio.ko kernel/drivers/net/wireless/realtek/rtw88/rtw88_core.ko
+kernel/drivers/net/wireless/realtek/rtw88/rtw88_sdio.ko: kernel/drivers/net/wireless/realtek/rtw88/rtw88_core.ko
+kernel/drivers/rtc/rtc-meson-vrtc.ko:
+kernel/drivers/crypto/amlogic/amlogic-gxl-crypto.ko: kernel/crypto/crypto_engine.ko
+kernel/drivers/atrios/gowin_led_device.ko: kernel/lib/crc/crc-itu-t.ko kernel/drivers/video/fbdev/core/cfbfillrect.ko kernel/drivers/video/fbdev/core/cfbimgblt.ko kernel/drivers/video/fbdev/core/cfbcopyarea.ko
+kernel/drivers/atrios/quasar_led_screen.ko: kernel/lib/crc/crc-itu-t.ko kernel/drivers/video/fbdev/core/cfbfillrect.ko kernel/drivers/video/fbdev/core/cfbimgblt.ko kernel/drivers/video/fbdev/core/cfbcopyarea.ko
+kernel/drivers/atrios/quasar_led_ring.ko:
+kernel/drivers/atrios/quasar_pcba_ids.ko:
+kernel/drivers/atrios/rotary-volume.ko:
+kernel/drivers/atrios/gpio_keypad.ko:
+kernel/drivers/atrios/zigbee-control.ko:
+kernel/drivers/atrios/ltr308als01.ko:
+kernel/drivers/atrios/leds-is31fl32xx.ko:
+kernel/drivers/atrios/snd-soc-sy6045s.ko:
+kernel/drivers/atrios/snd-soc-es8156.ko:
+kernel/drivers/atrios/snd-soc-es7210.ko:
+kernel/drivers/atrios/snd-soc-tas5825m.ko:
