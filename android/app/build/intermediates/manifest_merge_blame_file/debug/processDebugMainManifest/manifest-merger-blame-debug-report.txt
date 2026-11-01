@@ -1,0 +1,166 @@
+1<?xml version="1.0" encoding="utf-8"?>
+2<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+3    package="org.atrios.companion"
+4    android:versionCode="1"
+5    android:versionName="1.0.0" >
+6
+7    <uses-sdk
+8        android:minSdkVersion="26"
+9        android:targetSdkVersion="34" />
+10
+11    <uses-permission android:name="android.permission.INTERNET" />
+11-->C:\Users\ggala\Desktop\origfw\AtriOS-linux\android\app\src\main\AndroidManifest.xml:4:5-67
+11-->C:\Users\ggala\Desktop\origfw\AtriOS-linux\android\app\src\main\AndroidManifest.xml:4:22-64
+12    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+12-->C:\Users\ggala\Desktop\origfw\AtriOS-linux\android\app\src\main\AndroidManifest.xml:5:5-79
+12-->C:\Users\ggala\Desktop\origfw\AtriOS-linux\android\app\src\main\AndroidManifest.xml:5:22-76
+13    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+13-->C:\Users\ggala\Desktop\origfw\AtriOS-linux\android\app\src\main\AndroidManifest.xml:6:5-76
+13-->C:\Users\ggala\Desktop\origfw\AtriOS-linux\android\app\src\main\AndroidManifest.xml:6:22-73
+14    <uses-permission android:name="android.permission.BLUETOOTH" />
+14-->C:\Users\ggala\Desktop\origfw\AtriOS-linux\android\app\src\main\AndroidManifest.xml:7:5-68
+14-->C:\Users\ggala\Desktop\origfw\AtriOS-linux\android\app\src\main\AndroidManifest.xml:7:22-65
+15    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" />
+15-->C:\Users\ggala\Desktop\origfw\AtriOS-linux\android\app\src\main\AndroidManifest.xml:8:5-74
+15-->C:\Users\ggala\Desktop\origfw\AtriOS-linux\android\app\src\main\AndroidManifest.xml:8:22-71
+16    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+16-->C:\Users\ggala\Desktop\origfw\AtriOS-linux\android\app\src\main\AndroidManifest.xml:9:5-76
+16-->C:\Users\ggala\Desktop\origfw\AtriOS-linux\android\app\src\main\AndroidManifest.xml:9:22-73
+17    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
+17-->C:\Users\ggala\Desktop\origfw\AtriOS-linux\android\app\src\main\AndroidManifest.xml:10:5-73
+17-->C:\Users\ggala\Desktop\origfw\AtriOS-linux\android\app\src\main\AndroidManifest.xml:10:22-70
+18    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+18-->C:\Users\ggala\Desktop\origfw\AtriOS-linux\android\app\src\main\AndroidManifest.xml:11:5-79
+18-->C:\Users\ggala\Desktop\origfw\AtriOS-linux\android\app\src\main\AndroidManifest.xml:11:22-76
+19
+20    <permission
+20-->[androidx.core:core:1.13.1] C:\Users\ggala\.gradle\caches\transforms-4\1938adbed7f6eb7a8793af6578215887\transformed\core-1.13.1\AndroidManifest.xml:22:5-24:47
+21        android:name="org.atrios.companion.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION"
+21-->[androidx.core:core:1.13.1] C:\Users\ggala\.gradle\caches\transforms-4\1938adbed7f6eb7a8793af6578215887\transformed\core-1.13.1\AndroidManifest.xml:23:9-81
+22        android:protectionLevel="signature" />
+22-->[androidx.core:core:1.13.1] C:\Users\ggala\.gradle\caches\transforms-4\1938adbed7f6eb7a8793af6578215887\transformed\core-1.13.1\AndroidManifest.xml:24:9-44
+23
+24    <uses-permission android:name="org.atrios.companion.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION" />
+24-->[androidx.core:core:1.13.1] C:\Users\ggala\.gradle\caches\transforms-4\1938adbed7f6eb7a8793af6578215887\transformed\core-1.13.1\AndroidManifest.xml:26:5-97
+24-->[androidx.core:core:1.13.1] C:\Users\ggala\.gradle\caches\transforms-4\1938adbed7f6eb7a8793af6578215887\transformed\core-1.13.1\AndroidManifest.xml:26:22-94
+25
+26    <application
+26-->C:\Users\ggala\Desktop\origfw\AtriOS-linux\android\app\src\main\AndroidManifest.xml:13:5-30:19
+27        android:allowBackup="true"
+27-->C:\Users\ggala\Desktop\origfw\AtriOS-linux\android\app\src\main\AndroidManifest.xml:14:9-35
+28        android:appComponentFactory="androidx.core.app.CoreComponentFactory"
+28-->[androidx.core:core:1.13.1] C:\Users\ggala\.gradle\caches\transforms-4\1938adbed7f6eb7a8793af6578215887\transformed\core-1.13.1\AndroidManifest.xml:28:18-86
+29        android:debuggable="true"
+30        android:extractNativeLibs="false"
+31        android:icon="@android:drawable/sym_def_app_icon"
+31-->C:\Users\ggala\Desktop\origfw\AtriOS-linux\android\app\src\main\AndroidManifest.xml:15:9-58
+32        android:label="AtriOS Station"
+32-->C:\Users\ggala\Desktop\origfw\AtriOS-linux\android\app\src\main\AndroidManifest.xml:16:9-39
+33        android:supportsRtl="true"
+33-->C:\Users\ggala\Desktop\origfw\AtriOS-linux\android\app\src\main\AndroidManifest.xml:17:9-35
+34        android:theme="@style/Theme.AtriOSCompanion"
+34-->C:\Users\ggala\Desktop\origfw\AtriOS-linux\android\app\src\main\AndroidManifest.xml:18:9-53
+35        android:usesCleartextTraffic="true" >
+35-->C:\Users\ggala\Desktop\origfw\AtriOS-linux\android\app\src\main\AndroidManifest.xml:19:9-44
+36        <activity
+36-->C:\Users\ggala\Desktop\origfw\AtriOS-linux\android\app\src\main\AndroidManifest.xml:20:9-29:20
+37            android:name="org.atrios.companion.MainActivity"
+37-->C:\Users\ggala\Desktop\origfw\AtriOS-linux\android\app\src\main\AndroidManifest.xml:21:13-41
+38            android:exported="true"
+38-->C:\Users\ggala\Desktop\origfw\AtriOS-linux\android\app\src\main\AndroidManifest.xml:22:13-36
+39            android:theme="@style/Theme.AtriOSCompanion"
+39-->C:\Users\ggala\Desktop\origfw\AtriOS-linux\android\app\src\main\AndroidManifest.xml:23:13-57
+40            android:windowSoftInputMode="adjustResize" >
+40-->C:\Users\ggala\Desktop\origfw\AtriOS-linux\android\app\src\main\AndroidManifest.xml:24:13-55
+41            <intent-filter>
+41-->C:\Users\ggala\Desktop\origfw\AtriOS-linux\android\app\src\main\AndroidManifest.xml:25:13-28:29
+42                <action android:name="android.intent.action.MAIN" />
+42-->C:\Users\ggala\Desktop\origfw\AtriOS-linux\android\app\src\main\AndroidManifest.xml:26:17-69
+42-->C:\Users\ggala\Desktop\origfw\AtriOS-linux\android\app\src\main\AndroidManifest.xml:26:25-66
+43
+44                <category android:name="android.intent.category.LAUNCHER" />
+44-->C:\Users\ggala\Desktop\origfw\AtriOS-linux\android\app\src\main\AndroidManifest.xml:27:17-77
+44-->C:\Users\ggala\Desktop\origfw\AtriOS-linux\android\app\src\main\AndroidManifest.xml:27:27-74
+45            </intent-filter>
+46        </activity>
+47        <activity
+47-->[androidx.compose.ui:ui-test-manifest:1.7.4] C:\Users\ggala\.gradle\caches\transforms-4\1a8c81fc79fd5a47c1964fdc62350e9d\transformed\ui-test-manifest-1.7.4\AndroidManifest.xml:23:9-25:39
+48            android:name="androidx.activity.ComponentActivity"
+48-->[androidx.compose.ui:ui-test-manifest:1.7.4] C:\Users\ggala\.gradle\caches\transforms-4\1a8c81fc79fd5a47c1964fdc62350e9d\transformed\ui-test-manifest-1.7.4\AndroidManifest.xml:24:13-63
+49            android:exported="true" />
+49-->[androidx.compose.ui:ui-test-manifest:1.7.4] C:\Users\ggala\.gradle\caches\transforms-4\1a8c81fc79fd5a47c1964fdc62350e9d\transformed\ui-test-manifest-1.7.4\AndroidManifest.xml:25:13-36
+50        <activity
+50-->[androidx.compose.ui:ui-tooling-android:1.7.4] C:\Users\ggala\.gradle\caches\transforms-4\ad3f7ed2c4a2eeb0ccaf00f4248fd9f4\transformed\ui-tooling-release\AndroidManifest.xml:23:9-25:39
+51            android:name="androidx.compose.ui.tooling.PreviewActivity"
+51-->[androidx.compose.ui:ui-tooling-android:1.7.4] C:\Users\ggala\.gradle\caches\transforms-4\ad3f7ed2c4a2eeb0ccaf00f4248fd9f4\transformed\ui-tooling-release\AndroidManifest.xml:24:13-71
+52            android:exported="true" />
+52-->[androidx.compose.ui:ui-tooling-android:1.7.4] C:\Users\ggala\.gradle\caches\transforms-4\ad3f7ed2c4a2eeb0ccaf00f4248fd9f4\transformed\ui-tooling-release\AndroidManifest.xml:25:13-36
+53
+54        <provider
+54-->[androidx.emoji2:emoji2:1.3.0] C:\Users\ggala\.gradle\caches\transforms-4\cdef4f7cf2e5c0f072cde5a0c7f6a239\transformed\emoji2-1.3.0\AndroidManifest.xml:24:9-32:20
+55            android:name="androidx.startup.InitializationProvider"
+55-->[androidx.emoji2:emoji2:1.3.0] C:\Users\ggala\.gradle\caches\transforms-4\cdef4f7cf2e5c0f072cde5a0c7f6a239\transformed\emoji2-1.3.0\AndroidManifest.xml:25:13-67
+56            android:authorities="org.atrios.companion.androidx-startup"
+56-->[androidx.emoji2:emoji2:1.3.0] C:\Users\ggala\.gradle\caches\transforms-4\cdef4f7cf2e5c0f072cde5a0c7f6a239\transformed\emoji2-1.3.0\AndroidManifest.xml:26:13-68
+57            android:exported="false" >
+57-->[androidx.emoji2:emoji2:1.3.0] C:\Users\ggala\.gradle\caches\transforms-4\cdef4f7cf2e5c0f072cde5a0c7f6a239\transformed\emoji2-1.3.0\AndroidManifest.xml:27:13-37
+58            <meta-data
+58-->[androidx.emoji2:emoji2:1.3.0] C:\Users\ggala\.gradle\caches\transforms-4\cdef4f7cf2e5c0f072cde5a0c7f6a239\transformed\emoji2-1.3.0\AndroidManifest.xml:29:13-31:52
+59                android:name="androidx.emoji2.text.EmojiCompatInitializer"
+59-->[androidx.emoji2:emoji2:1.3.0] C:\Users\ggala\.gradle\caches\transforms-4\cdef4f7cf2e5c0f072cde5a0c7f6a239\transformed\emoji2-1.3.0\AndroidManifest.xml:30:17-75
+60                android:value="androidx.startup" />
+60-->[androidx.emoji2:emoji2:1.3.0] C:\Users\ggala\.gradle\caches\transforms-4\cdef4f7cf2e5c0f072cde5a0c7f6a239\transformed\emoji2-1.3.0\AndroidManifest.xml:31:17-49
+61            <meta-data
+61-->[androidx.lifecycle:lifecycle-process:2.8.6] C:\Users\ggala\.gradle\caches\transforms-4\a8f4b1f12c23772c957b20a778e25fa3\transformed\lifecycle-process-2.8.6\AndroidManifest.xml:29:13-31:52
+62                android:name="androidx.lifecycle.ProcessLifecycleInitializer"
+62-->[androidx.lifecycle:lifecycle-process:2.8.6] C:\Users\ggala\.gradle\caches\transforms-4\a8f4b1f12c23772c957b20a778e25fa3\transformed\lifecycle-process-2.8.6\AndroidManifest.xml:30:17-78
+63                android:value="androidx.startup" />
+63-->[androidx.lifecycle:lifecycle-process:2.8.6] C:\Users\ggala\.gradle\caches\transforms-4\a8f4b1f12c23772c957b20a778e25fa3\transformed\lifecycle-process-2.8.6\AndroidManifest.xml:31:17-49
+64            <meta-data
+64-->[androidx.profileinstaller:profileinstaller:1.3.1] C:\Users\ggala\.gradle\caches\transforms-4\209c616b272fb48760371d92ee728e1e\transformed\profileinstaller-1.3.1\AndroidManifest.xml:29:13-31:52
+65                android:name="androidx.profileinstaller.ProfileInstallerInitializer"
+65-->[androidx.profileinstaller:profileinstaller:1.3.1] C:\Users\ggala\.gradle\caches\transforms-4\209c616b272fb48760371d92ee728e1e\transformed\profileinstaller-1.3.1\AndroidManifest.xml:30:17-85
+66                android:value="androidx.startup" />
+66-->[androidx.profileinstaller:profileinstaller:1.3.1] C:\Users\ggala\.gradle\caches\transforms-4\209c616b272fb48760371d92ee728e1e\transformed\profileinstaller-1.3.1\AndroidManifest.xml:31:17-49
+67        </provider>
+68
+69        <receiver
+69-->[androidx.profileinstaller:profileinstaller:1.3.1] C:\Users\ggala\.gradle\caches\transforms-4\209c616b272fb48760371d92ee728e1e\transformed\profileinstaller-1.3.1\AndroidManifest.xml:34:9-52:20
+70            android:name="androidx.profileinstaller.ProfileInstallReceiver"
+70-->[androidx.profileinstaller:profileinstaller:1.3.1] C:\Users\ggala\.gradle\caches\transforms-4\209c616b272fb48760371d92ee728e1e\transformed\profileinstaller-1.3.1\AndroidManifest.xml:35:13-76
+71            android:directBootAware="false"
+71-->[androidx.profileinstaller:profileinstaller:1.3.1] C:\Users\ggala\.gradle\caches\transforms-4\209c616b272fb48760371d92ee728e1e\transformed\profileinstaller-1.3.1\AndroidManifest.xml:36:13-44
+72            android:enabled="true"
+72-->[androidx.profileinstaller:profileinstaller:1.3.1] C:\Users\ggala\.gradle\caches\transforms-4\209c616b272fb48760371d92ee728e1e\transformed\profileinstaller-1.3.1\AndroidManifest.xml:37:13-35
+73            android:exported="true"
+73-->[androidx.profileinstaller:profileinstaller:1.3.1] C:\Users\ggala\.gradle\caches\transforms-4\209c616b272fb48760371d92ee728e1e\transformed\profileinstaller-1.3.1\AndroidManifest.xml:38:13-36
+74            android:permission="android.permission.DUMP" >
+74-->[androidx.profileinstaller:profileinstaller:1.3.1] C:\Users\ggala\.gradle\caches\transforms-4\209c616b272fb48760371d92ee728e1e\transformed\profileinstaller-1.3.1\AndroidManifest.xml:39:13-57
+75            <intent-filter>
+75-->[androidx.profileinstaller:profileinstaller:1.3.1] C:\Users\ggala\.gradle\caches\transforms-4\209c616b272fb48760371d92ee728e1e\transformed\profileinstaller-1.3.1\AndroidManifest.xml:40:13-42:29
+76                <action android:name="androidx.profileinstaller.action.INSTALL_PROFILE" />
+76-->[androidx.profileinstaller:profileinstaller:1.3.1] C:\Users\ggala\.gradle\caches\transforms-4\209c616b272fb48760371d92ee728e1e\transformed\profileinstaller-1.3.1\AndroidManifest.xml:41:17-91
+76-->[androidx.profileinstaller:profileinstaller:1.3.1] C:\Users\ggala\.gradle\caches\transforms-4\209c616b272fb48760371d92ee728e1e\transformed\profileinstaller-1.3.1\AndroidManifest.xml:41:25-88
+77            </intent-filter>
+78            <intent-filter>
+78-->[androidx.profileinstaller:profileinstaller:1.3.1] C:\Users\ggala\.gradle\caches\transforms-4\209c616b272fb48760371d92ee728e1e\transformed\profileinstaller-1.3.1\AndroidManifest.xml:43:13-45:29
+79                <action android:name="androidx.profileinstaller.action.SKIP_FILE" />
+79-->[androidx.profileinstaller:profileinstaller:1.3.1] C:\Users\ggala\.gradle\caches\transforms-4\209c616b272fb48760371d92ee728e1e\transformed\profileinstaller-1.3.1\AndroidManifest.xml:44:17-85
+79-->[androidx.profileinstaller:profileinstaller:1.3.1] C:\Users\ggala\.gradle\caches\transforms-4\209c616b272fb48760371d92ee728e1e\transformed\profileinstaller-1.3.1\AndroidManifest.xml:44:25-82
+80            </intent-filter>
+81            <intent-filter>
+81-->[androidx.profileinstaller:profileinstaller:1.3.1] C:\Users\ggala\.gradle\caches\transforms-4\209c616b272fb48760371d92ee728e1e\transformed\profileinstaller-1.3.1\AndroidManifest.xml:46:13-48:29
+82                <action android:name="androidx.profileinstaller.action.SAVE_PROFILE" />
+82-->[androidx.profileinstaller:profileinstaller:1.3.1] C:\Users\ggala\.gradle\caches\transforms-4\209c616b272fb48760371d92ee728e1e\transformed\profileinstaller-1.3.1\AndroidManifest.xml:47:17-88
+82-->[androidx.profileinstaller:profileinstaller:1.3.1] C:\Users\ggala\.gradle\caches\transforms-4\209c616b272fb48760371d92ee728e1e\transformed\profileinstaller-1.3.1\AndroidManifest.xml:47:25-85
+83            </intent-filter>
+84            <intent-filter>
+84-->[androidx.profileinstaller:profileinstaller:1.3.1] C:\Users\ggala\.gradle\caches\transforms-4\209c616b272fb48760371d92ee728e1e\transformed\profileinstaller-1.3.1\AndroidManifest.xml:49:13-51:29
+85                <action android:name="androidx.profileinstaller.action.BENCHMARK_OPERATION" />
+85-->[androidx.profileinstaller:profileinstaller:1.3.1] C:\Users\ggala\.gradle\caches\transforms-4\209c616b272fb48760371d92ee728e1e\transformed\profileinstaller-1.3.1\AndroidManifest.xml:50:17-95
+85-->[androidx.profileinstaller:profileinstaller:1.3.1] C:\Users\ggala\.gradle\caches\transforms-4\209c616b272fb48760371d92ee728e1e\transformed\profileinstaller-1.3.1\AndroidManifest.xml:50:25-92
+86            </intent-filter>
+87        </receiver>
+88    </application>
+89
+90</manifest>

@@ -1,0 +1,236 @@
+#!/usr/bin/env python3
+"""
+AtriOS REST API Daemon (atrios-api)
+Provides lightweight HTTP JSON endpoints on port 8080 for the AtriOS Android Companion App.
+Zero external dependencies (uses standard library http.server).
+"""
+
+import os
+import sys
+import json
+import time
+import subprocess
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.parse import urlparse, parse_qs
+
+PORT = 8080
+VOLUME_FILE = "/var/lib/atrios/volume"
+FB_RING = "/dev/fb5"
+
+def get_cpu_temp():
+    try:
+        with open("/sys/class/thermal/thermal_zone0/temp", "r") as f:
+            return round(int(f.read().strip()) / 1000.0, 1)
+    except Exception:
+        return 0.0
+
+def get_uptime_sec():
+    try:
+        with open("/proc/uptime", "r") as f:
+            return int(float(f.readline().split()[0]))
+    except Exception:
+        return 0
+
+def get_mem_info():
+    try:
+        total, free = 0, 0
+        with open("/proc/meminfo", "r") as f:
+            for line in f:
+                if line.startswith("MemTotal:"):
+                    total = int(line.split()[1]) // 1024
+                elif line.startswith("MemAvailable:"):
+                    free = int(line.split()[1]) // 1024
+        return {"total_mb": total, "free_mb": free, "used_mb": max(0, total - free)}
+    except Exception:
+        return {"total_mb": 2048, "free_mb": 1024, "used_mb": 1024}
+
+def get_wifi_info():
+    ip = ""
+    ssid = ""
+    try:
+        out = subprocess.check_output(["ip", "-4", "addr", "show", "wlan0"], timeout=2).decode('utf-8', errors='ignore')
+        for line in out.splitlines():
+            line = line.strip()
+            if line.startswith("inet "):
+                ip = line.split()[1].split('/')[0]
+                break
+    except Exception:
+        pass
+    try:
+        out = subprocess.check_output(["iw", "dev", "wlan0", "link"], timeout=2).decode('utf-8', errors='ignore')
+        for line in out.splitlines():
+            line = line.strip()
+            if line.startswith("SSID:"):
+                ssid = line.split(":", 1)[1].strip()
+                break
+    except Exception:
+        pass
+    return {"ip": ip, "ssid": ssid, "connected": bool(ip)}
+
+def get_bluetooth_info():
+    connected = []
+    try:
+        out = subprocess.check_output(["hcitool", "con"], timeout=2).decode('utf-8', errors='ignore')
+        for line in out.splitlines():
+            if "ACL" in line:
+                parts = line.split()
+                if len(parts) >= 3:
+                    mac = parts[2]
+                    connected.append({"mac": mac, "name": "Connected Device"})
+    except Exception:
+        pass
+    return {
+        "adapter": "hci0",
+        "name": "Yandex Station Max",
+        "connected_devices": connected,
+        "is_active": len(connected) > 0
+    }
+
+def get_current_volume():
+    try:
+        if os.path.exists(VOLUME_FILE):
+            with open(VOLUME_FILE, "r") as f:
+                return max(0, min(100, int(f.read().strip())))
+    except Exception:
+        pass
+    return 60
+
+def set_system_volume(pct):
+    pct = max(0, min(100, int(pct)))
+    try:
+        os.makedirs(os.path.dirname(VOLUME_FILE), exist_ok=True)
+        tmp = f"{VOLUME_FILE}.tmp"
+        with open(tmp, "w") as f:
+            f.write(f"{pct}\n")
+        os.replace(tmp, VOLUME_FILE)
+    except Exception:
+        pass
+    # Trigger rotaryd / bt-volume-sync
+    try:
+        subprocess.Popen(["/usr/lib/atrios/audio", "volume", str(pct)],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
+class AtriosApiHandler(BaseHTTPRequestHandler):
+    def _send_json(self, data, status=200):
+        body = json.dumps(data, ensure_ascii=False, indent=2).encode('utf-8')
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
+
+    def do_GET(self):
+        parsed = urlparse(self.path)
+        path = parsed.path
+
+        if path in ("/api/status", "/api/info"):
+            vol = get_current_volume()
+            data = {
+                "device": {
+                    "model": "Yandex Station Max",
+                    "codename": "yandex-station-max",
+                    "soc": "Amlogic S905X3 (SM1) quad Cortex-A55 @ 1.9GHz",
+                    "os": "AtriOS Linux",
+                    "kernel": "4.9.113-atrios",
+                    "uptime_seconds": get_uptime_sec(),
+                    "cpu_temperature": get_cpu_temp(),
+                    "memory": get_mem_info()
+                },
+                "audio": {
+                    "volume": vol,
+                    "mute": (vol == 0),
+                    "amplifier_pvdd": "20V (Active)",
+                    "card": "AML-AUGESOUND",
+                    "speakers": "Silergy SY6045S (Woofer 30W + Tweeters 2x10W)"
+                },
+                "wifi": get_wifi_info(),
+                "bluetooth": get_bluetooth_info(),
+                "zigbee": {
+                    "controller": "Silicon Labs EFR32 (UART AML4)",
+                    "ready": os.path.exists("/dev/ttyAML4") or os.path.exists("/dev/ttyS4")
+                }
+            }
+            self._send_json(data)
+        elif path == "/api/wifi/scan":
+            aps = []
+            try:
+                out = subprocess.check_output(["iw", "dev", "wlan0", "scan"], timeout=8).decode('utf-8', errors='ignore')
+                cur_ssid = ""
+                cur_sig = -80
+                for line in out.splitlines():
+                    line = line.strip()
+                    if line.startswith("SSID:"):
+                        s = line.split(":", 1)[1].strip()
+                        if s and not any(a["ssid"] == s for a in aps):
+                            aps.append({"ssid": s, "signal_dbm": cur_sig})
+                    elif "signal:" in line:
+                        try:
+                            cur_sig = int(float(line.split()[1]))
+                        except Exception:
+                            cur_sig = -70
+            except Exception:
+                pass
+            self._send_json({"access_points": aps})
+        else:
+            self._send_json({"error": "Endpoint not found"}, status=404)
+
+    def do_POST(self):
+        parsed = urlparse(self.path)
+        path = parsed.path
+        length = int(self.headers.get('Content-Length', 0))
+        body = self.rfile.read(length).decode('utf-8', errors='ignore') if length > 0 else "{}"
+        try:
+            req = json.loads(body)
+        except Exception:
+            req = {}
+
+        if path == "/api/volume":
+            vol = req.get("volume", None)
+            if vol is not None:
+                set_system_volume(vol)
+                self._send_json({"success": True, "volume": get_current_volume()})
+            else:
+                self._send_json({"error": "Missing volume"}, status=400)
+        elif path == "/api/mute":
+            mute = req.get("mute", True)
+            if mute:
+                set_system_volume(0)
+            else:
+                set_system_volume(50)
+            self._send_json({"success": True, "mute": mute, "volume": get_current_volume()})
+        elif path == "/api/audio/test":
+            subprocess.Popen(["/usr/lib/atrios/audio", "test"],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self._send_json({"success": True, "message": "Audio test triggered"})
+        elif path == "/api/system/reboot":
+            def do_reboot():
+                time.sleep(1)
+                os.system("reboot")
+            threading.Thread(target=do_reboot, daemon=True).start()
+            self._send_json({"success": True, "message": "Rebooting in 1s"})
+        else:
+            self._send_json({"error": "Endpoint not found"}, status=404)
+
+def run():
+    server = HTTPServer(("0.0.0.0", PORT), AtriosApiHandler)
+    print(f"[AtriOS API] Serving HTTP REST endpoints on port {PORT}...")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        server.server_close()
+
+if __name__ == "__main__":
+    run()

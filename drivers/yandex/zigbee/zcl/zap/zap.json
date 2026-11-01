@@ -1,0 +1,38 @@
+{
+  "name": "Quasar templates",
+  "version": "quasar-v1",
+  "requiredFeatureLevel": 2,
+  "override": "override.js",
+  "templates": [
+    {
+      "path": "types.h.zapt",
+      "name": "Types header",
+      "output": "types.h"
+    },
+    {
+      "path": "types.cpp.zapt",
+      "name": "Types source",
+      "output": "types.cpp"
+    },
+    {
+      "path": "generic.h.zapt",
+      "name": "Generic header",
+      "output": "generic.h"
+    },
+    {
+      "path": "generic.cpp.zapt",
+      "name": "Generic source",
+      "output": "generic.cpp"
+    },
+    {
+      "path": "clusters.h.zapt",
+      "name": "Clusters header",
+      "output": "clusters.h"
+    },
+    {
+      "path": "clusters.cpp.zapt",
+      "name": "Clusters source",
+      "output": "clusters.cpp"
+    }
+  ]
+}

@@ -1,0 +1,98 @@
+# SPDX-License-Identifier: GPL-2.0-only
+menu "Yandex Station Max (Amlogic S905X3 / SM1) Hardware Drivers"
+
+config YANDEX_GOWIN_LED_DEVICE
+	tristate "Yandex Gowin 25x16 Monochrome LED Matrix Framebuffer"
+	depends on FB
+	help
+	  Virtual RGB888 (24-bpp) framebuffer driver (/dev/fb) for the
+	  front 25x16 monochrome LED matrix driven via Gowin FPGA.
+
+config YANDEX_QUASAR_LED_SCREEN
+	tristate "Yandex Quasar Gowin FPGA SPI LED Screen Controller"
+	depends on SPI && YANDEX_GOWIN_LED_DEVICE
+	help
+	  SPI driver for the Gowin FPGA LED screen controller on Yandex
+	  Station Max, including JTAG SRAM bitstream programming.
+
+config YANDEX_QUASAR_LED_RING
+	tristate "Yandex Quasar 24x RGB LED Ring Framebuffer & Trigger"
+	depends on FB && LEDS_CLASS && LEDS_TRIGGERS
+	help
+	  Virtual 24x1 RGB888 framebuffer and LED trigger (led_ring_fb)
+	  driving the 72 LED channels (24 RGB LEDs) on top of the speaker.
+
+config YANDEX_QUASAR_PCBA_IDS
+	tristate "Yandex Quasar PCBA Revision & Board EEPROM ID Reader"
+	depends on I2C
+	help
+	  Reads Top, Main, and LED board identity/calibration strings from
+	  AT24 I2C EEPROMs and exposes them under /sys/devices/platform/pcba_ids/.
+
+config YANDEX_ROTARY_VOLUME
+	tristate "Yandex Station Max Quadrature Rotary Volume Encoder"
+	depends on INPUT && GPIOLIB
+	help
+	  Quadrature rotary encoder driver for the top volume ring on
+	  Yandex Station Max (GPIOC_7 / GPIOAO_10).
+
+config YANDEX_GPIO_KEYPAD
+	tristate "Yandex Station Max Top Buttons GPIO Keypad Driver"
+	depends on INPUT && GPIOLIB
+	help
+	  GPIO/IRQ button driver for Action (KEY_VOICECOMMAND 582) and
+	  Mic Mute (KEY_MICMUTE 248) buttons on Yandex Station Max.
+
+config YANDEX_ZIGBEE_CONTROL
+	tristate "Yandex Station Max Zigbee Module Power/Reset/Boot GPIO Control"
+	depends on GPIOLIB
+	help
+	  Platform driver managing zb-reset, zb-boot, and zb-power GPIOs
+	  for the Zigbee coordinator module on Yandex Station Max.
+
+config YANDEX_LTR308ALS01
+	tristate "Lite-On LTR-308ALS-01 Ambient Light Sensor Driver"
+	depends on I2C && IIO
+	select REGMAP_I2C
+	help
+	  IIO ambient light sensor driver for the Lite-On LTR-308ALS-01
+	  sensor on I2C0 (0x53) of Yandex Station Max.
+
+config YANDEX_LEDS_IS31FL32XX
+	tristate "ISSI IS31FL3236A 36-Channel LED Driver (Yandex GVA Extensions)"
+	depends on I2C && LEDS_CLASS
+	help
+	  LED driver for the dual ISSI IS31FL3236A controllers (0x3c, 0x3f)
+	  with Yandex GVA global current scaling and do-not-reset extensions.
+
+config YANDEX_SND_SOC_SY6045S
+	tristate "Silergy SY6045S Digital Class-D Audio Amplifier Codec"
+	depends on I2C && SND_SOC
+	help
+	  ASoC codec driver for the Silergy SY6045S digital Class-D amplifiers
+	  (Tweeters 0x2a, Woofer 0x2b) with DSP EQ/DRC firmware loading.
+
+config YANDEX_SND_SOC_ES8156
+	tristate "Everest Semi ES8156 Stereo Headphone DAC Codec"
+	depends on I2C && SND_SOC
+	select REGMAP_I2C
+	help
+	  ASoC codec driver for the Everest ES8156 24-bit stereo DAC driving
+	  the 3.5mm AUX/headphone output on I2C2 (0x08).
+
+config YANDEX_SND_SOC_ES7210
+	tristate "Everest Semi ES7210 4-Channel Microphone Array ADC (TDM Cascade)"
+	depends on I2C && SND_SOC
+	help
+	  ASoC codec driver for the dual cascaded Everest ES7210 4-channel
+	  microphone ADCs (0x40, 0x43) providing 8-channel TDM capture.
+
+config YANDEX_SND_SOC_TAS5825M
+	tristate "Texas Instruments TAS5825M Digital Class-D Amplifier Codec"
+	depends on I2C && SND_SOC
+	select REGMAP_I2C
+	help
+	  ASoC codec driver for the TI TAS5825M amplifier with firmware
+	  register profile loader.
+
+endmenu

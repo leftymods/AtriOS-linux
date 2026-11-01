@@ -1,0 +1,32 @@
+#include "types.h"
+
+#include <smart_devices/libs/zigbee/zcl/zcl_stream.h>
+
+using namespace zigbee;
+using namespace zigbee::zcl;
+
+{{#zcl_enums}}
+template <>
+{{asCamelCased label false}} ZclStream::read<{{asCamelCased label false}}>() {
+    return static_cast<{{asCamelCased label false}}>(static_cast<{{asUnderlyingType type}}>(read<{{asCamelCased type false}}>()));
+}
+
+template <>
+void ZclOutputStream::write<{{asCamelCased label false}}>(const {{asCamelCased label false}}& value) {
+    write<{{asCamelCased type false}}>(static_cast<{{asUnderlyingType type}}>(value));
+}
+
+{{/zcl_enums}}
+
+{{#zcl_bitmaps}}
+template <>
+{{asCamelCased label false}} ZclStream::read<{{asCamelCased label false}}>() {
+    return static_cast<{{asCamelCased label false}}>(static_cast<{{asUnderlyingType type}}>(read<{{asCamelCased type false}}>()));
+}
+
+template <>
+void ZclOutputStream::write<{{asCamelCased label false}}>(const {{asCamelCased label false}}& value) {
+    write<{{asCamelCased type false}}>(static_cast<{{asUnderlyingType type}}>(value));
+}
+
+{{/zcl_bitmaps}}

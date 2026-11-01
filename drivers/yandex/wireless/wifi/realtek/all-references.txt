@@ -1,0 +1,23 @@
+# Ссылки на Realtek Wi-Fi в манифестах
+
+Все найденные записи сгруппированы по содержимому. В 81 манифесте блок
+идентичен (отличается только dest-branch), ещё в 2 группах — тоже те же 17
+модулей, отличаются только ветки/ревизии.
+
+## Группа 1 — 81 манифест (все версии yandexstation_2/*, Station 2)
+
+Манифесты: firmware/yandexstation_2-10 .. -21, firmware/yandexstation_2/22 .. /88,
+branch_yandexstation_plus_develop_manifest.xml, yandexstation_plus_develop/manifest.xml и др.
+Полный список: см. realtek-manifest-index.txt
+
+## Группа 2 — 4 манифеста
+
+firmware/yandexstation_2-4, -8, -MP, -MP-2 — те же 17 модулей, другие ветки.
+
+## Группа 3 — 3 манифеста
+
+firmware/yandexstation_2-MP-3, -factory-1, -factory-2 — те же 17 модулей.
+
+## Группа 4 — buildroot (Station Plus)
+
+buildroot_firmware/master/manifest.xml — 8822cs + buildroot-external-realtek + bt_uart_8822cs.

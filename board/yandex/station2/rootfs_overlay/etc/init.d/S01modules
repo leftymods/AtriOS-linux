@@ -1,0 +1,89 @@
+#!/bin/sh
+# /etc/init.d/S01modules - Load Amlogic & Station 2 hardware modules in dependency order
+# Compatible with both Mainline Linux (7.0+) and Legacy Kernel (4.9.113)
+
+KVER=$(uname -r)
+MOD_DIR="/lib/modules/$KVER"
+[ -d "$MOD_DIR" ] || MOD_DIR="/lib/modules/4.9.113"
+
+load_mod() {
+  mod="$1"
+  if [ -f "$MOD_DIR/${mod}.ko" ]; then
+    insmod "$MOD_DIR/${mod}.ko" 2>/dev/null || modprobe "$mod" 2>/dev/null || true
+  else
+    modprobe "$mod" 2>/dev/null || true
+  fi
+}
+
+case "$1" in
+  start)
+    echo "[AtriOS] Loading hardware drivers (kernel $KVER)..."
+    depmod -a 2>/dev/null || true
+
+    # 1. Audio drivers & codecs
+    load_mod snd-soc-pcm1774
+    load_mod snd-soc-pcm1774-i2c
+    load_mod snd-soc-es7210
+    load_mod snd-soc-es8156
+    load_mod snd-soc-sy6045s
+    load_mod snd-soc-tas5825m
+
+    # 2. Rotary knob & sensors
+    load_mod rotary-volume
+    load_mod ltr308als01
+
+    # 3. Displays: Gowin 25x16 screen & IS31FL32xx LED ring
+    load_mod gowin_led_device
+    load_mod quasar_led_screen
+    load_mod leds-is31fl32xx
+    load_mod quasar_led_ring
+    for t in /sys/class/leds/*ring*/trigger /sys/class/leds/*led_ring*/trigger; do
+      [ -f "$t" ] && echo led_ring_fb > "$t" 2>/dev/null || true
+    done
+
+    # 4. Wireless (Realtek RTL8822CS/ES) - Power up SDIO & BT reset GPIO
+    if [ -x /usr/lib/atrios/wifi-power ]; then
+      /usr/lib/atrios/wifi-power 1 2>/dev/null || true
+    elif [ -c /dev/wifi_power ]; then
+      python3 -c "import fcntl; f = open('/dev/wifi_power', 'wb'); fcntl.ioctl(f.fileno(), 0x6d03); f.close()" 2>/dev/null || true
+    fi
+
+    # Pulse Bluetooth radio via rfkill if present
+    for rfk in /sys/class/rfkill/rfkill*; do
+      [ -f "$rfk/state" ] || continue
+      [ "$(cat "$rfk/type" 2>/dev/null)" = "bluetooth" ] || continue
+      echo 0 > "$rfk/state" 2>/dev/null || true
+      usleep 150000 2>/dev/null || sleep 1
+      echo 1 > "$rfk/state" 2>/dev/null || true
+      usleep 400000 2>/dev/null || sleep 1
+    done
+
+    # Mainline Wi-Fi and Bluetooth drivers
+    load_mod rtw88_core
+    load_mod rtw88_8822c
+    load_mod rtw88_8822cs
+    load_mod 88x2es
+    load_mod hci_uart
+    load_mod btbcm
+    load_mod btrtl
+
+    # 5. Zigbee & Board ID modules
+    load_mod zigbee-control
+    load_mod quasar_pcba_ids
+
+    # 6. Legacy VPU & Video decoders (if running 4.9.113)
+    if echo "$KVER" | grep -q "4.9"; then
+      for m in media_clock firmware decoder_common stream_input vpu encoder amvdec_h265 amvdec_h264 amvdec_vp9; do
+        load_mod "$m"
+      done
+    fi
+
+    echo "[AtriOS] Drivers loaded."
+    ;;
+  stop)
+    ;;
+  *)
+    echo "Usage: $0 {start|stop}"
+    exit 1
+esac
+exit 0

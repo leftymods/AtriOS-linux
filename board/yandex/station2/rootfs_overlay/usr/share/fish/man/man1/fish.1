@@ -1,0 +1,125 @@
+.\" Man page generated from reStructuredText.
+.
+.
+.nr rst2man-indent-level 0
+.
+.de1 rstReportMargin
+\\$1 \\n[an-margin]
+level \\n[rst2man-indent-level]
+level margin: \\n[rst2man-indent\\n[rst2man-indent-level]]
+-
+\\n[rst2man-indent0]
+\\n[rst2man-indent1]
+\\n[rst2man-indent2]
+..
+.de1 INDENT
+.\" .rstReportMargin pre:
+. RS \\$1
+. nr rst2man-indent\\n[rst2man-indent-level] \\n[an-margin]
+. nr rst2man-indent-level +1
+.\" .rstReportMargin post:
+..
+.de UNINDENT
+. RE
+.\" indent \\n[an-margin]
+.\" old: \\n[rst2man-indent\\n[rst2man-indent-level]]
+.nr rst2man-indent-level -1
+.\" new: \\n[rst2man-indent\\n[rst2man-indent-level]]
+.in \\n[rst2man-indent\\n[rst2man-indent-level]]u
+..
+.TH "FISH" "1" "Feb 13, 2022" "3.3" "fish-shell"
+.SH NAME
+fish \- the friendly interactive shell
+.SH SYNOPSIS
+.INDENT 0.0
+.INDENT 3.5
+.sp
+.nf
+.ft C
+fish [OPTIONS] [\-c command] [FILE] [ARGUMENTS...]
+.ft P
+.fi
+.UNINDENT
+.UNINDENT
+.SH DESCRIPTION
+.sp
+fish is a command\-line shell written mainly with interactive use in mind. This page briefly describes the options for invoking fish. The full manual is available in HTML by using the help command from inside fish, and in the \fIfish\-doc(1)\fP man page. The tutorial is available as HTML via \fBhelp tutorial\fP or in \fIfish\-tutorial(1)\fP\&.
+.sp
+The following options are available:
+.INDENT 0.0
+.IP \(bu 2
+\fB\-c\fP or \fB\-\-command=COMMANDS\fP evaluate the specified commands instead of reading from the commandline, passing any additional positional arguments via $argv\&. Note that, unlike other shells, the first argument is \fInot\fP the name of the program (\fB$0\fP), but simply the first normal argument.
+.IP \(bu 2
+\fB\-C\fP or \fB\-\-init\-command=COMMANDS\fP evaluate the specified commands after reading the configuration, before running the command specified by \fB\-c\fP or reading interactive input
+.IP \(bu 2
+\fB\-d\fP or \fB\-\-debug=DEBUG_CATEGORIES\fP enable debug output and specify a pattern for matching debug categories. See \fI\%Debugging\fP below for details.
+.IP \(bu 2
+\fB\-o\fP or \fB\-\-debug\-output=DEBUG_FILE\fP specify a file path to receive the debug output, including categories and \fBfish_trace\fP\&. The default is stderr.
+.IP \(bu 2
+\fB\-i\fP or \fB\-\-interactive\fP specify that fish is to run in interactive mode
+.IP \(bu 2
+\fB\-l\fP or \fB\-\-login\fP specify that fish is to run as a login shell
+.IP \(bu 2
+\fB\-n\fP or \fB\-\-no\-execute\fP do not execute any commands, only perform syntax checking
+.IP \(bu 2
+\fB\-p\fP or \fB\-\-profile=PROFILE_FILE\fP when fish exits, output timing information on all executed commands to the specified file. This excludes time spent starting up and reading the configuration.
+.IP \(bu 2
+\fB\-\-profile\-startup=PROFILE_FILE\fP will write timing information for fish\(aqs startup to the specified file. This is useful to profile your configuration.
+.IP \(bu 2
+\fB\-P\fP or \fB\-\-private\fP enables private mode, so fish will not access old or store new history.
+.IP \(bu 2
+\fB\-\-print\-rusage\-self\fP when fish exits, output stats from getrusage
+.IP \(bu 2
+\fB\-\-print\-debug\-categories\fP outputs the list of debug categories, and then exits.
+.IP \(bu 2
+\fB\-v\fP or \fB\-\-version\fP display version and exit
+.IP \(bu 2
+\fB\-f\fP or \fB\-\-features=FEATURES\fP enables one or more feature flags (separated by a comma). These are how fish stages changes that might break scripts.
+.UNINDENT
+.sp
+The fish exit status is generally the exit status of the last foreground command\&.
+.SH DEBUGGING
+.sp
+While fish provides extensive support for debugging fish scripts, it is also possible to debug and instrument its internals. Debugging can be enabled by passing the \fB\-\-debug\fP option. For example, the following command turns on debugging for background IO thread events, in addition to the default categories, i.e. \fIdebug\fP, \fIerror\fP, \fIwarning\fP, and \fIwarning\-path\fP:
+.INDENT 0.0
+.INDENT 3.5
+.sp
+.nf
+.ft C
+> fish \-\-debug=iothread
+.ft P
+.fi
+.UNINDENT
+.UNINDENT
+.sp
+Available categories are listed by \fBfish \-\-print\-debug\-categories\fP\&. The \fB\-\-debug\fP option accepts a comma\-separated list of categories, and supports glob syntax. The following command turns on debugging for \fIcomplete\fP, \fIhistory\fP, \fIhistory\-file\fP, and \fIprofile\-history\fP, as well as the default categories:
+.INDENT 0.0
+.INDENT 3.5
+.sp
+.nf
+.ft C
+> fish \-\-debug=\(aqcomplete,*history*\(aq
+.ft P
+.fi
+.UNINDENT
+.UNINDENT
+.sp
+Debug messages output to stderr by default. Note that if \fBfish_trace\fP is set, execution tracing also outputs to stderr by default. You can output to a file using the \fB\-\-debug\-output\fP option:
+.INDENT 0.0
+.INDENT 3.5
+.sp
+.nf
+.ft C
+> fish \-\-debug=\(aqcomplete,*history*\(aq \-\-debug\-output=/tmp/fish.log \-\-init\-command=\(aqset fish_trace on\(aq
+.ft P
+.fi
+.UNINDENT
+.UNINDENT
+.sp
+These options can also be changed via the $FISH_DEBUG and $FISH_DEBUG_OUTPUT variables. The categories enabled via \fB\-\-debug\fP are \fIadded\fP to the ones enabled by $FISH_DEBUG, so they can be disabled by prefixing them with \fB\-\fP (\fBreader\-*,\-ast*\fP enables reader debugging and disables ast debugging).
+.sp
+The file given in \fB\-\-debug\-output\fP takes precedence over the file in $FISH_DEBUG_OUTPUT.
+.SH COPYRIGHT
+2022, fish-shell developers
+.\" Generated by docutils manpage writer.
+.

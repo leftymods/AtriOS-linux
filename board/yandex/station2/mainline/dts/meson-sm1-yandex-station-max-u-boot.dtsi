@@ -1,0 +1,23 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * Mainline U-Boot additions for Yandex Station Max
+ */
+
+/ {
+	aliases {
+		mmc0 = &sd_emmc_c;
+		mmc1 = &sd_emmc_a;
+	};
+};
+
+&uart_AO {
+	bootph-all;
+};
+
+&sd_emmc_c {
+	bootph-all;
+};
+
+&spicc1 {
+	bootph-all;
+};

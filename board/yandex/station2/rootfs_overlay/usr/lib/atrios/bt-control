@@ -1,0 +1,283 @@
+#!/usr/bin/env python3
+"""
+AtriOS Bluetooth Remote Control Daemon (bt-control)
+Listens on Bluetooth RFCOMM Serial Port Profile (SPP channel 1, UUID 00001101-0000-1000-8000-00805F9B34FB).
+Enables direct peer-to-peer control from the Android Companion App over Bluetooth:
+- Real-time telemetry (CPU temp, RAM, Uptime, Wi-Fi, audio)
+- Acoustic volume control (0..100%)
+- LED Ring & Front Screen modes
+- Over-the-air Wi-Fi provisioning via Bluetooth
+- Remote diagnostic chime & reboot
+"""
+
+import os
+import sys
+import time
+import json
+import socket
+import select
+import subprocess
+import threading
+
+RFCOMM_PORT = 1
+VOLUME_FILE = "/var/lib/atrios/volume"
+FB_RING = "/dev/fb5"
+FB_SCREEN = "/dev/fb0"
+
+def get_cpu_temp():
+    try:
+        with open("/sys/class/thermal/thermal_zone0/temp", "r") as f:
+            return round(int(f.read().strip()) / 1000.0, 1)
+    except Exception:
+        return 0.0
+
+def get_uptime_sec():
+    try:
+        with open("/proc/uptime", "r") as f:
+            return int(float(f.readline().split()[0]))
+    except Exception:
+        return 0
+
+def get_mem_info():
+    try:
+        total, free = 0, 0
+        with open("/proc/meminfo", "r") as f:
+            for line in f:
+                if line.startswith("MemTotal:"):
+                    total = int(line.split()[1]) // 1024
+                elif line.startswith("MemAvailable:"):
+                    free = int(line.split()[1]) // 1024
+        return {"total_mb": total, "free_mb": free, "used_mb": max(0, total - free)}
+    except Exception:
+        return {"total_mb": 2048, "free_mb": 1800, "used_mb": 248}
+
+def get_wifi_info():
+    ip, ssid = "", ""
+    try:
+        out = subprocess.check_output(["ip", "-4", "addr", "show", "wlan0"], timeout=2).decode('utf-8', errors='ignore')
+        for line in out.splitlines():
+            line = line.strip()
+            if line.startswith("inet "):
+                ip = line.split()[1].split('/')[0]
+                break
+    except Exception:
+        pass
+    try:
+        out = subprocess.check_output(["iw", "dev", "wlan0", "link"], timeout=2).decode('utf-8', errors='ignore')
+        for line in out.splitlines():
+            line = line.strip()
+            if line.startswith("SSID:"):
+                ssid = line.split(":", 1)[1].strip()
+                break
+    except Exception:
+        pass
+    return {"ip": ip, "ssid": ssid, "connected": bool(ip)}
+
+def get_current_volume():
+    try:
+        if os.path.exists(VOLUME_FILE):
+            with open(VOLUME_FILE, "r") as f:
+                return max(0, min(100, int(f.read().strip())))
+    except Exception:
+        pass
+    return 60
+
+def set_system_volume(pct):
+    pct = max(0, min(100, int(pct)))
+    try:
+        os.makedirs(os.path.dirname(VOLUME_FILE), exist_ok=True)
+        tmp = f"{VOLUME_FILE}.tmp"
+        with open(tmp, "w") as f:
+            f.write(f"{pct}\n")
+        os.replace(tmp, VOLUME_FILE)
+    except Exception:
+        pass
+    # Trigger rotaryd / bt-volume-sync to update ALSA faders and iPhone slider
+    try:
+        subprocess.Popen(["/usr/lib/atrios/audio", "volume", str(pct)],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
+def is_bt_speaker_mode():
+    try:
+        out = subprocess.check_output(
+            ["gdbus", "call", "--system", "--dest", "org.bluealsa",
+             "--object-path", "/org/bluealsa", "--method", "org.freedesktop.DBus.ObjectManager.GetManagedObjects"],
+            timeout=1
+        ).decode('utf-8', errors='ignore')
+        return "'Running': <true>" in out or "a2dpsnk" in out
+    except Exception:
+        return False
+
+def build_status_payload():
+    vol = get_current_volume()
+    return {
+        "type": "status",
+        "device": {
+            "model": "Yandex Station Max",
+            "soc": "Amlogic S905X3 (SM1) quad Cortex-A55",
+            "os": "AtriOS Linux",
+            "kernel": "4.9.113-atrios",
+            "uptime_seconds": get_uptime_sec(),
+            "cpu_temperature": get_cpu_temp(),
+            "memory": get_mem_info()
+        },
+        "audio": {
+            "volume": vol,
+            "mute": (vol == 0),
+            "card": "AML-AUGESOUND",
+            "speakers": "Silergy SY6045S (Woofer 30W + Tweeters 2x10W, 20V PVDD)"
+        },
+        "wifi": get_wifi_info(),
+        "bluetooth": {
+            "adapter": "hci0",
+            "name": "Yandex Station Max",
+            "transport": "RFCOMM SPP (Channel 1)",
+            "is_speaker_mode": is_bt_speaker_mode()
+        }
+    }
+
+def handle_client(client_sock, client_info):
+    print(f"[bt-control] Client connected via Bluetooth RFCOMM: {client_info}")
+    # Register SDP service just in case
+    try:
+        subprocess.run(["sdptool", "add", "SP"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
+    # Send initial status packet immediately upon connect
+    try:
+        init_pkt = json.dumps(build_status_payload()) + "\n"
+        client_sock.sendall(init_pkt.encode('utf-8'))
+    except Exception:
+        return
+
+    buf = ""
+    client_sock.settimeout(0.5)
+
+    last_heartbeat = time.time()
+    last_volume = get_current_volume()
+
+    while True:
+        # Check incoming Bluetooth data
+        try:
+            data = client_sock.recv(1024)
+            if not data:
+                break
+            buf += data.decode('utf-8', errors='ignore')
+            while "\n" in buf:
+                line, buf = buf.split("\n", 1)
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    cmd_obj = json.loads(line)
+                    response = process_command(cmd_obj)
+                    if response:
+                        resp_pkt = json.dumps(response) + "\n"
+                        client_sock.sendall(resp_pkt.encode('utf-8'))
+                except Exception as e:
+                    err_pkt = json.dumps({"type": "error", "message": str(e)}) + "\n"
+                    client_sock.sendall(err_pkt.encode('utf-8'))
+        except socket.timeout:
+            pass
+        except Exception:
+            break
+
+        # Push volume changes automatically if changed locally by knob or iPhone
+        now = time.time()
+        cur_vol = get_current_volume()
+        if cur_vol != last_volume:
+            last_volume = cur_vol
+            try:
+                push_pkt = json.dumps({"type": "volume_change", "volume": cur_vol, "mute": cur_vol == 0}) + "\n"
+                client_sock.sendall(push_pkt.encode('utf-8'))
+            except Exception:
+                break
+
+        # Periodic status refresh push every 4 seconds
+        if now - last_heartbeat >= 4.0:
+            last_heartbeat = now
+            try:
+                hb_pkt = json.dumps(build_status_payload()) + "\n"
+                client_sock.sendall(hb_pkt.encode('utf-8'))
+            except Exception:
+                break
+
+    try:
+        client_sock.close()
+    except Exception:
+        pass
+    print(f"[bt-control] Client disconnected: {client_info}")
+
+def process_command(cmd_obj):
+    cmd = cmd_obj.get("cmd") or cmd_obj.get("type")
+
+    if cmd in ("get_status", "status"):
+        return build_status_payload()
+
+    elif cmd in ("set_volume", "volume"):
+        vol = cmd_obj.get("value", cmd_obj.get("volume", None))
+        if vol is not None:
+            set_system_volume(int(vol))
+            return {"type": "volume_response", "success": True, "volume": get_current_volume()}
+
+    elif cmd in ("set_mute", "mute"):
+        is_mute = cmd_obj.get("value", cmd_obj.get("mute", True))
+        if is_mute:
+            set_system_volume(0)
+        else:
+            set_system_volume(50)
+        return {"type": "mute_response", "success": True, "mute": (get_current_volume() == 0)}
+
+    elif cmd == "audio_test":
+        subprocess.Popen(["/usr/lib/atrios/audio", "test"],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return {"type": "action_response", "success": True, "message": "Audio chime triggered"}
+
+    elif cmd == "reboot":
+        def do_reboot():
+            time.sleep(1)
+            os.system("reboot")
+        threading.Thread(target=do_reboot, daemon=True).start()
+        return {"type": "action_response", "success": True, "message": "Rebooting in 1s"}
+
+    elif cmd == "wifi_connect":
+        ssid = cmd_obj.get("ssid", "")
+        psk = cmd_obj.get("psk", "")
+        if ssid:
+            subprocess.Popen(["/usr/lib/atrios/wireless", "wifi", "connect", ssid, psk],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return {"type": "action_response", "success": True, "message": f"Connecting to {ssid}..."}
+
+    return {"type": "ack", "success": True}
+
+def run_server():
+    # Make sure SDP service is registered in BlueZ
+    try:
+        subprocess.run(["sdptool", "add", "SP"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
+    server_sock = socket.socket(socket.AF_BLUETOOTH, socket.SOCK_STREAM, socket.BTPROTO_RFCOMM)
+    server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server_sock.bind(("00:00:00:00:00:00", RFCOMM_PORT))
+    server_sock.listen(1)
+
+    print(f"[bt-control] Listening for Android App connections on Bluetooth RFCOMM channel {RFCOMM_PORT}...")
+
+    while True:
+        try:
+            client_sock, client_info = server_sock.accept()
+            client_thread = threading.Thread(target=handle_client, args=(client_sock, client_info), daemon=True)
+            client_thread.start()
+        except KeyboardInterrupt:
+            break
+        except Exception as e:
+            time.sleep(1)
+
+    server_sock.close()
+
+if __name__ == "__main__":
+    run_server()

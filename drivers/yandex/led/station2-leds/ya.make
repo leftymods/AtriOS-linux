@@ -1,0 +1,89 @@
+OWNER(g:yandex_io)
+
+LIBRARY()
+
+PEERDIR(
+    smart_devices/libs/brightness_control
+    smart_devices/libs/shared_memory
+    smart_devices/libs/spectrogram
+    smart_devices/platforms/yandexstation_2/platformd/leds/spectrogram
+    smart_devices/platforms/yandexstation_2/platformd/leds/utils
+    yandex_io/modules/clock_display_state_holder
+    yandex_io/modules/audio_input/mics_state
+    yandex_io/modules/device_state
+    yandex_io/modules/leds/led_controller
+    yandex_io/modules/leds/led_manager
+    yandex_io/modules/demo_mode/led_handlers
+    yandex_io/libs/base
+    yandex_io/libs/device
+    yandex_io/libs/errno
+    yandex_io/libs/http_client
+    yandex_io/libs/logging
+    yandex_io/libs/bluetooth
+    yandex_io/libs/subprocess
+    yandex_io/sdk
+    yandex_io/modules/bluetooth/bluetooth_controller
+    contrib/libs/giflib
+)
+
+SRCS(
+    alarm/alarm_animation_conductor.cpp
+    alarm/alarm_animation_composition.cpp
+    ring/yandex_station_head_controller.cpp
+    timer/timer_animation_composition.cpp
+    timer/timer_conductor.cpp
+    timer/timer_frontal_animation.cpp
+    frontal_animation/frame_buffer_output_frame.cpp
+    frontal_animation/yandex_station_frontal_controller.cpp
+    frontal_animation/cache_manager.cpp
+    frontal_animation/color_config.cpp
+    alice_dialog_error_renderer.cpp
+    compound_animation.cpp
+    demo_mode_front_led_handler.cpp
+    device_state_handler.cpp
+    draw_led_screen_directive_observer.cpp
+    media_state_led_player.cpp
+    mics_state_led_player.cpp
+    framebuffer_led_controller.cpp
+    led_screen_stats_reporter.cpp
+    led_devices_impl.cpp
+    led_directive_observer.cpp
+    repeated_animation.cpp
+    gif_animation.cpp
+    clock/clock_animation.cpp
+    empty_animation.cpp
+    spectrogram_animation.cpp
+    yandex_station2_bluetooth_observer.cpp
+    speaking/speaking_animation_composition.cpp
+    speaking/speaking_start_animation_composition.cpp
+    idle/oknyx_out_animation_composition.cpp
+    listening/listening_animation_composition.cpp
+    listening/activation_animation_composition.cpp
+    listening/activation_to_listening_animation_composition.cpp
+    listening/no_reset_listening_pattern.cpp
+    thinking/listening_to_thinking_animation_composition.cpp
+    thinking/thinking_animation_composition.cpp
+    configuring/configuring_animation_conductor.cpp
+    configuring/configuring_animation_composition.cpp
+    configuring/configuring_long_animation_composition.cpp
+    update/update_animation_conductor.cpp
+    update/update_animation_composition.cpp
+    update/progress_update_gif.cpp
+    volume/volume_animation_composition.cpp
+    volume/volume_conductor.cpp
+    volume/volume_frontal_animation.cpp
+    volume/rcu_volume_animation_composition.cpp
+    volume/rcu_volume_conductor.cpp
+    volume/rcu_volume_frontal_animation.cpp
+    volume/head/station2_volume_pattern.cpp
+    utils/bgr24.cpp
+)
+
+END()
+
+RECURSE_FOR_TESTS(tests)
+
+RECURSE(
+    gifsubst
+    utils
+)

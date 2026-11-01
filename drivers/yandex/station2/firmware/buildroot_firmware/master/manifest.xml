@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<manifest>
+  <remote fetch="ssh://git@bb.yandex-team.ru/quas/" name="bitbucket"/>
+  <remote fetch=".." name="gerrit" review="https://gerrit.yandex-team.ru/" revision="master"/>
+  
+  <default remote="gerrit"/>
+  
+  <project dest-branch="master" name="hardware-stplus-display-verilog" path="vendor/yandex/src/firmwares/led_screen_fpga" remote="bitbucket" revision="cbdc0d61ad4ba51a2e92adf4f112d1357c2aee79" upstream="master"/>
+  <project dest-branch="yandexstation_plus" name="unity/amlogic/tools/fip" path="vendor/amlogic/src/uboot/fip" revision="48e2ee271799149ef79b6df165f8e99af5fed66f" upstream="yandexstation_plus"/>
+  <project dest-branch="yandexstation_plus" name="unity/firmware/bin/bl2" path="vendor/amlogic/src/uboot/bl2/bin" revision="208b57dd8a648fcbbebede5fd3727f0e7e2e39c2" upstream="yandexstation_plus"/>
+  <project dest-branch="yandexstation_plus" name="unity/firmware/bin/bl30" path="vendor/amlogic/src/uboot/bl30/bin" revision="299e87f704ffb8d949d09eb70f38a594ff8a7be6" upstream="yandexstation_plus"/>
+  <project dest-branch="yandexstation_plus" name="unity/firmware/bin/bl31" path="vendor/amlogic/src/uboot/bl31/bin" revision="0aa07e1e31d4707f0c919cf6cf19d01fe7c3b4c7" upstream="yandexstation_plus"/>
+  <project dest-branch="yandexstation_plus_u-boot_bl31_1.3" name="unity/firmware/bin/bl31" path="vendor/amlogic/src/uboot/bl31_1.3/bin" revision="0aa07e1e31d4707f0c919cf6cf19d01fe7c3b4c7" upstream="yandexstation_plus_u-boot_bl31_1.3"/>
+  <project dest-branch="yandexstation_plus" name="unity/firmware/bin/bl32" path="vendor/amlogic/src/uboot/bl32/bin" revision="a17992530ab9d5b11331907fe5d649aacd58435b" upstream="yandexstation_plus"/>
+  <project dest-branch="yandexstation_plus" name="unity/kernel/common" path="vendor/amlogic/src/linux" revision="0a6db736403beb52dad25def535f19a57b2428ef" upstream="yandexstation_plus"/>
+  <project dest-branch="yandexstation-mini" name="unity/kernel/common" path="vendor/amlogic/src/linux-axg" revision="57187628d5cbffcd5c7fda3f71d0481782df56dc" upstream="yandexstation-mini"/>
+  <project dest-branch="yandexstation_plus" name="unity/p-amlogic/platform/hardware/amlogic/keymaster" path="vendor/amlogic/src/keymaster" revision="6713672c4b1d8d5034f8701b1daacf10e55f245b" upstream="yandexstation_plus"/>
+  <project dest-branch="yandexstation_plus" name="unity/p-amlogic/vendor/amlogic/tools" path="vendor/amlogic/src/tools" revision="dfed4d9cf28f42506ac409ab64ae33ec8946670f" upstream="yandexstation_plus"/>
+  <project dest-branch="yandexstation_plus" name="unity/platform/hardware/wifi/broadcom/drivers/ap6xxx" path="vendor/broadcom/src/ap6xxx" revision="235d7301f99c18ce370fecb96220b2a0978c74ae" upstream="yandexstation_plus"/>
+  <project dest-branch="master" name="unity/platform/hardware/wifi/realtek/drivers/8822cs" path="vendor/realtek/src/8822cs" revision="af1ee06eb77ba9cd3f87fb07b839185319ee15bf" upstream="master"/>
+  <project dest-branch="yandex/master" name="unity/uboot" path="vendor/amlogic/src/uboot/bl33" revision="913032329e195a3100b54e280c4f09abcca22b1f" upstream="yandex/master"/>
+  <project dest-branch="yandexstation_plus" name="unity/vendor/amlogic/hdcp" path="vendor/amlogic/src/hdcp" revision="c974c791490a9ee03a9fb61fdc9cb1716364ea48" upstream="yandexstation_plus"/>
+  <project dest-branch="yandexstation_plus" name="unity/vendor/amlogic/prebuilt/libmediadrm" path="vendor/amlogic/src/libmediadrm" revision="53ad80f491d97059fe36f9d6e366e80430fdb7c6" upstream="yandexstation_plus"/>
+  <project dest-branch="yandexstation_plus" name="unity/vendor/amlogic/provision" path="vendor/amlogic/src/provision" revision="46ad9cf8d32b06af089550d94875e2e5538c2091" upstream="yandexstation_plus"/>
+  <project dest-branch="yandexstation_plus" name="unity/vendor/amlogic/tdk" path="vendor/amlogic/src/tdk" revision="e8306b5987249ac1b8dfa308f481b474c068f292" upstream="yandexstation_plus"/>
+  <project dest-branch="yandexstation_plus" name="unity/vendor/amlogic/tdk_linuxdriver" path="vendor/amlogic/src/tdk/linuxdriver" revision="8d691592e0caf3188fb005bff81a3d69f59b3307" upstream="yandexstation_plus"/>
+  <project dest-branch="yandexstation_plus" name="yandex-io/build" path="vendor/yandex/src/tools/build-tools" revision="60230967b8caf8bf02ef3a576ed74b24f46525eb" upstream="yandexstation_plus"/>
+  <project dest-branch="yandex/master" name="yandex-io/buildroot" path="buildroot" revision="80e565bbebc61bf113bcd3b3475fa27a5127f466" upstream="yandex/master"/>
+  <project dest-branch="yandex/master" name="yandex-io/buildroot-build" path="build" revision="b95079573176461acf27a888bf2bf9cdb70871ee" upstream="yandex/master"/>
+  <project dest-branch="yandex/master" name="yandex-io/buildroot-external-amlogic" path="vendor/amlogic" revision="318b89e736ea3a1e2570fd91b85cbdca693c1c69" upstream="yandex/master"/>
+  <project dest-branch="master" name="yandex-io/buildroot-external-broadcom" path="vendor/broadcom" revision="4305bad0d0980a76fd64b1a8ede5f660a461d154" upstream="master"/>
+  <project dest-branch="master" name="yandex-io/buildroot-external-linkplay" path="vendor/linkplay" revision="8a1c96a6a9f9ce48c17a2311ebf448ad35e86ab2" upstream="master"/>
+  <project dest-branch="master" name="yandex-io/buildroot-external-realtek" path="vendor/realtek" revision="ddec9e5dc05e0882e036c0332c69436211b480b3" upstream="master"/>
+  <project dest-branch="yandex/master" name="yandex-io/buildroot-external-yandex" path="vendor/yandex" revision="d34091f3e653813a2f844b954839eee20d955391" upstream="yandex/master">
+    <linkfile dest="VERSION" src="VERSION"/>
+  </project>
+  <project dest-branch="master" name="yandex-io/kernel/drivers/aw9110" path="vendor/yandex/src/drivers/aw9110" revision="6527ec12c38bcd31bf7211ef313c872944c8abc3" upstream="master"/>
+  <project dest-branch="master" name="yandex-io/kernel/drivers/cy8cmbr31xx" path="vendor/yandex/src/drivers/cy8cmbr31xx" revision="b1f0ee2d5b3fb896b93a909d0579f805128b5d74" upstream="master"/>
+  <project dest-branch="yandexstation_plus" name="yandex-io/kernel/drivers/es7210" path="vendor/yandex/src/drivers/es7210" revision="a983517221667ffbaaeef4e38c9fb145e5fabb41" upstream="yandexstation_plus"/>
+  <project dest-branch="yandex/master" name="yandex-io/kernel/drivers/es8156" path="vendor/yandex/src/drivers/es8156" revision="07fb359a9e10272c54189cd334e972e9a17fbf28" upstream="yandex/master"/>
+  <project dest-branch="yandex/master" name="yandex-io/kernel/drivers/led_panel_midi" path="vendor/yandex/src/drivers/gowin_led_device" revision="02176488f407359bb8f4368544b7e1c49c7aa631" upstream="yandex/master"/>
+  <project dest-branch="yandexstation_plus" name="yandex-io/kernel/drivers/ltr308als01" path="vendor/yandex/src/drivers/ltr308als01" revision="c61c901e221e43ad55b2dc87f975a62d0cb401ef" upstream="yandexstation_plus"/>
+  <project dest-branch="yandexstation_plus" name="yandex-io/kernel/drivers/pcm1774" path="vendor/yandex/src/drivers/pcm1774" revision="f3c55b4d7f86d531a0fafa6a2ba972567051124b" upstream="yandexstation_plus"/>
+  <project dest-branch="yandexstation_plus" name="yandex-io/kernel/drivers/quasar-led-ring" path="vendor/yandex/src/drivers/quasar-led-ring" revision="6938597861bb42f4ef7d3c50d8936ee0e96cc93c" upstream="yandexstation_plus"/>
+  <project dest-branch="yandexstation_plus" name="yandex-io/kernel/drivers/quasar-led-screen" path="vendor/yandex/src/drivers/quasar-led-screen" revision="1e932fffa8fcc9f15579f57951bf602f424734fe" upstream="yandexstation_plus"/>
+  <project dest-branch="yandex/master" name="yandex-io/kernel/drivers/quasar-pcba-ids" path="vendor/yandex/src/drivers/quasar-pcba-ids" revision="edfd904b3fce45febee301864951da7c3d492051" upstream="yandex/master"/>
+  <project dest-branch="yandexstation_plus" name="yandex-io/kernel/drivers/rotary-volume" path="vendor/yandex/src/drivers/rotary-volume" revision="6e54bf2afd01525c289b9f85a6130ece89882d03" upstream="yandexstation_plus"/>
+  <project dest-branch="yandex/master" name="yandex-io/kernel/drivers/sy6045s" path="vendor/yandex/src/drivers/sy6045s" revision="92cccf1700d11e4b9322b9f72e7c140068a98667" upstream="yandex/master"/>
+  <project dest-branch="yandexstation_plus" name="yandex-io/kernel/drivers/tas5825m" path="vendor/yandex/src/drivers/tas5825" revision="008e1eb09fcf4d8776f7a84da305a24de6060cd5" upstream="yandexstation_plus"/>
+  <project dest-branch="yandexstation_plus" name="yandex-io/kernel/drivers/tlv320adc3101" path="vendor/yandex/src/drivers/tlv320adc3101" revision="218fcfa3759f1409457ccfdea1230067472a81ee" upstream="yandexstation_plus"/>
+  <project dest-branch="master" name="yandex-io/realtek/bt_uart_8822cs" path="vendor/realtek/src/8822cs_bt_uart" revision="d7bd6851fda2a499630f31324204101bdacbfa45" upstream="master"/>
+  <project dest-branch="master" name="yandex-io/tools/bluez-agent-dummy" path="vendor/yandex/src/tools/just-works-bluez-agent" revision="00a743e58296f6a5490752eb0070064dd4f8567d" upstream="master"/>
+  <project dest-branch="yandex/master" name="yandex-io/tools/device_id" path="vendor/yandex/src/tools/device_id" revision="733fe2493dd3b60b89bbed1956b8927b7633e1e3" upstream="yandex/master"/>
+  <project dest-branch="master" name="yandex-io/tools/keymaster_svc" path="vendor/yandex/src/tools/keymaster_svc" revision="e9f209a82226be0a02f6c116da3e758e73b74735" upstream="master"/>
+  <project dest-branch="yandexstation_plus" name="yandex-io/tools/led-tools" path="vendor/yandex/src/tools/led-tools" revision="ca042345c5d85aca7d74004a06a71ca7df823a65" upstream="yandexstation_plus"/>
+  <project dest-branch="yandexstation_plus" name="yandex-io/tools/rabbit_hole_key_converter" path="vendor/amlogic/src/uboot/tools/rabbit_hole_key_converter" revision="08bfa4929c4c85fa18c8f89a8c88537c62b1e0d5" upstream="yandexstation_plus"/>
+  <project dest-branch="master" name="yandex-io/tools/securekey-ca" path="vendor/yandex/src/tools/securekey_ca" revision="67ae88fdc3c5e9c21573f30967ef1fac666458a7" upstream="master"/>
+  <project dest-branch="master" name="yandex-io/tools/vl53l0x_ctrl" path="vendor/yandex/src/tools/vl53l0x_ctrl" revision="cfd2937123b5d2b95717ccaa13062cdca6210936" upstream="master"/>
+  <project dest-branch="yandexstation_plus" name="yandex-io/tools/ya_provision" path="vendor/yandex/src/tools/ya_provision" revision="5deb9ed57e4cb5e67c452f1c41604c1db524ef1d" upstream="yandexstation_plus"/>
+</manifest>

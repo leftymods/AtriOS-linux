@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<zcl:cluster xmlns:zcl="http://zigbee.org/zcl/clusters"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xmlns:type="http://zigbee.org/zcl/types"
+  xmlns:xi="http://www.w3.org/2001/XInclude"
+  xsi:schemaLocation="http://zigbee.org/zcl/clusters cluster.xsd http://zigbee.org/zcl/types type.xsd"
+  id="0013" revision="1" name="MultistateOutput">
+  <classification role="application" picsCode="MO" primaryTransaction="2" />
+  <server>
+    <attributes>
+      <attribute id="000E" name="StateText" type="array" default="" />
+      <attribute id="001C" name="Description" type="string" default="" />
+      <attribute id="004A" name="NumberOfStates" type="uint16" min="1" max="65535" default="0" required="true" />
+      <attribute id="0051" name="OutOfService" type="bool" default="0" required="true" />
+      <attribute id="0055" name="PresentValue" type="uint16" reportRequired="true" required="true" />
+      <attribute id="0057" name="PriorityArray" type="array" default="" />
+      <attribute id="0067" name="Reliability" type="enum8" default="0" />
+      <attribute id="0068" name="RelinquishDefault" type="uint16" />
+      <attribute id="006F" name="StatusFlags" type="map8" min="0" max="15" default="0" reportRequired="true" required="true" />
+      <attribute id="0100" name="ApplicationType" type="uint32" min="0" max="4294967295" />
+    </attributes>
+  </server>
+</zcl:cluster>

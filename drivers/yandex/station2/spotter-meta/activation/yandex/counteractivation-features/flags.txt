@@ -1,0 +1,10 @@
+cmn-latency 50
+cmn-window 600
+am-type nnet
+feat-pipeline cmn:lda
+dither 0.1
+frame-shift 10
+frame-size 20
+sample-rate 16000
+skip-rate 1
+ca-version contractivation-test-no-spotter

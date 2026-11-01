@@ -1,0 +1,285 @@
+#!/usr/bin/env python3
+"""
+AtriOS Bluetooth Volume Synchronization Daemon (bt-volume-sync)
+Synchronizes volume bidirectionally between connected Bluetooth audio sources
+(iOS / Android via AVRCP / BlueZ / BlueALSA) and the Yandex Station Max hardware mixer/LED ring.
+"""
+
+import os
+import sys
+import time
+import subprocess
+import threading
+import re
+
+STATE_FILE = "/var/lib/atrios/volume"
+FB_RING = "/dev/fb5"
+NUM_LEDS = 24
+ALSA_CARD = "AMLAUGESOUND"
+
+def read_state_volume():
+    try:
+        if os.path.exists(STATE_FILE):
+            with open(STATE_FILE, "r") as f:
+                content = f.read().strip()
+                if content.isdigit():
+                    return max(0, min(100, int(content)))
+    except Exception:
+        pass
+    return 60
+
+def volume_to_raw(pct, max_val):
+    pct = max(0, min(100, int(pct)))
+    if pct <= 0:
+        return 0
+    if pct >= 100:
+        return max_val
+    max_db = (max_val * 0.5) - 12.0
+    db = -max_db * (1.0 - (float(pct) / 100.0) ** 0.5)
+    val = int(round(max_val + 2.0 * db))
+    return max(1, min(max_val, val))
+
+def calc_led_color(ratio, vol_pct):
+    red_advance = max(0.0, min(1.0, (float(vol_pct) - 50.0) / 50.0))
+    red_threshold = 1.0 - red_advance
+    if ratio >= red_threshold:
+        return 255, 0, 0
+    rel = ratio / max(0.01, red_threshold)
+    if rel < 0.5:
+        r = int(255 * (rel * 2.0))
+        g = 255
+    else:
+        r = 255
+        g = int(255 * (2.0 - rel * 2.0))
+    return r, g, 0
+
+def show_volume_ring(vol_pct, brightness=1.0):
+    try:
+        if vol_pct <= 0 or brightness <= 0.001:
+            frame = b"\x00" * (NUM_LEDS * 3)
+        else:
+            brightness = max(0.0, min(1.0, float(brightness)))
+            exact = NUM_LEDS * max(0.0, min(100.0, float(vol_pct))) / 100.0
+            full = int(exact)
+            frame = bytearray(NUM_LEDS * 3)
+            for i in range(full):
+                ratio = i / max(1, NUM_LEDS - 1)
+                r, g, _ = calc_led_color(ratio, vol_pct)
+                frame[i * 3 + 0] = int(r * brightness)
+                frame[i * 3 + 1] = int(g * brightness)
+                frame[i * 3 + 2] = 0
+            if full < NUM_LEDS:
+                frac = exact - full
+                if frac > 0.05:
+                    ratio = full / max(1, NUM_LEDS - 1)
+                    r, g, _ = calc_led_color(ratio, vol_pct)
+                    b_sub = brightness * frac
+                    frame[full * 3 + 0] = int(r * b_sub)
+                    frame[full * 3 + 1] = int(g * b_sub)
+                    frame[full * 3 + 2] = 0
+        with open(FB_RING, "wb") as f:
+            f.write(frame)
+            f.flush()
+    except Exception:
+        pass
+
+def apply_hardware_volume(pct):
+    raw_255 = volume_to_raw(pct, 255)
+    raw_hp = volume_to_raw(pct, 191)
+    sw = "0" if pct <= 0 else "1"
+    mute_i2c = "0x08" if pct <= 0 else "0x00"
+    lines = [
+        f"cset name='Woofer Master Playback Volume' {raw_255}",
+        f"cset name='Tweeters Master Playback Volume' {raw_255}",
+        f"cset name='Headphone DAC Playback Volume' {raw_hp}",
+        f"cset name='Woofer Master Playback Switch' {sw}",
+        f"cset name='Tweeters Master Playback Switch' {sw}",
+        f"cset name='Headphone Headphone Switch' {sw}",
+        "cset name='Audio Out Sink' 1",
+        "cset name='Woofer Ch1 Playback Switch' 1",
+        "cset name='Woofer Ch2 Playback Switch' 1",
+        "cset name='Tweeters Ch1 Playback Switch' 1",
+        "cset name='Tweeters Ch2 Playback Switch' 1",
+        "cset name='Woofer Ch1 Playback Volume' 159",
+        "cset name='Woofer Ch2 Playback Volume' 159",
+        "cset name='Tweeters Ch1 Playback Volume' 159",
+        "cset name='Tweeters Ch2 Playback Volume' 159",
+        "cset name='SPK mute' 0",
+    ]
+    batch = "\n".join(lines) + "\n"
+    subprocess.run(["amixer", "-c", ALSA_CARD, "-q", "-s"],
+                   input=batch.encode('utf-8'),
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # Direct I2C unmute / volume on SY6045S
+    try:
+        hex_raw = f"0x{raw_255:02x}"
+        for addr in ("0x2a", "0x2b"):
+            subprocess.run(["i2cset", "-y", "-f", "2", addr, "0x07", hex_raw],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(["i2cset", "-y", "-f", "2", addr, "0x06", mute_i2c],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(["i2cset", "-y", "-f", "2", addr, "0x22", "0x00"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
+    # Save state so rotaryd can pick it up and smoothly fade out
+    try:
+        os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
+        tmp = f"{STATE_FILE}.tmp"
+        with open(tmp, "w") as f:
+            f.write(f"{pct}\n")
+        os.replace(tmp, STATE_FILE)
+    except Exception:
+        pass
+
+def get_bluez_transport_paths():
+    try:
+        out = subprocess.check_output(
+            ["gdbus", "call", "--system", "--dest", "org.bluez",
+             "--object-path", "/", "--method", "org.freedesktop.DBus.ObjectManager.GetManagedObjects"],
+            timeout=2
+        ).decode('utf-8', errors='replace')
+        return re.findall(r"objectpath '(/org/bluez/hci0/dev_[^']+/fd\d+)'", out)
+    except Exception:
+        return []
+
+def get_bluealsa_pcm_paths():
+    try:
+        out = subprocess.check_output(
+            ["gdbus", "call", "--system", "--dest", "org.bluealsa",
+             "--object-path", "/org/bluealsa", "--method", "org.freedesktop.DBus.ObjectManager.GetManagedObjects"],
+            timeout=2
+        ).decode('utf-8', errors='replace')
+        return re.findall(r"objectpath '(/org/bluealsa/[^']+)'", out)
+    except Exception:
+        return []
+
+def set_phone_volume(pct):
+    val127 = int(round(pct * 127.0 / 100.0))
+    val16_ba = (val127 << 8) | val127
+    
+    # 1. Update BlueZ MediaTransport1
+    for t_path in get_bluez_transport_paths():
+        subprocess.run([
+            "gdbus", "call", "--system", "--dest", "org.bluez",
+            "--object-path", t_path,
+            "--method", "org.freedesktop.DBus.Properties.Set",
+            "org.bluez.MediaTransport1", "Volume", f"<uint16 {val127}>"
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1)
+
+    # 2. Update BlueALSA PCM1
+    for pcm_path in get_bluealsa_pcm_paths():
+        subprocess.run([
+            "gdbus", "call", "--system", "--dest", "org.bluealsa",
+            "--object-path", pcm_path,
+            "--method", "org.freedesktop.DBus.Properties.Set",
+            "org.bluealsa.PCM1", "Volume", f"<uint16 {val16_ba}>"
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1)
+
+class VolumeSync:
+    def __init__(self):
+        self.current_vol = read_state_volume()
+        self.last_sync_time = 0.0
+        self.last_sync_origin = None
+
+    def phone_volume_changed(self, phone_pct):
+        if abs(phone_pct - self.current_vol) <= 1:
+            return
+        now = time.time()
+        if self.last_sync_origin == "station" and (now - self.last_sync_time) < 0.6:
+            return
+        self.current_vol = phone_pct
+        self.last_sync_time = now
+        self.last_sync_origin = "phone"
+        apply_hardware_volume(self.current_vol)
+
+    def station_volume_changed(self, station_pct):
+        if abs(station_pct - self.current_vol) <= 1:
+            return
+        now = time.time()
+        if self.last_sync_origin == "phone" and (now - self.last_sync_time) < 0.6:
+            return
+        self.current_vol = station_pct
+        self.last_sync_time = now
+        self.last_sync_origin = "station"
+        set_phone_volume(station_pct)
+
+def monitor_phone_volume(sync_mgr):
+    """Monitor BlueZ and BlueALSA D-Bus PropertiesChanged signals for Volume changes."""
+    while True:
+        try:
+            cmd = [
+                "dbus-monitor", "--system",
+                "type='signal',interface='org.freedesktop.DBus.Properties',member='PropertiesChanged'"
+            ]
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+            in_vol = False
+            for line in proc.stdout:
+                line_str = line.strip()
+                if "string \"Volume\"" in line_str:
+                    in_vol = True
+                    continue
+                if in_vol and "uint16" in line_str:
+                    m = re.search(r"uint16\s+(\d+)", line_str)
+                    if m:
+                        val = int(m.group(1))
+                        if val > 127:
+                            left = (val >> 8) & 0xff
+                            pct = int(round(left * 100.0 / 127.0))
+                        else:
+                            pct = int(round(val * 100.0 / 127.0))
+                        sync_mgr.phone_volume_changed(pct)
+                    in_vol = False
+        except Exception:
+            time.sleep(2)
+
+def monitor_station_volume(sync_mgr):
+    """Monitor local /var/lib/atrios/volume changes (knob rotation)."""
+    last_mtime = 0
+    while True:
+        try:
+            if os.path.exists(STATE_FILE):
+                mtime = os.path.getmtime(STATE_FILE)
+                if mtime != last_mtime:
+                    last_mtime = mtime
+                    val = read_state_volume()
+                    if val is not None:
+                        sync_mgr.station_volume_changed(val)
+        except Exception:
+            pass
+        time.sleep(0.05)
+
+def monitor_bt_active():
+    """Update /var/run/atrios/bt_active based on BlueALSA A2DP streaming state."""
+    active_path = "/var/run/atrios/bt_active"
+    os.makedirs(os.path.dirname(active_path), exist_ok=True)
+    last_state = None
+    while True:
+        try:
+            pcms = get_bluealsa_pcm_paths()
+            is_active = "1" if len(pcms) > 0 else "0"
+            if is_active != last_state:
+                with open(active_path + ".tmp", "w") as f:
+                    f.write(is_active)
+                os.replace(active_path + ".tmp", active_path)
+                last_state = is_active
+        except Exception:
+            pass
+        time.sleep(1)
+
+def main():
+    sync = VolumeSync()
+    # Apply initial hardware unmute & nominal levels
+    apply_hardware_volume(sync.current_vol)
+    t1 = threading.Thread(target=monitor_phone_volume, args=(sync,), daemon=True)
+    t2 = threading.Thread(target=monitor_station_volume, args=(sync,), daemon=True)
+    t3 = threading.Thread(target=monitor_bt_active, daemon=True)
+    t1.start()
+    t2.start()
+    t3.start()
+    while True:
+        time.sleep(1)
+
+if __name__ == "__main__":
+    main()

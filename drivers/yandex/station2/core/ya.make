@@ -1,0 +1,102 @@
+OWNER(g:yandex_io)
+
+LIBRARY()
+
+PEERDIR(
+    smart_devices/libs/amplifiers_tuner
+    smart_devices/libs/amplifiers_tuner
+    smart_devices/libs/android_equalizer_dispatcher
+    smart_devices/libs/brightness_control
+    smart_devices/libs/device_id/android_property
+    smart_devices/libs/iot/capability
+    smart_devices/libs/iot/tuya_smart_link
+    smart_devices/libs/pcba
+    smart_devices/platforms/yandexstation_2/platformd/audio_device
+    smart_devices/platforms/yandexstation_2/platformd/audio_input
+    smart_devices/platforms/yandexstation_2/platformd/drm_keys_reworker
+    smart_devices/platforms/yandexstation_2/platformd/firmware_switcher
+    smart_devices/platforms/yandexstation_2/platformd/foreground
+    smart_devices/platforms/yandexstation_2/platformd/leds
+    smart_devices/platforms/yandexstation_2/platformd/leds/utils
+
+    yandex_io/capabilities/volume
+    yandex_io/interfaces/auth/connector
+    yandex_io/interfaces/stereo_pair/connector
+    yandex_io/interfaces/user_config/connector
+    yandex_io/libs/android_support/opensles
+    yandex_io/libs/base
+    yandex_io/libs/device
+    yandex_io/libs/device_cryptography/keymaster_proxy
+    yandex_io/libs/dispatch_main
+    yandex_io/libs/json_utils
+    yandex_io/libs/keymaster_proxy_app
+    yandex_io/libs/logging_handler
+    yandex_io/libs/metrica/diskstats
+    yandex_io/libs/net
+    yandex_io/libs/terminate_waiter
+    yandex_io/libs/threading
+    yandex_io/libs/wifi_reseter
+    yandex_io/modules/audio_input/audio_device/tcp
+    yandex_io/modules/audio_input/audio_device/websocket
+    yandex_io/modules/audio_input/audio_dumper
+    yandex_io/modules/audio_input/broken_mic
+    yandex_io/modules/audio_input/controller
+    yandex_io/modules/audio_input/controller/dialog_mode
+    yandex_io/modules/audio_input/controller/mics_state_proxy
+    yandex_io/modules/audio_input/controller/multiple_vqe_controller/runtime_config_handler
+    yandex_io/modules/audio_input/doa_listener
+    yandex_io/modules/audio_input/mics_state/hw_provider
+    yandex_io/modules/audio_input/mics_state/metrica_listener
+    yandex_io/modules/audio_input/mics_state/sdk_notifier
+    yandex_io/modules/audio_input/vqe_speaker_volume_proxy
+    yandex_io/modules/bluetooth
+    yandex_io/modules/bluetooth/quasar_android
+    yandex_io/modules/buttons/click_handlers
+    yandex_io/modules/buttons/dev_input
+    yandex_io/modules/clock_display_state_holder
+    yandex_io/modules/configuration_mode_sound
+    yandex_io/modules/demo_mode
+    yandex_io/modules/demo_mode/config_manager
+    yandex_io/modules/demo_mode/story_module
+    yandex_io/modules/equalizer_controller
+    yandex_io/modules/equalizer_controller/dispatcher/gstreamer
+    yandex_io/modules/geolocation/geo_ipc_server
+    yandex_io/modules/geolocation/util
+    yandex_io/modules/leds/alice_dialog_error
+    yandex_io/modules/leds/led_util
+    yandex_io/modules/leds/media_error
+    yandex_io/modules/metrics/auxiliary/dev_input
+    yandex_io/modules/metrics/device_power_on
+    yandex_io/modules/personalization
+    yandex_io/modules/quasar_device_state
+    yandex_io/modules/smart_volume
+    yandex_io/modules/spotter_configurer
+    yandex_io/modules/starting_greeting
+    yandex_io/modules/testpoint
+    yandex_io/modules/volume_manager/base
+    yandex_io/modules/volume_manager/controllers/max_volume
+    yandex_io/modules/xiva_alice_request
+
+    yandex_io/sdk
+    yandex_io/tests/testlib/null_sdk
+)
+
+SRCS(
+    buttons_handler.cpp
+    rcu_buttons_controller.cpp
+    rcu_config_observer.cpp
+    rcu_button.cpp
+    rcu_button_event_message.cpp
+    platformd.cpp
+    metrics_collector_impl.cpp
+    yandex_station2_volume_manager.cpp
+)
+
+END()
+
+RECURSE(
+    audio_device
+    audio_input
+    drm_keys_reworker
+    leds
+)

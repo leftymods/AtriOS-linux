@@ -1,0 +1,37 @@
+{
+    "meta": {
+        "name": "gecko_sdk_hal_example",
+        "maintainer": "YandexIO team <quasar-team@yandex-team.ru>",
+        "description": "Gecko SDK HAL example",
+        "version": "{revision}.{branch}"
+    },
+    "build": {
+        "targets": [
+            "smart_devices/third_party/gecko_sdk/example/hal"
+        ],
+        "flags": [
+            {
+                "name": "SL_CONFIG",
+                "value": "smart_devices/third_party/gecko_sdk/example/hal/config.inc"
+            }
+        ],
+        "target-platforms": [
+            "default-none-armv8m_cortex_m33"
+        ]
+    },
+    "data": [
+        {
+            "source": {
+                "type": "BUILD_OUTPUT",
+                "path": "smart_devices/third_party/gecko_sdk/example/hal",
+                "files": [
+                    "hal.hex",
+                    "hal.s37"
+                ]
+            },
+            "destination": {
+                "path": "/"
+            }
+        }
+    ]
+}
