@@ -48,6 +48,17 @@ def set_pixel(buf, x, y, brightness):
         buf[offset + 1] = val
         buf[offset + 2] = val
 
+BT_GLYPH = [0b010, 0b110, 0b010, 0b110, 0b010]
+
+def is_bt_active():
+    try:
+        if os.path.exists("/var/run/atrios/bt_active"):
+            with open("/var/run/atrios/bt_active", "r") as f:
+                return f.read().strip() == "1"
+    except Exception:
+        pass
+    return False
+
 def send_frame(buf):
     try:
         with open(FB_SCREEN, "wb") as f:
@@ -58,9 +69,11 @@ def send_frame(buf):
 
 def main():
     last_rendered = ""
+    last_bt = None
     while True:
         now = time.strftime("%H:%M")
-        if now != last_rendered:
+        bt = is_bt_active()
+        if now != last_rendered or bt != last_bt:
             buf = bytearray(FRAME_SIZE)
             x_positions = [0, 6, 12, 15, 20]
             for char, x_start in zip(now, x_positions):
@@ -75,9 +88,19 @@ def main():
                     for col_idx in range(width):
                         if (row_bits >> (width - 1 - col_idx)) & 1:
                             set_pixel(buf, x_start + col_idx, y, 200)
+            
+            # In Bluetooth speaker mode, render the Bluetooth badge/indicator
+            # Hidden in simple setup / normal clock mode
+            if bt:
+                for r_idx, bits in enumerate(BT_GLYPH):
+                    for c_idx in range(3):
+                        if (bits >> (2 - c_idx)) & 1:
+                            set_pixel(buf, 21 + c_idx, r_idx, 200)
+
             send_frame(buf)
             last_rendered = now
-        time.sleep(10)
+            last_bt = bt
+        time.sleep(1)
 
 if __name__ == "__main__":
     main()

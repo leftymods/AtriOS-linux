@@ -111,11 +111,12 @@ fun MainAppScreen(viewModel: StationViewModel = viewModel()) {
                         )
                         Spacer(modifier = Modifier.width(10.dp))
                         Column {
+                            val currentBtState = uiState.btState
                             Text("AtriOS Station", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
                             Text(
-                                text = when (uiState.btState) {
+                                text = when (currentBtState) {
                                     is BtConnectionState.Connected -> "Bluetooth: ${uiState.deviceName}"
-                                    is BtConnectionState.Connecting -> "Connecting to ${uiState.btState.deviceName}..."
+                                    is BtConnectionState.Connecting -> "Connecting to ${currentBtState.deviceName}..."
                                     else -> "Bluetooth: Disconnected (Tap to connect)"
                                 },
                                 style = MaterialTheme.typography.bodySmall,

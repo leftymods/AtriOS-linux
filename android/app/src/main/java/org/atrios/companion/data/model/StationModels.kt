@@ -44,8 +44,9 @@ data class WifiInfo(
 data class BluetoothInfo(
     @SerializedName("adapter") val adapter: String,
     @SerializedName("name") val name: String,
-    @SerializedName("connected_devices") val connectedDevices: List<BluetoothDeviceItem>,
-    @SerializedName("is_active") val isActive: Boolean
+    @SerializedName("connected_devices") val connectedDevices: List<BluetoothDeviceItem> = emptyList(),
+    @SerializedName("is_active") val isActive: Boolean = true,
+    @SerializedName("is_speaker_mode") val isSpeakerMode: Boolean = false
 )
 
 data class BluetoothDeviceItem(
