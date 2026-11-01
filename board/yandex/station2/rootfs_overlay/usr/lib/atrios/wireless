@@ -190,6 +190,7 @@ case "$CMD" in
             sleep 1
           fi
           command -v sdptool >/dev/null 2>&1 && {
+            sdptool add SP >/dev/null 2>&1 || true
             sdptool add A2SNK >/dev/null 2>&1 || true
             sdptool add AVRCT >/dev/null 2>&1 || true
           }
@@ -225,6 +226,10 @@ case "$CMD" in
           if [ -x /usr/lib/atrios/bt-volume-sync ] && ! pgrep -f /usr/lib/atrios/bt-volume-sync >/dev/null 2>&1; then
             echo "Starting Bluetooth volume synchronization daemon..."
             python3 /usr/lib/atrios/bt-volume-sync &
+          fi
+          if [ -x /usr/lib/atrios/bt-control ] && ! pgrep -f /usr/lib/atrios/bt-control >/dev/null 2>&1; then
+            echo "Starting Bluetooth Remote Control daemon..."
+            python3 /usr/lib/atrios/bt-control &
           fi
           echo "[OK] Bluetooth Speaker Mode ACTIVE!"
           echo "[OK] Discoverable as: 'Yandex Station Max'"

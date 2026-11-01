@@ -1,148 +1,139 @@
 package org.atrios.companion.viewmodel
 
-import androidx.lifecycle.ViewModel
+import android.app.Application
+import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
-import org.atrios.companion.data.model.AccessPointItem
+import org.atrios.companion.data.bluetooth.BtConnectionState
+import org.atrios.companion.data.bluetooth.BluetoothStationManager
+import org.atrios.companion.data.bluetooth.PairedBluetoothDevice
 import org.atrios.companion.data.model.StationStatusResponse
-import org.atrios.companion.data.repository.StationRepository
 
 data class StationUiState(
-    val isConnecting: Boolean = false,
+    val btState: BtConnectionState = BtConnectionState.Disconnected,
     val isConnected: Boolean = false,
-    val hostIp: String = "192.168.1.100",
+    val deviceName: String = "Yandex Station Max",
+    val pairedDevices: List<PairedBluetoothDevice> = emptyList(),
     val status: StationStatusResponse? = null,
     val errorMessage: String? = null,
-    val isScanningWifi: Boolean = false,
-    val wifiAps: List<AccessPointItem> = emptyList(),
     val actionSuccessMessage: String? = null
 )
 
-class StationViewModel(
-    private val repository: StationRepository = StationRepository()
-) : ViewModel() {
+class StationViewModel(application: Application) : AndroidViewModel(application) {
 
-    private val _uiState = MutableStateFlow(StationUiState(hostIp = repository.getHost()))
+    private val btManager = BluetoothStationManager(application.applicationContext)
+
+    private val _uiState = MutableStateFlow(StationUiState())
     val uiState: StateFlow<StationUiState> = _uiState.asStateFlow()
 
-    private var pollJob: Job? = null
-
     init {
-        startPolling()
-    }
-
-    fun updateHostIp(ip: String) {
-        _uiState.update { it.copy(hostIp = ip) }
-        repository.updateHost(ip)
-        refreshStatus()
-    }
-
-    fun refreshStatus() {
+        // Observe Bluetooth Connection State
         viewModelScope.launch {
-            _uiState.update { it.copy(isConnecting = true, errorMessage = null) }
-            val result = repository.fetchStatus()
-            result.onSuccess { data ->
+            btManager.connectionState.collect { state ->
+                val connected = state is BtConnectionState.Connected
+                val devName = if (state is BtConnectionState.Connected) state.deviceName else "Yandex Station Max"
+                val err = if (state is BtConnectionState.Error) state.message else null
                 _uiState.update {
                     it.copy(
-                        isConnecting = false,
-                        isConnected = true,
-                        status = data,
-                        errorMessage = null
-                    )
-                }
-            }.onFailure { err ->
-                _uiState.update {
-                    it.copy(
-                        isConnecting = false,
-                        isConnected = false,
-                        errorMessage = err.localizedMessage ?: "Connection error"
+                        btState = state,
+                        isConnected = connected,
+                        deviceName = devName,
+                        errorMessage = err
                     )
                 }
             }
         }
+
+        // Observe Live Status received over Bluetooth
+        viewModelScope.launch {
+            btManager.stationStatus.collect { st ->
+                if (st != null) {
+                    _uiState.update { it.copy(status = st) }
+                }
+            }
+        }
+
+        // Observe Paired Bluetooth Devices
+        viewModelScope.launch {
+            btManager.pairedDevices.collect { list ->
+                _uiState.update { it.copy(pairedDevices = list) }
+            }
+        }
+
+        // Initial scan of paired Bluetooth devices & auto-connect
+        refreshDevices()
+        autoConnect()
+    }
+
+    fun refreshDevices() {
+        btManager.refreshPairedDevices()
+    }
+
+    fun autoConnect() {
+        btManager.autoConnect()
+    }
+
+    fun connectToDevice(address: String) {
+        btManager.connectToDevice(address)
+    }
+
+    fun disconnect() {
+        btManager.disconnect()
     }
 
     fun setVolume(volume: Int) {
-        // Optimistic UI update
         val cur = _uiState.value.status
         if (cur != null) {
-            val updated = cur.copy(audio = cur.audio.copy(volume = volume, mute = volume == 0))
+            val updated = cur.copy(audio = cur.audio.copy(volume = volume, mute = (volume == 0)))
             _uiState.update { it.copy(status = updated) }
         }
-        viewModelScope.launch {
-            repository.setVolume(volume).onFailure { err ->
-                _uiState.update { it.copy(errorMessage = "Failed to set volume: ${err.message}") }
-            }
-        }
+        btManager.sendCommand("set_volume", mapOf("volume" to volume))
     }
 
     fun toggleMute() {
         val currentMute = _uiState.value.status?.audio?.mute ?: false
         val newMute = !currentMute
-        viewModelScope.launch {
-            repository.setMute(newMute).onSuccess {
-                refreshStatus()
-            }
+        btManager.sendCommand("set_mute", mapOf("mute" to newMute))
+    }
+
+    fun setLedMode(mode: String, brightness: Int) {
+        btManager.sendCommand("set_led", mapOf("mode" to mode, "brightness" to brightness))
+        _uiState.update { it.copy(actionSuccessMessage = "LED Ring updated: $mode") }
+    }
+
+    fun setScreenMode(mode: String, brightness: Int) {
+        btManager.sendCommand("set_screen", mapOf("mode" to mode, "brightness" to brightness))
+        _uiState.update { it.copy(actionSuccessMessage = "Front screen updated: $mode") }
+    }
+
+    fun configureWifiOverBluetooth(ssid: String, psk: String) {
+        if (ssid.isNotBlank()) {
+            btManager.sendCommand("wifi_connect", mapOf("ssid" to ssid, "psk" to psk))
+            _uiState.update { it.copy(actionSuccessMessage = "Sent Wi-Fi credentials over Bluetooth") }
         }
     }
 
     fun testAudio() {
-        viewModelScope.launch {
-            repository.testAudio().onSuccess {
-                _uiState.update { it.copy(actionSuccessMessage = "Audio test chime triggered") }
-            }.onFailure {
-                _uiState.update { it.copy(errorMessage = "Audio test failed: ${it.errorMessage}") }
-            }
-        }
+        btManager.sendCommand("audio_test")
+        _uiState.update { it.copy(actionSuccessMessage = "Audio test chime triggered over Bluetooth") }
     }
 
     fun reboot() {
-        viewModelScope.launch {
-            repository.reboot().onSuccess {
-                _uiState.update { it.copy(actionSuccessMessage = "Reboot command sent to station") }
-            }
-        }
+        btManager.sendCommand("reboot")
+        _uiState.update { it.copy(actionSuccessMessage = "Reboot command sent over Bluetooth") }
     }
 
-    fun scanWifi() {
-        viewModelScope.launch {
-            _uiState.update { it.copy(isScanningWifi = true) }
-            val res = repository.scanWifi()
-            res.onSuccess { list ->
-                _uiState.update { it.copy(isScanningWifi = false, wifiAps = list) }
-            }.onFailure {
-                _uiState.update { it.copy(isScanningWifi = false) }
-            }
-        }
+    fun requestStatus() {
+        btManager.sendCommand("get_status")
     }
 
     fun clearMessages() {
         _uiState.update { it.copy(errorMessage = null, actionSuccessMessage = null) }
     }
 
-    private fun startPolling() {
-        pollJob?.cancel()
-        pollJob = viewModelScope.launch {
-            while (true) {
-                val res = repository.fetchStatus()
-                res.onSuccess { data ->
-                    _uiState.update { it.copy(isConnected = true, status = data) }
-                }.onFailure {
-                    _uiState.update { it.copy(isConnected = false) }
-                }
-                delay(3000)
-            }
-        }
-    }
-
     override fun onCleared() {
         super.onCleared()
-        pollJob?.cancel()
+        btManager.disconnect()
     }
 }

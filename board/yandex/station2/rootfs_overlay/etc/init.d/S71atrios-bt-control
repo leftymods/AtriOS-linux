@@ -1,0 +1,26 @@
+#!/bin/sh
+# /etc/init.d/S71atrios-bt-control - Bluetooth RFCOMM Remote Control Daemon
+
+case "$1" in
+  start)
+    echo "Starting AtriOS Bluetooth Remote Control Daemon (RFCOMM channel 1)..."
+    if [ -x /usr/lib/atrios/bt-control ] && ! pgrep -f /usr/lib/atrios/bt-control >/dev/null 2>&1; then
+      python3 /usr/lib/atrios/bt-control >/var/log/atrios-bt-control.log 2>&1 &
+    fi
+    ;;
+  stop)
+    echo "Stopping AtriOS Bluetooth Remote Control Daemon..."
+    pkill -f /usr/lib/atrios/bt-control 2>/dev/null || true
+    ;;
+  restart)
+    "$0" stop
+    sleep 1
+    "$0" start
+    ;;
+  *)
+    echo "Usage: $0 {start|stop|restart}"
+    exit 1
+    ;;
+esac
+
+exit 0

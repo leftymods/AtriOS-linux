@@ -63,7 +63,12 @@ fun DisplayScreen(
                     ringEffects.take(3).forEach { effect ->
                         FilterChip(
                             selected = (selectedRingEffect == effect),
-                            onClick = { selectedRingEffect = effect },
+                            onClick = {
+                                selectedRingEffect = effect
+                                if (uiState.isConnected) {
+                                    viewModel.setLedMode(effect, ringBrightness.toInt())
+                                }
+                            },
                             label = { Text(effect) }
                         )
                     }
@@ -75,7 +80,12 @@ fun DisplayScreen(
                     ringEffects.drop(3).forEach { effect ->
                         FilterChip(
                             selected = (selectedRingEffect == effect),
-                            onClick = { selectedRingEffect = effect },
+                            onClick = {
+                                selectedRingEffect = effect
+                                if (uiState.isConnected) {
+                                    viewModel.setLedMode(effect, ringBrightness.toInt())
+                                }
+                            },
                             label = { Text(effect) }
                         )
                     }
@@ -86,12 +96,18 @@ fun DisplayScreen(
                 Text("Ring Brightness: ${ringBrightness.toInt()}%", style = MaterialTheme.typography.bodyMedium)
                 Slider(
                     value = ringBrightness,
-                    onValueChange = { ringBrightness = it },
-                    valueRange = 0f..100f
+                    onValueChange = {
+                        ringBrightness = it
+                        if (uiState.isConnected) {
+                            viewModel.setLedMode(selectedRingEffect, it.toInt())
+                        }
+                    },
+                    valueRange = 0f..100f,
+                    enabled = uiState.isConnected
                 )
 
                 Text(
-                    text = "Hardware: /dev/fb5 RGB888 frame buffer (50 smooth volume steps)",
+                    text = "Controlled over Bluetooth via /dev/fb5 (rotaryd / bt-control)",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -123,7 +139,12 @@ fun DisplayScreen(
                     matrixModes.forEach { mode ->
                         FilterChip(
                             selected = (selectedMatrixMode == mode),
-                            onClick = { selectedMatrixMode = mode },
+                            onClick = {
+                                selectedMatrixMode = mode
+                                if (uiState.isConnected) {
+                                    viewModel.setScreenMode(mode, matrixBrightness.toInt())
+                                }
+                            },
                             label = { Text(mode) }
                         )
                     }
@@ -134,12 +155,18 @@ fun DisplayScreen(
                 Text("Matrix Brightness: ${matrixBrightness.toInt()}%", style = MaterialTheme.typography.bodyMedium)
                 Slider(
                     value = matrixBrightness,
-                    onValueChange = { matrixBrightness = it },
-                    valueRange = 0f..100f
+                    onValueChange = {
+                        matrixBrightness = it
+                        if (uiState.isConnected) {
+                            viewModel.setScreenMode(selectedMatrixMode, it.toInt())
+                        }
+                    },
+                    valueRange = 0f..100f,
+                    enabled = uiState.isConnected
                 )
 
                 Text(
-                    text = "Hardware: /dev/fb0 monocromatic monochrome LED matrix (driven by screend)",
+                    text = "Controlled over Bluetooth via /dev/fb0 (screend)",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )

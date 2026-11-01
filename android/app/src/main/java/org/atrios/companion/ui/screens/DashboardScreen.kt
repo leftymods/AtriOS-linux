@@ -11,9 +11,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import org.atrios.companion.data.bluetooth.BtConnectionState
 import org.atrios.companion.viewmodel.StationUiState
 import org.atrios.companion.viewmodel.StationViewModel
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DashboardScreen(
     uiState: StationUiState,
@@ -21,8 +23,7 @@ fun DashboardScreen(
     modifier: Modifier = Modifier
 ) {
     val scrollState = rememberScrollState()
-    var showIpDialog by remember { mutableStateOf(false) }
-    var ipInput by remember { mutableStateOf(uiState.hostIp) }
+    var showDeviceSheet by remember { mutableStateOf(false) }
 
     Column(
         modifier = modifier
@@ -31,14 +32,15 @@ fun DashboardScreen(
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        // Connection Header Card
+        // Bluetooth Connection Banner
         ElevatedCard(
             modifier = Modifier.fillMaxWidth(),
             colors = CardDefaults.elevatedCardColors(
-                containerColor = if (uiState.isConnected)
-                    MaterialTheme.colorScheme.primaryContainer
-                else
-                    MaterialTheme.colorScheme.errorContainer
+                containerColor = when (uiState.btState) {
+                    is BtConnectionState.Connected -> MaterialTheme.colorScheme.primaryContainer
+                    is BtConnectionState.Connecting -> MaterialTheme.colorScheme.secondaryContainer
+                    else -> MaterialTheme.colorScheme.surfaceVariant
+                }
             )
         ) {
             Row(
@@ -48,40 +50,66 @@ fun DashboardScreen(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
                     Icon(
-                        imageVector = if (uiState.isConnected) Icons.Default.CheckCircle else Icons.Default.Warning,
+                        imageVector = when (uiState.btState) {
+                            is BtConnectionState.Connected -> Icons.Default.BluetoothConnected
+                            is BtConnectionState.Connecting -> Icons.Default.BluetoothSearching
+                            else -> Icons.Default.Bluetooth
+                        },
                         contentDescription = null,
-                        tint = if (uiState.isConnected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onErrorContainer
+                        tint = when (uiState.btState) {
+                            is BtConnectionState.Connected -> MaterialTheme.colorScheme.onPrimaryContainer
+                            is BtConnectionState.Connecting -> MaterialTheme.colorScheme.onSecondaryContainer
+                            else -> MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                        modifier = Modifier.size(28.dp)
                     )
                     Spacer(modifier = Modifier.width(12.dp))
                     Column {
                         Text(
-                            text = if (uiState.isConnected) "Yandex Station Max Online" else "Station Offline",
+                            text = when (uiState.btState) {
+                                is BtConnectionState.Connected -> "Bluetooth: Connected"
+                                is BtConnectionState.Connecting -> "Connecting to ${uiState.btState.deviceName}..."
+                                is BtConnectionState.Error -> "Connection Failed"
+                                else -> "Bluetooth: Disconnected"
+                            },
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold,
-                            color = if (uiState.isConnected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onErrorContainer
+                            color = when (uiState.btState) {
+                                is BtConnectionState.Connected -> MaterialTheme.colorScheme.onPrimaryContainer
+                                is BtConnectionState.Connecting -> MaterialTheme.colorScheme.onSecondaryContainer
+                                else -> MaterialTheme.colorScheme.onSurfaceVariant
+                            }
                         )
                         Text(
-                            text = "IP: ${uiState.hostIp}:8080",
+                            text = if (uiState.btState is BtConnectionState.Connected)
+                                "${uiState.btState.deviceName} (${uiState.btState.address})"
+                            else
+                                "Peer-to-peer RFCOMM Serial Port Profile",
                             style = MaterialTheme.typography.bodySmall,
-                            color = if (uiState.isConnected) MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f) else MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.8f)
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                 }
-                FilledTonalButton(onClick = {
-                    ipInput = uiState.hostIp
-                    showIpDialog = true
-                }) {
-                    Text("Change IP")
+
+                if (uiState.btState is BtConnectionState.Connected) {
+                    OutlinedButton(onClick = { viewModel.disconnect() }) {
+                        Text("Disconnect")
+                    }
+                } else {
+                    Button(onClick = {
+                        viewModel.refreshDevices()
+                        showDeviceSheet = true
+                    }) {
+                        Text("Connect")
+                    }
                 }
             }
         }
 
-        // Quick Volume Card
-        ElevatedCard(
-            modifier = Modifier.fillMaxWidth()
-        ) {
+        // Live Volume Control (Operates over Bluetooth RFCOMM)
+        ElevatedCard(modifier = Modifier.fillMaxWidth()) {
             Column(modifier = Modifier.padding(16.dp)) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -96,7 +124,7 @@ fun DashboardScreen(
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = "Master Volume",
+                            text = "Acoustic Volume",
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.SemiBold
                         )
@@ -115,6 +143,7 @@ fun DashboardScreen(
                     value = (uiState.status?.audio?.volume ?: 0).toFloat(),
                     onValueChange = { viewModel.setVolume(it.toInt()) },
                     valueRange = 0f..100f,
+                    enabled = uiState.isConnected,
                     modifier = Modifier.fillMaxWidth()
                 )
 
@@ -122,7 +151,10 @@ fun DashboardScreen(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    OutlinedButton(onClick = { viewModel.toggleMute() }) {
+                    OutlinedButton(
+                        onClick = { viewModel.toggleMute() },
+                        enabled = uiState.isConnected
+                    ) {
                         Icon(
                             imageVector = if (uiState.status?.audio?.mute == true) Icons.Default.VolumeUp else Icons.Default.VolumeOff,
                             contentDescription = null
@@ -130,7 +162,10 @@ fun DashboardScreen(
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(if (uiState.status?.audio?.mute == true) "Unmute" else "Mute")
                     }
-                    Button(onClick = { viewModel.testAudio() }) {
+                    Button(
+                        onClick = { viewModel.testAudio() },
+                        enabled = uiState.isConnected
+                    ) {
                         Icon(Icons.Default.PlayArrow, contentDescription = null)
                         Spacer(modifier = Modifier.width(6.dp))
                         Text("Test Chime")
@@ -139,16 +174,28 @@ fun DashboardScreen(
             }
         }
 
-        // Hardware & Sensors Card
+        // Real-Time Telemetry over Bluetooth
         ElevatedCard(modifier = Modifier.fillMaxWidth()) {
             Column(modifier = Modifier.padding(16.dp)) {
-                Text(
-                    text = "System Telemetry",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.primary
-                )
-                Spacer(modifier = Modifier.height(12.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Hardware Telemetry (via Bluetooth)",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    IconButton(
+                        onClick = { viewModel.requestStatus() },
+                        enabled = uiState.isConnected
+                    ) {
+                        Icon(Icons.Default.Refresh, contentDescription = "Refresh telemetry", modifier = Modifier.size(20.dp))
+                    }
+                }
+                Spacer(modifier = Modifier.height(8.dp))
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -156,146 +203,124 @@ fun DashboardScreen(
                 ) {
                     MetricItem(
                         icon = Icons.Default.Thermostat,
-                        label = "CPU Temp",
-                        value = "${uiState.status?.device?.cpuTemperature ?: 0.0} °C"
+                        label = "S905X3 Temp",
+                        value = if (uiState.isConnected) "${uiState.status?.device?.cpuTemperature ?: 0.0} °C" else "—"
                     )
                     MetricItem(
                         icon = Icons.Default.Memory,
                         label = "RAM Usage",
-                        value = "${uiState.status?.device?.memory?.usedMb ?: 0} / ${uiState.status?.device?.memory?.totalMb ?: 0} MB"
+                        value = if (uiState.isConnected) "${uiState.status?.device?.memory?.usedMb ?: 0} MB" else "—"
                     )
                     MetricItem(
                         icon = Icons.Default.Timer,
                         label = "Uptime",
-                        value = formatUptime(uiState.status?.device?.uptimeSeconds ?: 0)
+                        value = if (uiState.isConnected) formatUptime(uiState.status?.device?.uptimeSeconds ?: 0) else "—"
                     )
                 }
             }
         }
 
-        // Active Connections Card
+        // Station Sound Hardware & Amplifier Profile
         ElevatedCard(modifier = Modifier.fillMaxWidth()) {
             Column(modifier = Modifier.padding(16.dp)) {
                 Text(
-                    text = "Connectivity Status",
+                    text = "Acoustic Subsystem",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.primary
                 )
-                Spacer(modifier = Modifier.height(12.dp))
-
-                // Wi-Fi row
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Wifi,
-                        contentDescription = null,
-                        tint = if (uiState.status?.wifi?.connected == true) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Spacer(modifier = Modifier.width(12.dp))
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = if (uiState.status?.wifi?.connected == true) uiState.status.wifi.ssid else "Wi-Fi Disconnected",
-                            style = MaterialTheme.typography.bodyLarge,
-                            fontWeight = FontWeight.Medium
-                        )
-                        Text(
-                            text = "IP: ${uiState.status?.wifi?.ip?.ifEmpty { "None" } ?: "None"}",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
-
-                HorizontalDivider(modifier = Modifier.padding(vertical = 10.dp))
-
-                // Bluetooth row
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Bluetooth,
-                        contentDescription = null,
-                        tint = if (uiState.status?.bluetooth?.isActive == true) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Spacer(modifier = Modifier.width(12.dp))
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = if (uiState.status?.bluetooth?.connectedDevices?.isNotEmpty() == true)
-                                "Device: ${uiState.status.bluetooth.connectedDevices[0].mac}"
-                            else
-                                "Bluetooth Discoverable (Ready)",
-                            style = MaterialTheme.typography.bodyLarge,
-                            fontWeight = FontWeight.Medium
-                        )
-                        Text(
-                            text = "A2DP Sink: Active",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "Sound Card: ${uiState.status?.audio?.card ?: "AML-AUGESOUND"}",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Text(
+                    text = "Amplifiers: Silergy SY6045S Woofer (30W) + Tweeters (2x10W)",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(
+                    text = "Power Booster: 20V PVDD Active • Headphone Jack: ES8156",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
         }
     }
 
-    if (showIpDialog) {
-        AlertDialog(
-            onDismissRequest = { showIpDialog = false },
-            title = { Text("Connect to Station") },
-            text = {
-                Column {
-                    Text("Enter the IP address of Yandex Station Max on your local Wi-Fi:")
-                    Spacer(modifier = Modifier.height(8.dp))
-                    OutlinedTextField(
-                        value = ipInput,
-                        onValueChange = { ipInput = it },
-                        singleLine = true,
-                        label = { Text("Station IP") },
-                        modifier = Modifier.fillMaxWidth()
+    // Modal Bottom Sheet for Bluetooth Device Pairing & Selection
+    if (showDeviceSheet) {
+        ModalBottomSheet(onDismissRequest = { showDeviceSheet = false }) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text(
+                    text = "Select Paired Station",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    text = "Choose Yandex Station Max to connect over Bluetooth:",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                if (uiState.pairedDevices.isEmpty()) {
+                    Text(
+                        text = "No paired Bluetooth devices found. Please pair with 'Yandex Station Max' in Android Settings first.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.padding(vertical = 12.dp)
                     )
+                } else {
+                    uiState.pairedDevices.forEach { dev ->
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            onClick = {
+                                viewModel.connectToDevice(dev.address)
+                                showDeviceSheet = false
+                            },
+                            colors = CardDefaults.cardColors(
+                                containerColor = if (dev.isStation)
+                                    MaterialTheme.colorScheme.primaryContainer
+                                else
+                                    MaterialTheme.colorScheme.surfaceContainerHigh
+                            )
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(14.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = if (dev.isStation) Icons.Default.Speaker else Icons.Default.Bluetooth,
+                                    contentDescription = null,
+                                    tint = if (dev.isStation) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Spacer(modifier = Modifier.width(12.dp))
+                                Column {
+                                    Text(
+                                        text = dev.name,
+                                        style = MaterialTheme.typography.bodyLarge,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    Text(
+                                        text = dev.address,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                        }
+                    }
                 }
-            },
-            confirmButton = {
-                Button(onClick = {
-                    viewModel.updateHostIp(ipInput)
-                    showIpDialog = false
-                }) {
-                    Text("Connect")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showIpDialog = false }) {
-                    Text("Cancel")
-                }
+                Spacer(modifier = Modifier.height(16.dp))
             }
-        )
+        }
     }
-}
-
-@Composable
-fun MetricItem(
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
-    label: String,
-    value: String,
-    modifier: Modifier = Modifier
-) {
-    Column(
-        modifier = modifier,
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-        Spacer(modifier = Modifier.height(4.dp))
-        Text(value, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
-        Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-    }
-}
-
-fun formatUptime(seconds: Long): String {
-    val hrs = seconds / 3600
-    val mins = (seconds % 3600) / 60
-    return "${hrs}h ${mins}m"
 }
