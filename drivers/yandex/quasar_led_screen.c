@@ -5,6 +5,9 @@
 #include <linux/init.h>
 #include <linux/spi/spi.h>
 #include <linux/gpio/consumer.h>
+#ifndef CONFIG_FB_BACKLIGHT
+#define CONFIG_FB_BACKLIGHT 1
+#endif
 #include <linux/fb.h>
 #include <linux/backlight.h>
 #include <linux/hwmon.h>
@@ -502,6 +505,8 @@ static int bl_wait_until_ready(struct spi_device *spi, int timeout_ms)
 
 /* ---- Framebuffer operations ---- */
 
+static int qls_fb_sync(struct fb_info *info);
+
 static int qls_fb_open(struct fb_info *info, int user)
 {
 	return 0;
@@ -517,15 +522,24 @@ static int qls_fb_check_var(struct fb_var_screeninfo *var, struct fb_info *info)
 	if (var->xres != QLS_XRES || var->yres != QLS_YRES ||
 	    var->xres_virtual != QLS_XRES || var->yres_virtual != QLS_YRES)
 		return -EINVAL;
-	if (var->bits_per_pixel != 8)
+	if (var->bits_per_pixel != 24 && var->bits_per_pixel != 8)
 		return -EINVAL;
 
-	var->red.offset   = 0;
-	var->red.length   = 8;
-	var->green.offset = 0;
-	var->green.length = 8;
-	var->blue.offset  = 0;
-	var->blue.length  = 8;
+	if (var->bits_per_pixel == 24) {
+		var->red.offset   = 16;
+		var->red.length   = 8;
+		var->green.offset = 8;
+		var->green.length = 8;
+		var->blue.offset  = 0;
+		var->blue.length  = 8;
+	} else {
+		var->red.offset   = 0;
+		var->red.length   = 8;
+		var->green.offset = 0;
+		var->green.length = 8;
+		var->blue.offset  = 0;
+		var->blue.length  = 8;
+	}
 	var->transp.offset = 0;
 	var->transp.length = 0;
 	var->grayscale = 0;
@@ -554,33 +568,33 @@ static int qls_fb_set_par(struct fb_info *info)
 static int qls_fb_blank(int blank, struct fb_info *info)
 {
 	struct qls_priv *qls = info->par;
+	u8 gowin_bright[3] = { 0x05, 0x00, 0x00 };
+	int br = (blank == FB_BLANK_UNBLANK) ? qls->brightness : 0;
 
-	switch (blank) {
-	case FB_BLANK_UNBLANK:
-		sa_set_brightness(qls->sa, qls->brightness);
-		break;
-	case FB_BLANK_POWERDOWN:
-		sa_set_brightness(qls->sa, 0);
-		break;
-	}
+	mutex_lock(&qls->sa->lock);
+	/* Gowin FPGA: CMD_SET_BRIGHTNESS (0x05) */
+	gowin_bright[1] = br & 0xff;
+	gowin_bright[2] = (br >> 8) & 0xff;
+	spi_send(qls->spi, gowin_bright, 3);
+
+	/* SA protocol: SA_CMD_SET_BRIGHTNESS (0x1B) */
+	sa_set_brightness(qls->sa, br);
+	mutex_unlock(&qls->sa->lock);
 	return 0;
 }
 
 static int qls_fb_pan_display(struct fb_var_screeninfo *var,
 			      struct fb_info *info)
 {
-	return 0;
+	return qls_fb_sync(info);
 }
 
 static void qls_flush_work(struct work_struct *work)
 {
 	struct qls_priv *qls = container_of(work, struct qls_priv, flush_work);
 
-	mutex_lock(&qls->sa->lock);
-	sa_flush_buffer(qls->sa);
-	qls->frames_in_queue = 0;
+	qls_fb_sync(qls->fb);
 	qls->flush_pending = false;
-	mutex_unlock(&qls->sa->lock);
 }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 15, 0)
@@ -602,12 +616,72 @@ static void qls_flush_timer(unsigned long data)
 static int qls_fb_sync(struct fb_info *info)
 {
 	struct qls_priv *qls = info->par;
+	u8 grayscale[QLS_XRES * QLS_YRES];
+	u8 *gowin_buf;
+	u8 sa_buf[4 + sizeof(grayscale) + 2];
+	u8 show_buf[3] = { 0x03, 0x00, 0x00 };
+	u16 crc;
+	int i, total_pixels = qls->xres * qls->yres;
+
+	if (qls->pixel_depth == 3) {
+		for (i = 0; i < total_pixels; i++) {
+			u8 r = qls->videomemory[i * 3 + 0];
+			u8 g = qls->videomemory[i * 3 + 1];
+			u8 b = qls->videomemory[i * 3 + 2];
+			grayscale[i] = max_t(u8, r, max_t(u8, g, b));
+		}
+	} else {
+		memcpy(grayscale, qls->videomemory, total_pixels);
+	}
 
 	mutex_lock(&qls->sa->lock);
+
+	/* 1. Station Max Gowin FPGA: CMD_WRITE (0x10) + CMD_SHOW_PIC (0x03) */
+	gowin_buf = kmalloc(3 + total_pixels, GFP_KERNEL);
+	if (gowin_buf) {
+		gowin_buf[0] = 0x10;
+		gowin_buf[1] = total_pixels & 0xff;
+		gowin_buf[2] = (total_pixels >> 8) & 0xff;
+		memcpy(gowin_buf + 3, grayscale, total_pixels);
+		spi_send(qls->spi, gowin_buf, 3 + total_pixels);
+		kfree(gowin_buf);
+		spi_send(qls->spi, show_buf, 3);
+	}
+
+	/* 2. Station 2 SA protocol: SA_CMD_SHOW_PIC (0x07) + flush */
+	sa_buf[0] = SA_CMD_SHOW_PIC;
+	sa_buf[1] = 0x00;
+	sa_buf[2] = 0x00;
+	sa_buf[3] = 0x00;
+	memcpy(sa_buf + 4, grayscale, total_pixels);
+	crc = qls_crc16(sa_buf, 4 + total_pixels);
+	sa_buf[4 + total_pixels] = crc & 0xff;
+	sa_buf[4 + total_pixels + 1] = (crc >> 8) & 0xff;
+	spi_send(qls->spi, sa_buf, 4 + total_pixels + 2);
 	sa_flush_buffer(qls->sa);
+
 	qls->frames_in_queue = 0;
 	mutex_unlock(&qls->sa->lock);
 	return 0;
+}
+
+static ssize_t qls_fb_write(struct fb_info *info, const char __user *buf,
+			    size_t count, loff_t *ppos)
+{
+	unsigned long p = *ppos;
+	size_t total_size = info->screen_size;
+
+	if (p >= total_size)
+		return 0;
+	if (count > total_size - p)
+		count = total_size - p;
+
+	if (copy_from_user(info->screen_buffer + p, buf, count))
+		return -EFAULT;
+
+	*ppos += count;
+	qls_fb_sync(info);
+	return count;
 }
 
 static void qls_fb_destroy(struct fb_info *info)
@@ -630,51 +704,25 @@ static int qls_fb_mmap(struct fb_info *info, struct vm_area_struct *vma)
 
 static void qls_draw_lines(struct qls_priv *qls)
 {
-	u8 *line;
-	int y, ret;
-	int line_len = qls->xres * QLS_BPP;
-
-	line = kmalloc(line_len, GFP_KERNEL);
-	if (!line)
-		return;
-
-	for (y = 0; y < qls->yres; y++) {
-		u8 *src = qls->videomemory + y * line_len;
-		memcpy(line, src, line_len);
-		mutex_lock(&qls->sa->lock);
-		ret = sa_show_pic(qls->sa, line, line_len);
-		mutex_unlock(&qls->sa->lock);
-		if (ret)
-			goto out;
-	}
-
-	qls->frames_in_queue++;
-	if (qls->next_frame_delay > 0)
-		mod_timer(&qls->flush_timer,
-			  jiffies + msecs_to_jiffies(qls->next_frame_delay));
-	else
-		qls_fb_sync(qls->fb);
-
-out:
-	kfree(line);
+	qls_fb_sync(qls->fb);
 }
 
 static void qls_fb_fillrect(struct fb_info *info, const struct fb_fillrect *rect)
 {
 	cfb_fillrect(info, rect);
-	qls_draw_lines(info->par);
+	qls_fb_sync(info);
 }
 
 static void qls_fb_copyarea(struct fb_info *info, const struct fb_copyarea *area)
 {
 	cfb_copyarea(info, area);
-	qls_draw_lines(info->par);
+	qls_fb_sync(info);
 }
 
 static void qls_fb_imageblit(struct fb_info *info, const struct fb_image *image)
 {
 	cfb_imageblit(info, image);
-	qls_draw_lines(info->par);
+	qls_fb_sync(info);
 }
 
 static struct fb_ops qls_fb_ops = {
@@ -685,6 +733,7 @@ static struct fb_ops qls_fb_ops = {
 	.fb_set_par   = qls_fb_set_par,
 	.fb_blank     = qls_fb_blank,
 	.fb_pan_display = qls_fb_pan_display,
+	.fb_write     = qls_fb_write,
 	.fb_fillrect  = qls_fb_fillrect,
 	.fb_copyarea  = qls_fb_copyarea,
 	.fb_imageblit = qls_fb_imageblit,
@@ -698,9 +747,19 @@ static struct fb_ops qls_fb_ops = {
 static int qls_bl_update_status(struct backlight_device *bd)
 {
 	struct qls_priv *qls = bl_get_data(bd);
+	u8 gowin_bright[3] = { 0x05, 0x00, 0x00 };
 
 	qls->brightness = clamp(bd->props.brightness, 0, qls->max_brightness);
+
+	mutex_lock(&qls->sa->lock);
+	/* Gowin protocol: CMD_SET_BRIGHTNESS = 0x05 */
+	gowin_bright[1] = qls->brightness & 0xff;
+	gowin_bright[2] = (qls->brightness >> 8) & 0xff;
+	spi_send(qls->spi, gowin_bright, 3);
+
+	/* SA protocol: SA_CMD_SET_BRIGHTNESS = 0x1B */
 	sa_set_brightness(qls->sa, qls->brightness);
+	mutex_unlock(&qls->sa->lock);
 	return 0;
 }
 
@@ -1098,23 +1157,23 @@ static int qls_probe(struct spi_device *spi)
 	info->var.yres = qls->yres;
 	info->var.xres_virtual = qls->xres;
 	info->var.yres_virtual = qls->yres;
-	info->var.bits_per_pixel = 8;
-	info->var.red.offset = 0;
+	info->var.bits_per_pixel = 24;
+	info->var.red.offset = 16;
 	info->var.red.length = 8;
-	info->var.green.offset = 0;
+	info->var.green.offset = 8;
 	info->var.green.length = 8;
 	info->var.blue.offset = 0;
 	info->var.blue.length = 8;
 	info->var.activate = FB_ACTIVATE_NOW;
 	info->var.vmode = FB_VMODE_NONINTERLACED;
 
-	info->fix.smem_start = 0;
+	info->fix.smem_start = (unsigned long)qls->videomemory;
 	info->fix.smem_len = qls->xres * qls->yres * QLS_BPP;
 	info->fix.type = FB_TYPE_PACKED_PIXELS;
 	info->fix.visual = FB_VISUAL_TRUECOLOR;
 	info->fix.line_length = qls->xres * QLS_BPP;
 	info->fix.accel = FB_ACCEL_NONE;
-	snprintf(info->fix.id, sizeof(info->fix.id), "quasar-led");
+	snprintf(info->fix.id, sizeof(info->fix.id), "quasar-led-screen");
 
 	ret = register_framebuffer(info);
 	if (ret < 0) {
@@ -1150,8 +1209,8 @@ static int qls_probe(struct spi_device *spi)
 	if (ret)
 		dev_warn(&spi->dev, "failed to create sysfs group: %d\n", ret);
 
-	dev_info(&spi->dev, "registered framebuffer '%s', %ux%u 8bpp\n",
-		 info->fix.id, qls->xres, qls->yres);
+	dev_info(&spi->dev, "registered framebuffer '%s', %ux%u %ubpp\n",
+		 info->fix.id, qls->xres, qls->yres, info->var.bits_per_pixel);
 
 	return 0;
 }
