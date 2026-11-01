@@ -1,0 +1,3 @@
+20:  <project dest-branch="master" name="unity/platform/hardware/wifi/realtek/drivers/8822cs" path="vendor/realtek/src/8822cs" revision="af1ee06eb77ba9cd3f87fb07b839185319ee15bf" upstream="master"/>
+33:  <project dest-branch="master" name="yandex-io/buildroot-external-realtek" path="vendor/realtek" revision="ddec9e5dc05e0882e036c0332c69436211b480b3" upstream="master"/>
+51:  <project dest-branch="master" name="yandex-io/realtek/bt_uart_8822cs" path="vendor/realtek/src/8822cs_bt_uart" revision="d7bd6851fda2a499630f31324204101bdacbfa45" upstream="master"/>

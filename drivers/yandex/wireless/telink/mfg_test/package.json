@@ -1,0 +1,47 @@
+{
+    "meta": {
+        "name": "yandex_telink_b91_mfg_test",
+        "maintainer": "YandexIO team <quasar-team@yandex-team.ru>",
+        "description": "Yandex Telink B91 Manufacturing Test",
+        "version": "{revision}.{branch}"
+    },
+    "build": {
+        "mfg_test": {
+            "targets": [
+                "smart_devices/libs/telink/mfg_test"
+            ],
+            "flags": [
+                {
+                    "name": "TL_CONFIG",
+                    "value": "smart_devices/libs/telink/mfg_test/config.inc"
+                },
+                {
+                    "name": "DUMP_LINKER_MAP",
+                    "value": "yes"
+                },
+                {
+                    "name": "DUMP_LINKER_CREF",
+                    "value": "yes"
+                }
+            ],
+            "target-platforms": [
+                "default-none-nds32le_elf_mculib_v5f"
+            ]
+        }
+    },
+    "data": [
+        {
+            "source": {
+                "type": "BUILD_OUTPUT",
+                "build_key": "mfg_test",
+                "path": "smart_devices/libs/telink/mfg_test",
+                "files": [
+                    "mfg_test*"
+                ]
+            },
+            "destination": {
+                "path": "/"
+            }
+        }
+    ]
+}

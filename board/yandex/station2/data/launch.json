@@ -1,0 +1,130 @@
+{
+    "nodes": [
+        {
+            "name": "main",
+            "root": ".",
+            "tasks": [
+                {
+                    "name": "updatesd",
+                    "affinity" : [1,2,3],
+                    "delay" : 5,
+                    "allowedRestartIntervalSeconds" : 600,
+                    "root": ".",
+                    "path": "/system/vendor/quasar/maind",
+                    "arg": [
+                        "--updatesd"
+                    ],
+                    "log": false
+                },
+                {
+                    "name": "yiod",
+                    "affinity" : [1,2,3],
+                    "delay" : 5,
+                    "allowedRestartIntervalSeconds" : 600,
+                    "root": ".",
+                    "path": "/system/vendor/quasar/maind",
+                    "arg": [
+                        "--yiod"
+                    ],
+                    "log": false
+                },
+                {
+                    "name": "glagold",
+                    "affinity" : [1,2,3],
+                    "delay" : 5,
+                    "allowedRestartIntervalSeconds" : 600,
+                    "root": ".",
+                    "path": "/system/vendor/quasar/maind",
+                    "arg": [
+                        "--glagold"
+                    ],
+                    "log": false
+                },
+                {
+                    "name": "mediad",
+                    "affinity" : [1,2,3],
+                    "delay" : 5,
+                    "allowedRestartIntervalSeconds" : 600,
+                    "root": ".",
+                    "path": "/system/vendor/quasar/maind",
+                    "arg": [
+                        "--mediad"
+                    ],
+                    "log": false
+                },
+                {
+                    "name": "telemetry",
+                    "affinity" : [1,2,3],
+                    "delay" : 5,
+                    "allowedRestartIntervalSeconds" : 600,
+                    "root": ".",
+                    "path": "/system/vendor/quasar/maind",
+                    "arg": [
+                        "--telemetry"
+                    ],
+                    "log": false
+                },
+                {
+                    "name": "maind",
+                    "affinity" : [1,2,3],
+                    "delay" : 5,
+                    "allowedRestartIntervalSeconds" : 600,
+                    "root": ".",
+                    "path": "/system/vendor/quasar/maind",
+                    "arg": [
+                        "--yandexstation_2"
+                    ],
+                    "log": false
+                },
+                {
+                    "name": "fluent-bitd",
+                    "affinity" : [1,2,3],
+                    "delay" : 5,
+                    "allowedRestartIntervalSeconds" : 600,
+                    "root": ".",
+                    "path": "/system/vendor/quasar/maind",
+                    "arg": [
+                        "--fluent-bitd"
+                    ],
+                    "log": false
+                },
+                {
+                    "name": "fluent-bit",
+                    "affinity" : [1,2,3],
+                    "delay" : 5,
+                    "allowedRestartIntervalSeconds" : 600,
+                    "root": ".",
+                    "path": "/system/vendor/quasar/fluent-bit/fluent-bit",
+                    "arg": [
+                        "-c",
+                        "/data/quasar/fluent-bit/fb.cfg"
+                    ],
+                    "log": false
+                },
+                {
+                    "name": "logcat",
+                    "affinity" : [1,2,3],
+                    "delay" : 5,
+                    "allowedRestartIntervalSeconds" : 600,
+                    "root": ".",
+                    "path": "/system/bin/logcat",
+                    "arg": [
+                        "-f", "/tmp/logcat.log", "-r", "2048", "-n", "1", "MDnsDS:S"
+                    ],
+                    "log": false
+                },
+                {
+                    "name": "calld",
+                    "delay" : 5,
+                    "allowedRestartIntervalSeconds" : 600,
+                    "root": ".",
+                    "path": "/system/vendor/quasar/maind",
+                    "arg": [
+                        "--calld"
+                    ],
+                    "log": false
+                }    
+            ]
+        }
+    ]
+}

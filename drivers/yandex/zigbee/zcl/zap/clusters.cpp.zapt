@@ -1,0 +1,89 @@
+#include "clusters.h"
+
+using namespace zigbee;
+using namespace zigbee::zcl;
+
+{{#zcl_clusters}}
+{{label}}ServerCluster::{{label}}ServerCluster(std::weak_ptr<Endpoint> endpoint)
+{{#if (is_defined manufacturerCode)}}
+    : GenericCluster(endpoint, Id, ManufacturerCode, ZclDirection::CLIENT_TO_SERVER)
+{{else}}
+    : GenericCluster(endpoint, Id, ZclDirection::CLIENT_TO_SERVER)
+{{/if}}
+{
+}
+
+{{#zcl_commands_source_server}}
+void {{../label}}ServerCluster::{{asCamelCased label}}(
+{{#zcl_command_arguments}}
+{{#unless isArray}}
+    {{asCamelCased type false}} {{asCamelCased label}}{{#not_last}},{{/not_last}}
+{{else}}
+    std::vector<{{asCamelCased type false}}> {{asCamelCased label}}s{{#not_last}},{{/not_last}}
+{{/unless}}
+{{/zcl_command_arguments}}
+) {
+    std::vector<uint8_t> buffer;
+    ZclOutputStream stream(buffer);
+
+{{#zcl_command_arguments}}
+{{#unless isArray}}
+    stream.write<{{asCamelCased type false}}>({{asCamelCased label}}{{#if isArray}}s{{/if}});
+{{else}}
+    stream.writeArray<{{asCamelCased type false}}, 0>({{asCamelCased label}}{{#if isArray}}s{{/if}});
+{{/unless}}
+{{/zcl_command_arguments}}
+
+    sendCommand(ZclFrameType::CLUSTER_SPECIFIC, static_cast<uint8_t>(ServerCommandId::{{label}}), buffer);
+}
+
+{{/zcl_commands_source_server}}
+{{#zcl_commands_source_client}}
+{{#first}}
+void {{../label}}ServerCluster::handleClusterSpecificCommand(const ZclHeader& header, ZclStream& stream) {
+    switch (static_cast<ClientCommandId>(header.commandId)) {
+{{/first}}
+        case ClientCommandId::{{label}}: {
+{{#zcl_command_arguments}}
+{{#unless isArray}}
+            {{asCamelCased type false}} {{asCamelCased label}};
+{{else}}
+            std::vector<{{asCamelCased type false}}> {{asCamelCased label}}s;
+{{/unless}}
+{{/zcl_command_arguments}}
+
+{{#zcl_command_arguments}}
+{{#unless isArray}}
+            {{asCamelCased label}} = stream.read<{{asCamelCased type false}}>();
+{{else}}
+            {{asCamelCased label}}s = stream.readArray<{{asCamelCased type false}}, 0>();
+{{/unless}}
+{{/zcl_command_arguments}}
+
+            for (auto wlistener : listeners_) {
+                if (auto listener = wlistener.lock()) {
+                    listener->on{{asCamelCased label false}}(
+        {{#zcl_command_arguments}}
+                        {{asCamelCased label}}{{#if isArray}}s{{/if}}{{#not_last}},{{/not_last}}
+        {{/zcl_command_arguments}}
+                    );
+                }
+            }
+
+            break;
+        }
+{{#last}}
+        default:
+            break;
+    }
+}
+
+void {{../label}}ServerCluster::addClusterListener(std::weak_ptr<IListener> listener) {
+    listeners_.push_back(listener);
+}
+
+{{../label}}ServerCluster::IListener::~IListener() = default;
+{{/last}}
+{{/zcl_commands_source_client}}
+
+{{/zcl_clusters}}

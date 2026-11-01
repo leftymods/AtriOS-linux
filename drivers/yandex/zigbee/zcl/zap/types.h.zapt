@@ -1,0 +1,68 @@
+#pragma once
+
+#include <any>
+#include <array>
+#include <cstdint>
+#include <string>
+#include <vector>
+
+namespace zigbee::zcl {
+
+struct AnyType;
+
+{{#zcl_atomics}}
+struct {{asCamelCased name false}} {
+    {{asUnderlyingType name}} value_;
+    {{asCamelCased name false}}() = default;
+{{#unless (isEqual name "unk")}}
+    {{asCamelCased name false}}({{asUnderlyingType name}} value)
+        : value_{value}
+    {}
+{{else}}
+    template <typename T>
+    {{asCamelCased name false}}(T&& value)
+        : value_{std::forward<T>(value)}
+    {}
+{{/unless}}
+    operator {{asUnderlyingType name}}& () {
+        return value_;
+    }
+    operator {{asUnderlyingType name}} const & () const {
+        return value_;
+    }
+};
+
+{{/zcl_atomics}}
+
+{{#zcl_enums}}
+enum class {{asCamelCased label false}} : {{asUnderlyingType type}} {
+    {{#zcl_enum_items}}
+    {{asCamelCased label false}} = {{asHex value 2}},
+    {{/zcl_enum_items}}
+};
+
+{{/zcl_enums}}
+
+{{#zcl_bitmaps}}
+enum class {{asCamelCased label false}} : {{asUnderlyingType type}} {
+    {{#zcl_bitmap_items}}
+    {{asCamelCased label false}} = {{asHex mask 2}},
+    {{/zcl_bitmap_items}}
+};
+
+{{/zcl_bitmaps}}
+
+{{#zcl_structs}}
+struct {{asCamelCased label false}} {
+{{#zcl_struct_items}}
+{{#unless isArray}}
+    {{asCamelCased type false}} {{asCamelCased label}};
+{{else}}
+    std::vector<{{asCamelCased type false}}> {{asCamelCased label}};
+{{/unless}}
+{{/zcl_struct_items}}
+};
+
+{{/zcl_structs}}
+
+} // namespace zigbee::zcl

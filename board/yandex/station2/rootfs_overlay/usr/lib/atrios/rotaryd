@@ -26,7 +26,29 @@ import shutil
 import re
 import math
 
-FB_RING = "/dev/fb5"
+def find_fb_by_name(keywords):
+    for path in sorted(glob.glob("/sys/class/graphics/fb*/name")):
+        try:
+            with open(path, "r") as f:
+                name = f.read().strip().lower()
+                for kw in keywords:
+                    if kw.lower() in name:
+                        dev = "/dev/" + os.path.basename(os.path.dirname(path))
+                        return dev
+        except Exception:
+            pass
+    return None
+
+def get_fb_ring():
+    dev = find_fb_by_name(["ring", "yndx led ring"])
+    if dev and os.path.exists(dev):
+        return dev
+    for fallback in ("/dev/fb5", "/dev/fb4", "/dev/fb3", "/dev/fb2", "/dev/fb1", "/dev/fb0"):
+        if os.path.exists(fallback):
+            return fallback
+    return "/dev/fb5"
+
+FB_RING = get_fb_ring()
 NUM_LEDS = 24
 CARD = "AMLAUGESOUND"
 VOLUME_STEP = 2  # percent per detent; finer volume control (50 detents full scale)
@@ -46,6 +68,7 @@ KEY_PAGEDOWN = 109  # Knob CCW
 
 mic_muted = False
 current_volume = DEFAULT_VOLUME
+display_volume = float(DEFAULT_VOLUME)
 
 
 def volume_to_raw(pct, zero_db_raw):
@@ -104,90 +127,81 @@ def read_alsa_controls():
     return tuple(values)
 
 
-class AlsaFastMixer:
-    """High-speed ALSA mixer controller using a persistent amixer process with fallback."""
+def set_volume(pct, force_switches=False):
+    """Apply volume to ALSA, hardware I2C master registers, and PipeWire."""
+    pct = max(0, min(100, int(pct)))
+    raw = volume_to_raw(pct, 255)
+    raw_hp = volume_to_raw(pct, 191)
+    sw = "0" if pct == 0 else "1"
+    mute_i2c = "0x08" if pct == 0 else "0x00"
+    mute_es = "0x00" if pct == 0 else "0x11"
+    hex_raw = "0x%02x" % raw
+    hex_hp = "0x%02x" % raw_hp
 
-    def __init__(self, card=CARD):
-        self.card = card
-        self._proc = None
-        self._last_mute_state = None
+    # 1. ALSA Hardware Controls
+    for card in (CARD, "0"):
+        try:
+            for ctl, val in (
+                ("Woofer Master Playback Volume", raw),
+                ("Tweeters Master Playback Volume", raw),
+                ("Headphone DAC Playback Volume", raw_hp),
+            ):
+                subprocess.run([AMIXER, "-c", card, "cset", f"name={ctl}", str(val)],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-    def _ensure_process(self):
-        if self._proc is not None:
-            if self._proc.poll() is None and self._proc.stdin:
-                return self._proc
-            try:
-                self._proc.kill()
-            except Exception:
-                pass
-            self._proc = None
+            if force_switches:
+                for ctl in (
+                    "Woofer Ch1 Playback Volume", "Woofer Ch2 Playback Volume",
+                    "Tweeters Ch1 Playback Volume", "Tweeters Ch2 Playback Volume",
+                ):
+                    subprocess.run([AMIXER, "-c", card, "cset", f"name={ctl}", "159"],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        for c in (self.card, "0"):
-            try:
-                self._proc = subprocess.Popen(
-                    [AMIXER, "-c", c, "-q", "-s"],
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    text=True,
-                    bufsize=1,
-                )
-                if self._proc.poll() is None:
-                    break
-            except Exception:
-                self._proc = None
-        return self._proc
+            # Always keep switches unmuted if pct > 0, mute only if pct == 0
+            for ctl in (
+                "Woofer Master Playback Switch", "Woofer Ch1 Playback Switch",
+                "Woofer Ch2 Playback Switch", "Tweeters Master Playback Switch",
+                "Tweeters Ch1 Playback Switch", "Tweeters Ch2 Playback Switch",
+                "Headphone Headphone Switch",
+            ):
+                subprocess.run([AMIXER, "-c", card, "cset", f"name={ctl}", sw],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run([AMIXER, "-c", card, "cset", "name=SPK mute", "1" if pct == 0 else "0"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            break
+        except Exception:
+            pass
 
-    def set_volume(self, pct, force_switches=False):
-        pct = max(0, min(100, int(pct)))
-        raw = volume_to_raw(pct, 255)
-        raw_hp = volume_to_raw(pct, 191)
-        mute_state = (pct == 0)
+    # 2. Fast direct I2C master volume (bus 2)
+    try:
+        subprocess.run(["i2cset", "-y", "-f", "2", "0x2a", "0x07", hex_raw],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["i2cset", "-y", "-f", "2", "0x2b", "0x07", hex_raw],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["i2cset", "-y", "-f", "2", "0x08", "0x14", hex_hp],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if pct == 0 or force_switches:
+            subprocess.run(["i2cset", "-y", "-f", "2", "0x2a", "0x06", mute_i2c],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(["i2cset", "-y", "-f", "2", "0x2b", "0x06", mute_i2c],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(["i2cset", "-y", "-f", "2", "0x08", "0x13", mute_es],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
 
-        lines = [
-            f"cset name='Woofer Master Playback Volume' {raw}",
-            f"cset name='Tweeters Master Playback Volume' {raw}",
-            f"cset name='Headphone DAC Playback Volume' {raw_hp}",
-        ]
-
-        if force_switches or mute_state != self._last_mute_state:
-            sw = "0" if mute_state else "1"
-            lines.extend([
-                f"cset name='Woofer Master Playback Switch' {sw}",
-                f"cset name='Tweeters Master Playback Switch' {sw}",
-                f"cset name='Headphone Headphone Switch' {sw}",
-                "cset name='SPK mute' 0",
-            ])
-            self._last_mute_state = mute_state
-
-        proc = self._ensure_process()
-        if proc and proc.stdin:
-            try:
-                for line in lines:
-                    proc.stdin.write(line + "\n")
-                proc.stdin.flush()
-                return
-            except Exception:
-                self._proc = None
-
-        batch_input = "\n".join(lines) + "\n"
-        for card_id in (self.card, "0"):
-            try:
-                res = subprocess.run(
-                    [AMIXER, "-c", card_id, "-q", "-s"],
-                    input=batch_input,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    text=True,
-                    timeout=0.3,
-                )
-                if res.returncode == 0:
-                    break
-            except Exception:
-                pass
+    # 3. Synchronize PipeWire software sink
+    try:
+        pw_vol = f"{pct / 100.0:.2f}"
+        env = dict(os.environ, XDG_RUNTIME_DIR="/var/run/pipewire")
+        subprocess.run(["wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", pw_vol],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
+        subprocess.run(["wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "1" if pct == 0 else "0"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
+    except Exception:
+        pass
 
 
-fast_mixer = AlsaFastMixer()
 volume_dirty = False
 last_volume_change_time = 0.0
 last_volume_time = 0.0
@@ -213,15 +227,18 @@ def apply_saved_volume():
 
 
 def adjust_volume(step):
-    global current_volume, volume_dirty, last_volume_change_time
+    global current_volume, display_volume, volume_dirty, last_volume_change_time, ring_active, is_fading, last_volume_time
     current_volume = max(0, min(100, current_volume + step))
-    # 1. Update visual feedback immediately (0ms latency)
-    show_volume_ring(current_volume)
-    # 2. Update hardware master ALSA volume immediately via persistent stream
+    if current_volume <= 0:
+        display_volume = 0.0
+        clear_ring()
+    else:
+        ring_active = True
+        is_fading = False
+    last_volume_time = time.time()
+    save_state_volume(current_volume)
     set_volume(current_volume)
-    # 3. Mark dirty to debounce flash state saving
-    volume_dirty = True
-    last_volume_change_time = time.time()
+    volume_dirty = False
 
 
 def flush_state_volume():
@@ -237,7 +254,10 @@ def enforce_volume():
     saved = read_state_volume()
     if saved is not None and saved != current_volume:
         current_volume = saved
-        show_volume_ring(current_volume)
+        ring_active = True
+        is_fading = False
+        last_volume_time = time.time()
+        show_volume_ring(current_volume, brightness=1.0)
         set_volume(current_volume)
         last_volume_time = time.time()
         return
@@ -253,8 +273,9 @@ def enforce_volume():
 
 
 def set_ring_frame(frame):
+    fb = get_fb_ring()
     try:
-        with open(FB_RING, "wb") as f:
+        with open(fb, "wb") as f:
             f.write(frame)
             f.flush()
     except Exception:
@@ -311,6 +332,9 @@ def show_volume_ring(vol_pct, brightness=1.0):
 
 
 def clear_ring():
+    global ring_active, is_fading
+    ring_active = False
+    is_fading = False
     if mic_muted:
         show_mute_ring()
     else:
@@ -364,8 +388,9 @@ def ensure_input_nodes():
                     with open(dev_file, "r") as f:
                         parts = f.read().strip().split(":")
                     if len(parts) == 2:
-                        maj, min_ = int(parts[0]), int(parts[1])
-                        os.mknod(dev_node, 0o660 | 0o020000, os.makedev(maj, min_))
+                        maj, min_ = parts[0], parts[1]
+                        subprocess.run(["mknod", dev_node, "c", str(maj), str(min_)],
+                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:
         pass
 
@@ -387,17 +412,29 @@ def scan_and_open_devices(open_fds):
                 pass
 
 
+def init_ring_triggers():
+    """Ensure all 24 RGB ring LEDs are bound to the led_ring_fb trigger."""
+    for path in glob.glob("/sys/class/leds/*ring*/trigger") + glob.glob("/sys/class/leds/*led_ring*/trigger"):
+        try:
+            with open(path, "w") as f:
+                f.write("led_ring_fb\n")
+        except Exception:
+            pass
+
+
 def main():
     global current_volume, last_volume_time
     EVENT_FORMAT = "QQHHi"
     EVENT_SIZE = struct.calcsize(EVENT_FORMAT)
     open_fds = {}
 
+    init_ring_triggers()
     scan_and_open_devices(open_fds)
 
     top_press_time = 0
-    last_volume_time = 0
+    last_volume_time = 0.0
     apply_saved_volume()
+    last_anim_time = time.time()
     last_enforce = time.time()
     last_scan = time.time()
 

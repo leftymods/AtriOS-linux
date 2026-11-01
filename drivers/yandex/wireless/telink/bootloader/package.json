@@ -1,0 +1,47 @@
+{
+    "meta": {
+        "name": "yandex_telink_b91_bootloader",
+        "maintainer": "YandexIO team <quasar-team@yandex-team.ru>",
+        "description": "Yandex Telink B91 Bootloader",
+        "version": "{revision}.{branch}"
+    },
+    "build": {
+        "bootloader": {
+            "targets": [
+                "smart_devices/libs/telink/bootloader/bin"
+            ],
+            "flags": [
+                {
+                    "name": "TL_CONFIG",
+                    "value": "smart_devices/libs/telink/bootloader/bin/config.inc"
+                },
+                {
+                    "name": "DUMP_LINKER_MAP",
+                    "value": "yes"
+                },
+                {
+                    "name": "DUMP_LINKER_CREF",
+                    "value": "yes"
+                }
+            ],
+            "target-platforms": [
+                "default-none-nds32le_elf_mculib_v5f"
+            ]
+        }
+    },
+    "data": [
+        {
+            "source": {
+                "type": "BUILD_OUTPUT",
+                "build_key": "bootloader",
+                "path": "smart_devices/libs/telink/bootloader/bin",
+                "files": [
+                    "bootloader*"
+                ]
+            },
+            "destination": {
+                "path": "/"
+            }
+        }
+    ]
+}

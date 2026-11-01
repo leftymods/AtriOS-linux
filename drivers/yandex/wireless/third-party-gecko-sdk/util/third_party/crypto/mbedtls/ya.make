@@ -1,0 +1,78 @@
+LIBRARY()
+
+INCLUDE(${ARCADIA_ROOT}/smart_devices/third_party/gecko_sdk/gecko.inc)
+
+ADDINCL(
+    GLOBAL smart_devices/third_party/gecko_sdk/util/third_party/crypto/mbedtls/include
+    smart_devices/third_party/gecko_sdk/util/third_party/crypto/mbedtls/library
+)
+
+PEERDIR(
+    smart_devices/third_party/gecko_sdk/platform/emlib
+    smart_devices/third_party/gecko_sdk/util/third_party/crypto/sl_component/sl_mbedtls_support
+)
+
+SRCS(
+    library/aes.c
+    library/asn1parse.c
+    library/asn1write.c
+    library/base64.c
+    library/bignum.c
+    library/ccm.c
+    library/chacha20.c
+    library/chachapoly.c
+    library/cipher.c
+    library/cipher_wrap.c
+    library/cmac.c
+    library/ctr_drbg.c
+    library/des.c
+    library/ecdh.c
+    library/ecdsa.c
+    library/ecjpake.c
+    library/ecp.c
+    library/ecp_curves.c
+    library/entropy.c
+    library/error.c
+    library/gcm.c
+    library/md.c
+    library/md5.c
+    library/oid.c
+    library/pem.c
+    library/pk.c
+    library/pk_wrap.c
+    library/pkparse.c
+    library/platform_util.c
+    library/poly1305.c
+    library/psa_crypto.c
+    library/psa_crypto_cipher.c
+    library/psa_crypto_client.c
+    library/psa_crypto_driver_wrappers.c
+    library/psa_crypto_ecp.c
+    library/psa_crypto_hash.c
+    library/psa_crypto_mac.c
+    library/psa_crypto_slot_management.c
+    library/psa_crypto_storage.c
+    library/rsa.c
+    library/rsa_internal.c
+    library/sha1.c
+    library/sha256.c
+    library/sha512.c
+    library/ssl_cache.c
+    library/ssl_ciphersuites.c
+    library/ssl_cli.c
+    library/ssl_cookie.c
+    library/ssl_msg.c
+    library/ssl_srv.c
+    library/ssl_ticket.c
+    library/ssl_tls.c
+    library/threading.c
+    library/x509.c
+    library/x509_create.c
+    library/x509_crl.c
+    library/x509_crt.c
+    library/x509_csr.c
+    library/x509write_crt.c
+    library/x509write_csr.c
+)
+
+END()

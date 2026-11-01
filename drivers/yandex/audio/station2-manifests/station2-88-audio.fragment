@@ -1,0 +1,9 @@
+28:  <project dest-branch="yandexstation_2/88" name="unity/p-amlogic/platform/hardware/amlogic/audio" path="hardware/amlogic/audio" revision="838245900096204cd30225ac7045a33e07eb00b2" upstream="yandexstation_2/88"/>
+193:  <project dest-branch="yandexstation_2/88" name="unity/platform/external/libaudioeffect" path="vendor/amlogic/common/external/libaudioeffect" revision="a9ebea75ab357eab821c4bb567492f958c1302dc" upstream="yandexstation_2/88"/>
+724:  <project dest-branch="yandexstation_2/88" name="yandex-io/kernel/drivers/es7210" path="vendor/yandex/drivers/es7210" revision="a983517221667ffbaaeef4e38c9fb145e5fabb41" upstream="yandexstation_2/88"/>
+725:  <project dest-branch="yandexstation_2/88" name="yandex-io/kernel/drivers/es8156" path="vendor/yandex/drivers/es8156" revision="07fb359a9e10272c54189cd334e972e9a17fbf28" upstream="yandexstation_2/88"/>
+728:  <project dest-branch="yandexstation_2/88" name="yandex-io/kernel/drivers/pcm1774" path="vendor/yandex/drivers/pcm1774" revision="f3c55b4d7f86d531a0fafa6a2ba972567051124b" upstream="yandexstation_2/88"/>
+732:  <project dest-branch="yandexstation_2/88" name="yandex-io/kernel/drivers/rotary-volume" path="vendor/yandex/drivers/rotary-volume" revision="6e54bf2afd01525c289b9f85a6130ece89882d03" upstream="yandexstation_2/88"/>
+733:  <project dest-branch="yandexstation_2/88" name="yandex-io/kernel/drivers/sy6045s" path="vendor/yandex/drivers/sy6045s" revision="92cccf1700d11e4b9322b9f72e7c140068a98667" upstream="yandexstation_2/88"/>
+734:  <project dest-branch="yandexstation_2/88" name="yandex-io/kernel/drivers/tas5825m" path="vendor/yandex/drivers/tas5825m" revision="e6f385338d32d203e73ae41f9bf50acb73a21578" upstream="yandexstation_2/88"/>
+735:  <project dest-branch="yandexstation_2/88" name="yandex-io/kernel/drivers/tlv320adc3101" path="vendor/yandex/drivers/tlv320adc3101" revision="218fcfa3759f1409457ccfdea1230067472a81ee" upstream="yandexstation_2/88"/>

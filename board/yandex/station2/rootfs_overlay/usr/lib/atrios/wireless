@@ -150,6 +150,13 @@ case "$CMD" in
           hciconfig hci0 up 2>/dev/null || true
         fi
       fi
+
+      # 4. Bring up hci0
+      if [ -d /sys/class/bluetooth/hci0 ] && command -v hciconfig >/dev/null 2>&1; then
+        hciconfig hci0 up 2>/dev/null || true
+        hciconfig hci0 noscan 2>/dev/null || true
+        echo "[OK] Bluetooth controller initialized successfully on hci0."
+      fi
     }
 
     if [ "$SUBCMD" = "init" ]; then
@@ -339,7 +346,8 @@ case "$CMD" in
     echo "  atrios wifi connect <SSID> [Password] - Connect to Wi-Fi"
     echo "  atrios wifi power [1|0]               - Toggle SDIO bus power"
     echo "  atrios bt status                      - Show Bluetooth HCI devices"
-    echo "  atrios bt init                        - Initialize & attach Bluetooth controller"
+    echo "  atrios bt init                        - Initialize & attach Bluetooth controller
+  atrios bt speaker [on|off]            - Bluetooth Speaker mode (connect from phone/PC)"
     echo "  atrios bt scan                        - Scan Bluetooth devices"
     echo "  atrios bt test                        - Complete Bluetooth hardware & RF diagnostic"
     echo "  atrios zigbee reset                   - Hardware reset EFR32 coordinator"

@@ -1,0 +1,15 @@
+am-batch-size 20
+am-type nnet
+cmn-latency 50
+cmn-window 600
+dither 0.1
+feat-pipeline cmn:lda
+frame-shift 10
+frame-size 20
+need-priors false
+nnet-representation float
+sample-rate 16000
+skip-rate 1
+ca-version contractivation-test
+ca-am-output-idx 1
+w-smooth 4

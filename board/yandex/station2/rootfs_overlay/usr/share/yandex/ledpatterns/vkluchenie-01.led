@@ -1,0 +1,19 @@
+gradient 0 000000 1 000000 403
+
+smooth 40
+
+gradient 0 0b011d 1 1a000f 523
+
+loop
+
+smooth 40
+
+gradient 0 620fff 1 e10082 2123
+
+smooth 40
+
+gradient 0 0b011d 1 1a000f 1123
+
+smooth 40
+
+gradient 0 0b011d 1 1a000f 173

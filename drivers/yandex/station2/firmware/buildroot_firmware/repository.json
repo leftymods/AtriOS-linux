@@ -1,0 +1,8 @@
+{
+    "url": "ssh://gerrit.yandex-team.ru/yandex-io/buildroot-manifest",
+    "ref": "master",
+    "vcs": "repo",
+    "tracked_branches": {
+        "master": {}
+    }
+}
