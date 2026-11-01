@@ -156,8 +156,9 @@ static ssize_t pcba_ids_show(struct device *dev,
 
 	for (i = 0; i < priv->data.num_fields; i++) {
 		len += scnprintf(buf + len, PAGE_SIZE - len,
-				 "\"%s\": \"%s\"", priv->data.fields[i].name,
-				 priv->data.fields[i].value);
+				 "  \"%s\": \"%s\"%s\n", priv->data.fields[i].name,
+				 priv->data.fields[i].value,
+				 (i + 1 < priv->data.num_fields) ? "," : "");
 	}
 	len += scnprintf(buf + len, PAGE_SIZE - len, "}\n");
 
@@ -229,8 +230,7 @@ static int pcba_ids_probe(struct platform_device *pdev)
 	}
 
 	if (priv->num_eeproms == 0) {
-		dev_err(dev, "[pcba_id err] no eeproms found\n");
-		return -ENODEV;
+		dev_warn(dev, "[pcba_id] no i2c eeproms found, continuing with unifykeys\n");
 	}
 
 	of_property_read_string_array(np, "unifykey-names",

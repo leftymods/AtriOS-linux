@@ -16,7 +16,11 @@
 #include <linux/of_gpio.h>
 #include <linux/gpio/consumer.h>
 #include <linux/gpio/driver.h>
+#ifndef CONFIG_FB_BACKLIGHT
+#define CONFIG_FB_BACKLIGHT 1
+#endif
 #include <linux/fb.h>
+#include <linux/uaccess.h>
 #include <linux/backlight.h>
 #include <linux/tty.h>
 #include <linux/tty_driver.h>
@@ -74,7 +78,7 @@ struct gowin_resolution {
 };
 
 static const struct gowin_resolution rev2res_panel = { .width = 25, .height = 16 };
-static const struct gowin_resolution rev2res_screen = { .width = 28, .height = 16 };
+static const struct gowin_resolution rev2res_screen = { .width = 25, .height = 16 };
 
 struct gowin_touch_regs {
 	u32 dbg_val[5];
@@ -686,10 +690,30 @@ static int lp_fb_sync(struct fb_info *fbi)
 	return ret;
 }
 
+static ssize_t lp_fb_write(struct fb_info *fbi, const char __user *buf,
+			   size_t count, loff_t *ppos)
+{
+	unsigned long p = *ppos;
+	size_t total_size = fbi->screen_size;
+
+	if (p >= total_size)
+		return 0;
+	if (count > total_size - p)
+		count = total_size - p;
+
+	if (copy_from_user(fbi->screen_buffer + p, buf, count))
+		return -EFAULT;
+
+	*ppos += count;
+	lp_fb_sync(fbi);
+	return count;
+}
+
 static struct fb_ops fb_ops = {
 	.owner = THIS_MODULE,
 	.fb_open = lp_fb_open,
 	.fb_release = lp_fb_release,
+	.fb_write = lp_fb_write,
 	.fb_check_var = lp_fb_check_var,
 	.fb_set_par = lp_fb_set_par,
 	.fb_pan_display = lp_fb_pan_display,
@@ -964,6 +988,9 @@ static void fpga_hw_reset(struct gowin_priv *priv)
 static int select_jtag_mode(struct gowin_priv *priv)
 {
 	int ret;
+
+	if (!priv->jtag_tck || !priv->jtag_tdi || !priv->jtag_tms || !priv->jtag_tdo)
+		return -ENODEV;
 
 	if (priv->pinctrl_jtag) {
 		ret = pinctrl_select_state(priv->pinctrl, priv->pinctrl_jtag);
@@ -1383,39 +1410,50 @@ static int probe(struct spi_device *spi)
 	mutex_init(&priv->lock);
 	spi_set_drvdata(spi, priv);
 
-	/* GPIOs */
+	/* GPIOs (non-fatal if shared with SPI pinmux) */
 	priv->reset_gpio = devm_gpiod_get_optional(dev, "reset", GPIOD_OUT_LOW);
-	if (IS_ERR(priv->reset_gpio))
-		return PTR_ERR(priv->reset_gpio);
+	if (IS_ERR(priv->reset_gpio)) {
+		dev_warn(dev, "reset_gpio unavailable (%ld), continuing\n", PTR_ERR(priv->reset_gpio));
+		priv->reset_gpio = NULL;
+	}
 
 	priv->irq_gpio = devm_gpiod_get_optional(dev, "irq", GPIOD_IN);
-	if (IS_ERR(priv->irq_gpio))
-		return PTR_ERR(priv->irq_gpio);
+	if (IS_ERR(priv->irq_gpio)) {
+		dev_warn(dev, "irq_gpio unavailable (%ld), continuing\n", PTR_ERR(priv->irq_gpio));
+		priv->irq_gpio = NULL;
+	}
 
 	priv->jtag_tck = devm_gpiod_get_optional(dev, "jtag_tck", GPIOD_OUT_LOW);
-	if (IS_ERR(priv->jtag_tck))
-		return PTR_ERR(priv->jtag_tck);
+	if (IS_ERR(priv->jtag_tck)) {
+		dev_warn(dev, "jtag_tck GPIO shared with SPI (%ld), JTAG disabled\n", PTR_ERR(priv->jtag_tck));
+		priv->jtag_tck = NULL;
+	}
 
 	priv->jtag_tdo = devm_gpiod_get_optional(dev, "jtag_tdo", GPIOD_IN);
-	if (IS_ERR(priv->jtag_tdo))
-		return PTR_ERR(priv->jtag_tdo);
+	if (IS_ERR(priv->jtag_tdo)) {
+		priv->jtag_tdo = NULL;
+	}
 
 	priv->jtag_tdi = devm_gpiod_get_optional(dev, "jtag_tdi", GPIOD_OUT_LOW);
-	if (IS_ERR(priv->jtag_tdi))
-		return PTR_ERR(priv->jtag_tdi);
+	if (IS_ERR(priv->jtag_tdi)) {
+		priv->jtag_tdi = NULL;
+	}
 
 	priv->jtag_tms = devm_gpiod_get_optional(dev, "jtag_tms", GPIOD_OUT_LOW);
-	if (IS_ERR(priv->jtag_tms))
-		return PTR_ERR(priv->jtag_tms);
+	if (IS_ERR(priv->jtag_tms)) {
+		priv->jtag_tms = NULL;
+	}
 
 	priv->jtag_sel = devm_gpiod_get_optional(dev, "jtag_sel", GPIOD_OUT_HIGH);
-	if (IS_ERR(priv->jtag_sel))
-		return PTR_ERR(priv->jtag_sel);
+	if (IS_ERR(priv->jtag_sel)) {
+		priv->jtag_sel = NULL;
+	}
 
 	priv->jtag_reconfig = devm_gpiod_get_optional(dev, "jtag_reconfig",
 						       GPIOD_OUT_LOW);
-	if (IS_ERR(priv->jtag_reconfig))
-		return PTR_ERR(priv->jtag_reconfig);
+	if (IS_ERR(priv->jtag_reconfig)) {
+		priv->jtag_reconfig = NULL;
+	}
 
 	/* pinctrl */
 	priv->pinctrl = devm_pinctrl_get(dev);

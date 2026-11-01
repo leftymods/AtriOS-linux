@@ -2,6 +2,9 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
+#ifndef CONFIG_FB_BACKLIGHT
+#define CONFIG_FB_BACKLIGHT 1
+#endif
 #include <linux/fb.h>
 #include <linux/backlight.h>
 #include <linux/leds.h>
@@ -249,6 +252,7 @@ static int __init led_ring_init(void)
 	info->screen_size = FB_SIZE;
 
 	strscpy(info->fix.id, "quasar-led-ring", sizeof(info->fix.id));
+	info->fix.smem_start = (unsigned long)info->screen_buffer;
 	info->fix.smem_len = FB_SIZE;
 	info->fix.type = FB_TYPE_PACKED_PIXELS;
 	info->fix.visual = FB_VISUAL_TRUECOLOR;
