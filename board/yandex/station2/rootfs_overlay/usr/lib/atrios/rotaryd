@@ -190,6 +190,7 @@ class AlsaFastMixer:
 fast_mixer = AlsaFastMixer()
 volume_dirty = False
 last_volume_change_time = 0.0
+last_volume_time = 0.0
 
 
 def set_volume(pct, force_switches=False):
@@ -232,12 +233,13 @@ def flush_state_volume():
 
 def enforce_volume():
     """Watchdog: the state file wins over any external ALSA writer."""
-    global current_volume
+    global current_volume, last_volume_time
     saved = read_state_volume()
     if saved is not None and saved != current_volume:
         current_volume = saved
         show_volume_ring(current_volume)
         set_volume(current_volume)
+        last_volume_time = time.time()
         return
 
     expected = (volume_to_raw(current_volume, 255),
@@ -386,7 +388,7 @@ def scan_and_open_devices(open_fds):
 
 
 def main():
-    global current_volume
+    global current_volume, last_volume_time
     EVENT_FORMAT = "QQHHi"
     EVENT_SIZE = struct.calcsize(EVENT_FORMAT)
     open_fds = {}
@@ -415,9 +417,9 @@ def main():
             if volume_dirty and (now - last_volume_change_time > 0.3):
                 flush_state_volume()
 
-            # Watchdog: enforce saved volume only when knob is idle
-            if now - last_enforce > 1.0:
-                if not volume_dirty and (now - last_volume_time > 1.8):
+            # Watchdog: enforce saved volume whenever state changes, polling at 100ms
+            if now - last_enforce > 0.1:
+                if not volume_dirty:
                     enforce_volume()
                 last_enforce = now
 

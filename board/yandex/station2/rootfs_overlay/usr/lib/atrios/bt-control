@@ -99,6 +99,17 @@ def set_system_volume(pct):
     except Exception:
         pass
 
+def is_bt_speaker_mode():
+    try:
+        out = subprocess.check_output(
+            ["gdbus", "call", "--system", "--dest", "org.bluealsa",
+             "--object-path", "/org/bluealsa", "--method", "org.freedesktop.DBus.ObjectManager.GetManagedObjects"],
+            timeout=1
+        ).decode('utf-8', errors='ignore')
+        return "'Running': <true>" in out or "a2dpsnk" in out
+    except Exception:
+        return False
+
 def build_status_payload():
     vol = get_current_volume()
     return {
@@ -122,7 +133,8 @@ def build_status_payload():
         "bluetooth": {
             "adapter": "hci0",
             "name": "Yandex Station Max",
-            "transport": "RFCOMM SPP (Channel 1)"
+            "transport": "RFCOMM SPP (Channel 1)",
+            "is_speaker_mode": is_bt_speaker_mode()
         }
     }
 

@@ -19,15 +19,19 @@ export DBUS_SESSION_BUS_ADDRESS="unix:path=/var/run/dbus/system_bus_socket"
 # be +32 dB on the headphone).  At 40% the speaker level is about -22 dB,
 # which is clearly audible; the old linear raw=pct*2.55 gave -76 dB.
 volume_raw() {
-    awk -v p="$1" -v z="$2" 'BEGIN {
-        if (p <= 0) { print 0; exit }
-        max_db = (z * 0.5) - 12.0;
-        db = -max_db * (1 - sqrt(p / 100));
-        r = int(z + 2 * db + 0.5);
-        if (r < 1) r = 1;
-        if (r > z) r = z;
-        print r;
-    }'
+    python3 -c '
+import math, sys
+p = float(sys.argv[1]) if len(sys.argv) > 1 else 0
+z = float(sys.argv[2]) if len(sys.argv) > 2 else 255
+if p <= 0:
+    print(0)
+else:
+    max_db = (z * 0.5) - 12.0
+    db = -max_db * (1.0 - math.sqrt(p / 100.0))
+    r = int(z + 2.0 * db + 0.5)
+    r = max(1, min(int(z), r))
+    print(r)
+' "$1" "$2"
 }
 
 read_state_pct() {

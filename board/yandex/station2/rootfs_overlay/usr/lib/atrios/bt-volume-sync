@@ -123,7 +123,7 @@ def apply_hardware_volume(pct):
     except Exception:
         pass
 
-    # Save state
+    # Save state so rotaryd can pick it up and smoothly fade out
     try:
         os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
         tmp = f"{STATE_FILE}.tmp"
@@ -132,7 +132,6 @@ def apply_hardware_volume(pct):
         os.replace(tmp, STATE_FILE)
     except Exception:
         pass
-    show_volume_ring(pct)
 
 def get_bluez_transport_paths():
     try:
@@ -251,14 +250,34 @@ def monitor_station_volume(sync_mgr):
             pass
         time.sleep(0.05)
 
+def monitor_bt_active():
+    """Update /var/run/atrios/bt_active based on BlueALSA A2DP streaming state."""
+    active_path = "/var/run/atrios/bt_active"
+    os.makedirs(os.path.dirname(active_path), exist_ok=True)
+    last_state = None
+    while True:
+        try:
+            pcms = get_bluealsa_pcm_paths()
+            is_active = "1" if len(pcms) > 0 else "0"
+            if is_active != last_state:
+                with open(active_path + ".tmp", "w") as f:
+                    f.write(is_active)
+                os.replace(active_path + ".tmp", active_path)
+                last_state = is_active
+        except Exception:
+            pass
+        time.sleep(1)
+
 def main():
     sync = VolumeSync()
     # Apply initial hardware unmute & nominal levels
     apply_hardware_volume(sync.current_vol)
     t1 = threading.Thread(target=monitor_phone_volume, args=(sync,), daemon=True)
     t2 = threading.Thread(target=monitor_station_volume, args=(sync,), daemon=True)
+    t3 = threading.Thread(target=monitor_bt_active, daemon=True)
     t1.start()
     t2.start()
+    t3.start()
     while True:
         time.sleep(1)
 
