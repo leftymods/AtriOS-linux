@@ -20,3 +20,4 @@ tools/fw_builder/overlay/dts/*.dtb
 modules.order
 Module.symvers
 .tmp_versions/
+output/

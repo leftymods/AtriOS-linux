@@ -13,7 +13,7 @@ set -gx XDG_RUNTIME_DIR /var/run/pipewire
 set -gx DBUS_SESSION_BUS_ADDRESS "unix:path=/var/run/dbus/system_bus_socket"
 
 function fish_greeting
-    echo "AtriOS Linux - Yandex Station Max"
+    echo "AtriOS Nebula - Yandex Station Max (leftymods)"
     echo "Type 'atrios' to see all commands (screen, ring, audio, wifi, bt, zigbee...)"
 end
 

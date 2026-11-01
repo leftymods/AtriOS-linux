@@ -3,8 +3,8 @@ BR2_aarch64=y
 BR2_cortex_a53=y
 
 # System Configuration
-BR2_TARGET_GENERIC_HOSTNAME="AtriOS-aml"
-BR2_TARGET_GENERIC_ISSUE="Welcome to AtriOS-aml (leftymods) [Yandex Station Max S905X3]"
+BR2_TARGET_GENERIC_HOSTNAME=AtriOS
+BR2_TARGET_GENERIC_ISSUE="Welcome to AtriOS Nebula (leftymods) [Yandex Station Max S905X3]"
 BR2_ROOTFS_OVERLAY="../board/yandex/station2/rootfs_overlay"
 BR2_TARGET_GENERIC_GETTY_PORT="ttyAML0"
 
