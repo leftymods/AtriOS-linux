@@ -2,6 +2,8 @@ obj-m += gowin_led_device.o
 obj-m += quasar_led_screen.o
 obj-m += quasar_led_ring.o
 obj-m += quasar_pcba_ids.o
+obj-m += rotary-volume.o
+obj-m += gpio_keypad.o
 
 ccflags-y += -DCONFIG_FB_BACKLIGHT=1 -Wno-error
 
