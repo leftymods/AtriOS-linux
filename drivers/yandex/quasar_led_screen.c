@@ -170,8 +170,8 @@ static int sa_send_tx(struct sa_device *sa, u8 cmd,
 
 	txlen = 1 + data_len;
 	crc = qls_crc16(buf, txlen);
-	buf[txlen] = crc & 0xff;
-	buf[txlen + 1] = (crc >> 8) & 0xff;
+	buf[txlen] = (crc >> 8) & 0xff;
+	buf[txlen + 1] = crc & 0xff;
 	txlen += 2;
 
 	return spi_send(sa->spi, buf, txlen);
@@ -206,8 +206,8 @@ static int sa_send_cmd_short(struct sa_device *sa, u8 cmd,
 	}
 
 	crc = qls_crc16(buf, txlen);
-	buf[txlen] = crc & 0xff;
-	buf[txlen + 1] = (crc >> 8) & 0xff;
+	buf[txlen] = (crc >> 8) & 0xff;
+	buf[txlen + 1] = crc & 0xff;
 	txlen += 2;
 
 	return spi_send(sa->spi, buf, txlen);
@@ -310,8 +310,8 @@ static int __maybe_unused sa_test(struct sa_device *sa, const u8 *data, int len)
 	txlen = 1 + len;
 
 	crc = qls_crc16(buf, txlen);
-	buf[txlen] = crc & 0xff;
-	buf[txlen + 1] = (crc >> 8) & 0xff;
+	buf[txlen] = (crc >> 8) & 0xff;
+	buf[txlen + 1] = crc & 0xff;
 	txlen += 2;
 
 	return spi_send(sa->spi, buf, txlen);
@@ -331,8 +331,8 @@ static int sa_show_pic(struct sa_device *sa, const u8 *data, int len)
 	txlen = 1 + len;
 
 	crc = qls_crc16(buf, txlen);
-	buf[txlen] = crc & 0xff;
-	buf[txlen + 1] = (crc >> 8) & 0xff;
+	buf[txlen] = (crc >> 8) & 0xff;
+	buf[txlen + 1] = crc & 0xff;
 	txlen += 2;
 
 	return spi_send(sa->spi, buf, txlen);
@@ -387,7 +387,7 @@ static int bl_get_info(struct spi_device *spi, struct bl_info *info)
 	return 0;
 }
 
-static int bl_restart(struct spi_device *spi)
+__maybe_unused __maybe_unused __maybe_unused static int bl_restart(struct spi_device *spi)
 {
 	struct bl_info info;
 	int ret;
@@ -401,12 +401,12 @@ static int bl_restart(struct spi_device *spi)
 	return bl_send_cmd(spi, BL_CMD_RESTART);
 }
 
-static int bl_run_app(struct spi_device *spi)
+__maybe_unused __maybe_unused __maybe_unused static int bl_run_app(struct spi_device *spi)
 {
 	return bl_send_cmd(spi, BL_CMD_RUN_APP);
 }
 
-static int bl_write_fw(struct spi_device *spi, const u8 *data, int len)
+__maybe_unused __maybe_unused __maybe_unused static int bl_write_fw(struct spi_device *spi, const u8 *data, int len)
 {
 	struct bl_info info;
 	int ret, offset = 0;
@@ -655,8 +655,8 @@ static int qls_fb_sync(struct fb_info *info)
 	sa_buf[3] = 0x00;
 	memcpy(sa_buf + 4, grayscale, total_pixels);
 	crc = qls_crc16(sa_buf, 4 + total_pixels);
-	sa_buf[4 + total_pixels] = crc & 0xff;
-	sa_buf[4 + total_pixels + 1] = (crc >> 8) & 0xff;
+	sa_buf[4 + total_pixels] = (crc >> 8) & 0xff;
+	sa_buf[4 + total_pixels + 1] = crc & 0xff;
 	spi_send(qls->spi, sa_buf, 4 + total_pixels + 2);
 	sa_flush_buffer(qls->sa);
 
@@ -1233,7 +1233,7 @@ static int qls_remove(struct spi_device *spi)
 }
 
 static const struct of_device_id qls_of_match[] = {
-	{ .compatible = "ya,led_screen" },
+	{ .compatible = "quasar_led_screen" },
 	{},
 };
 MODULE_DEVICE_TABLE(of, qls_of_match);

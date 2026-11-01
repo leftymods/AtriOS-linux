@@ -33,7 +33,7 @@ def find_fb_by_name(keywords):
     return None
 
 def get_fb_screen():
-    dev = find_fb_by_name(["screen", "gowin", "panel", "quasar"])
+    dev = find_fb_by_name(["screen", "gowin", "panel", "yndx led screen"])
     if dev and os.path.exists(dev):
         return dev
     for fallback in ("/dev/fb4", "/dev/fb3", "/dev/fb2", "/dev/fb1", "/dev/fb0"):
