@@ -401,11 +401,19 @@ static int ltr308_read_event_config(struct iio_dev *indio_dev,
 	return !!val;
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
+static int ltr308_write_event_config(struct iio_dev *indio_dev,
+				     const struct iio_chan_spec *chan,
+				     enum iio_event_type type,
+				     enum iio_event_direction dir,
+				     bool state)
+#else
 static int ltr308_write_event_config(struct iio_dev *indio_dev,
 				     const struct iio_chan_spec *chan,
 				     enum iio_event_type type,
 				     enum iio_event_direction dir,
 				     int state)
+#endif
 {
 	struct ltr308_data *data = iio_priv(indio_dev);
 	int ret;

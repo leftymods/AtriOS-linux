@@ -112,7 +112,7 @@ static void report_key_code(struct gpio_keypad *keypad, int gpio_val)
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 15, 0)
 static void polling_timer_handler(struct timer_list *t)
 {
-	struct gpio_keypad *keypad = from_timer(keypad, t, polling_timer);
+	struct gpio_keypad *keypad = container_of(t, struct gpio_keypad, polling_timer);
 #else
 static void polling_timer_handler(unsigned long data)
 {

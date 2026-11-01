@@ -427,7 +427,7 @@ static int lp_gpio_get_value(struct gpio_chip *chip, unsigned int offset)
 	return (priv->gpio_cached >> offset) & 1;
 }
 
-static void lp_gpio_set_value(struct gpio_chip *chip, unsigned int offset,
+static int lp_gpio_set_value(struct gpio_chip *chip, unsigned int offset,
 			      int value)
 {
 	struct gowin_priv *priv = gpiochip_get_data(chip);
@@ -438,6 +438,7 @@ static void lp_gpio_set_value(struct gpio_chip *chip, unsigned int offset,
 		priv->gpio_cached &= ~BIT(offset);
 
 	set_gpio_app_cmd(priv);
+	return 0;
 }
 
 static int lp_gpio_direction_output(struct gpio_chip *chip,
@@ -496,7 +497,11 @@ static void lp_uart_close(struct tty_struct *tty, struct file *filp)
 	tty_port_close(tty->port, tty, filp);
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 14, 0)
+static unsigned int lp_uart_write_room(struct tty_struct *tty)
+#else
 static int lp_uart_write_room(struct tty_struct *tty)
+#endif
 {
 	return GOWIN_TTY_BUF_SIZE;
 }
@@ -1144,8 +1149,12 @@ static void restore_spi_master_pins(struct spi_device *spi)
 	if (!mdev)
 		return;
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 0, 0)
 	if (mdev->pins && mdev->pins->p && mdev->pins->default_state)
 		pinctrl_select_state(mdev->pins->p, mdev->pins->default_state);
+#else
+	pinctrl_pm_select_default_state(mdev);
+#endif
 }
 
 static int select_spi_mode(struct gowin_priv *priv)

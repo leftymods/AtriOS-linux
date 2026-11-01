@@ -9,3 +9,14 @@ tools/fw_builder/.fw_build_work/
 __pycache__/
 tools/fw_builder/.system_from_rootfs
 tools/fw_builder/overlay/dts/*.dtb
+
+# Kernel build artifacts
+*.o
+*.ko
+*.mod
+*.mod.c
+*.mod.o
+.*.cmd
+modules.order
+Module.symvers
+.tmp_versions/

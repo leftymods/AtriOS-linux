@@ -1,3 +1,4 @@
+#include <linux/of_device.h>
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * drivers/yandex/leds-is31fl32xx.c

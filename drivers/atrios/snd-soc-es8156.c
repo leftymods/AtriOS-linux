@@ -103,10 +103,10 @@ static int es8156_set_dai_fmt(struct snd_soc_dai *dai, unsigned int fmt)
 #endif
 
 	switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
-	case SND_SOC_DAIFMT_CBM_CFM:
+	case SND_SOC_DAIFMT_BC_FP:
 		regmap_update_bits(es->regmap, 0x02, 0x01, 0x01);
 		break;
-	case SND_SOC_DAIFMT_CBS_CFS:
+	case SND_SOC_DAIFMT_BP_FP:
 		regmap_update_bits(es->regmap, 0x02, 0x01, 0x00);
 		break;
 	default:
