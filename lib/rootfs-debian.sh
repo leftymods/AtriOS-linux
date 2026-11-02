@@ -116,10 +116,13 @@ EOF
     sudo sed -i 's|root:x:0:0:root:/root:/bin/bash|root:x:0:0:root:/root:/usr/bin/fish|' "$stage_dir/etc/passwd" 2>/dev/null || true
     sudo sed -i 's|root:x:0:0:root:/root:/bin/sh|root:x:0:0:root:/root:/usr/bin/fish|' "$stage_dir/etc/passwd" 2>/dev/null || true
 
-    # Ensure permissions and line endings for atrios and fish
+    # Ensure permissions and line endings for atrios, fish, and init scripts
     sudo chmod +x "$stage_dir/usr/bin/atrios" "$stage_dir/usr/bin/fish" 2>/dev/null || true
     if [ -d "$stage_dir/usr/lib/atrios" ]; then
         sudo chmod -R +x "$stage_dir/usr/lib/atrios" 2>/dev/null || true
+    fi
+    if [ -d "$stage_dir/etc/init.d" ]; then
+        sudo chmod +x "$stage_dir/etc/init.d/"* 2>/dev/null || true
     fi
     sudo dos2unix "$stage_dir/usr/bin/atrios" "$stage_dir/etc/fish/config.fish" 2>/dev/null || true
 
@@ -157,6 +160,15 @@ echo 1 > /proc/sys/kernel/printk 2>/dev/null || true
 # If systemd is installed, launch it
 if [ -x /lib/systemd/systemd ] && [ ! -f /etc/nosystemd ]; then
     exec /lib/systemd/systemd "$@"
+fi
+
+# Start AtriOS hardware and system services from /etc/init.d
+if [ -d /etc/init.d ]; then
+    for s in /etc/init.d/S*; do
+        [ -x "$s" ] || continue
+        echo "[init] Starting $(basename "$s")..."
+        "$s" start 2>/dev/null || true
+    done
 fi
 
 # Print banner to console
