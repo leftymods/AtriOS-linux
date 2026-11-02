@@ -13,9 +13,28 @@ import time
 import argparse
 import math
 
-FB_SCREEN = "/dev/fb4"
-FB_RING = "/dev/fb5"
-SENSOR_PATH = "/sys/bus/iio/devices/iio:device0/in_intensity_input"
+import glob
+
+def find_fb(names, default):
+    for f in sorted(glob.glob("/sys/class/graphics/fb*")):
+        try:
+            with open(os.path.join(f, "name"), "r") as nf:
+                fb_name = nf.read().strip().lower()
+                for n in names:
+                    if n.lower() in fb_name:
+                        return f"/dev/{os.path.basename(f)}"
+        except Exception:
+            pass
+    return default
+
+def find_sensor():
+    for f in sorted(glob.glob("/sys/bus/iio/devices/iio:device*/in_*")):
+        return f
+    return "/sys/bus/iio/devices/iio:device0/in_intensity_input"
+
+FB_SCREEN = find_fb(["screen", "panel", "gowin", "yandex"], "/dev/fb4" if os.path.exists("/dev/fb4") else "/dev/fb0")
+FB_RING = find_fb(["ring", "is31fl", "quasar-led-ring"], "/dev/fb5" if os.path.exists("/dev/fb5") else "/dev/fb1")
+SENSOR_PATH = find_sensor()
 
 # Screen Geometry
 SCR_W = 25

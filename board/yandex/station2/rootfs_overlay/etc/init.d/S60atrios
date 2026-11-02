@@ -6,7 +6,26 @@ case "$1" in
     echo "[AtriOS] Starting user interface daemons..."
     mkdir -p /var/lib/atrios /var/log 2>/dev/null || true
     # keep the serial console quiet (hide driver debug spam)
-    dmesg -n 4 2>/dev/null || true
+    echo "3 3 1 3" > /proc/sys/kernel/printk 2>/dev/null || true
+    dmesg -n 3 2>/dev/null || true
+
+    # Link framebuffers for screen and ring
+    for fb in /sys/class/graphics/fb*; do
+      if [ -f "$fb/name" ]; then
+        name=$(cat "$fb/name" 2>/dev/null | tr '[:upper:]' '[:lower:]')
+        dev="/dev/$(basename $fb)"
+        case "$name" in
+          *screen*|*panel*|*gowin*|*yandex*)
+            ln -sfn "$dev" /dev/fb_screen
+            [ ! -e /dev/fb4 ] && ln -sfn "$dev" /dev/fb4
+            ;;
+          *ring*|*is31fl*|*quasar*)
+            ln -sfn "$dev" /dev/fb_ring
+            [ ! -e /dev/fb5 ] && ln -sfn "$dev" /dev/fb5
+            ;;
+        esac
+      fi
+    done
     if [ -x /usr/lib/atrios/rotaryd ]; then
       /usr/lib/atrios/rotaryd >/var/log/atrios-rotaryd.log 2>&1 &
     fi

@@ -19,6 +19,8 @@
 #include <linux/of.h>
 #include <linux/gpio/consumer.h>
 #include <linux/workqueue.h>
+#include <linux/timer.h>
+#include <linux/jiffies.h>
 
 #define DRV_NAME	"rotary-volume"
 #define EXPECTED_GPIOS	2
@@ -27,6 +29,10 @@ struct rotary_volume {
 	struct gpio_descs *gpios;
 	struct input_dev *input;
 	struct work_struct work;
+	struct timer_list poll_timer;
+	bool use_irq;
+	unsigned int scan_period_ms;
+	unsigned int prev_state;
 	u32 key_codes[EXPECTED_GPIOS];
 };
 
@@ -67,6 +73,32 @@ static irqreturn_t rotary_volume_irq(int irq, void *dev_id)
 
 	schedule_work(&rv->work);
 	return IRQ_HANDLED;
+}
+
+static void rotary_volume_timer(struct timer_list *t)
+{
+	struct rotary_volume *rv = container_of(t, struct rotary_volume, poll_timer);
+	int val0 = gpiod_get_value_cansleep(rv->gpios->desc[0]);
+	int val1 = gpiod_get_value_cansleep(rv->gpios->desc[1]);
+	unsigned int state = ((val0 & 1) << 1) | (val1 & 1);
+
+	if (state != rv->prev_state) {
+		/*
+		 * Rotary encoder quadrature transition:
+		 * At rest with pull-ups, both lines are HIGH (state 3 = 11b).
+		 * CW turn drops line 0 first (transition 3 -> 1).
+		 * CCW turn drops line 1 first (transition 3 -> 2).
+		 */
+		if (rv->prev_state == 3) {
+			if (state == 1)
+				rotary_volume_report_event(rv, rv->key_codes[0]);
+			else if (state == 2)
+				rotary_volume_report_event(rv, rv->key_codes[1]);
+		}
+		rv->prev_state = state;
+	}
+
+	mod_timer(&rv->poll_timer, jiffies + msecs_to_jiffies(rv->scan_period_ms));
 }
 
 static int rotary_volume_probe(struct platform_device *pdev)
@@ -125,16 +157,33 @@ static int rotary_volume_probe(struct platform_device *pdev)
 	INIT_WORK(&rv->work, rotary_volume_work);
 	platform_set_drvdata(pdev, rv);
 
+	rv->scan_period_ms = 4;
+	rv->prev_state = 3;
+	timer_setup(&rv->poll_timer, rotary_volume_timer, 0);
+
+	rv->use_irq = true;
 	for (i = 0; i < rv->gpios->ndescs; i++) {
 		int irq = gpiod_to_irq(rv->gpios->desc[i]);
-
+		if (irq < 0) {
+			dev_info(dev, "gpiod_to_irq on gpio %u returned %d, falling back to polling\n", i, irq);
+			rv->use_irq = false;
+			break;
+		}
 		ret = devm_request_threaded_irq(dev, irq, rotary_volume_irq,
 						NULL, IRQF_TRIGGER_FALLING,
 						DRV_NAME, rv);
 		if (ret) {
-			dev_err(dev, "unable to request IRQ %d\n", irq);
-			return ret;
+			dev_info(dev, "unable to request IRQ %d, falling back to polling\n", irq);
+			rv->use_irq = false;
+			break;
 		}
+	}
+
+	if (!rv->use_irq) {
+		dev_info(dev, "Rotary encoder operating in timer polling mode (%ums)\n", rv->scan_period_ms);
+		mod_timer(&rv->poll_timer, jiffies + msecs_to_jiffies(rv->scan_period_ms));
+	} else {
+		dev_info(dev, "Rotary encoder operating in hardware interrupt mode\n");
 	}
 
 	return 0;
@@ -148,8 +197,16 @@ static int rotary_volume_remove(struct platform_device *pdev)
 {
 	struct rotary_volume *rv = platform_get_drvdata(pdev);
 
-	if (rv)
+	if (rv) {
+		if (!rv->use_irq) {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
+			timer_delete_sync(&rv->poll_timer);
+#else
+			del_timer_sync(&rv->poll_timer);
+#endif
+		}
 		cancel_work_sync(&rv->work);
+	}
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 11, 0)
 	return 0;
 #endif

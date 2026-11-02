@@ -253,7 +253,7 @@ static int is31fl32xx_init_regs(struct is31fl32xx_priv *priv)
 	if (!priv->do_not_reset) {
 		ret = is31fl32xx_reset_regs(priv);
 		if (ret)
-			return ret;
+			dev_warn(&priv->client->dev, "reset_regs returned %d (continuing initialization)\n", ret);
 	}
 
 	/*

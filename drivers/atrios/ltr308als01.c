@@ -639,12 +639,15 @@ static int ltr308_remove(struct i2c_client *client)
 
 static const struct i2c_device_id ltr308_id[] = {
 	{ DRV_NAME, 0 },
+	{ "ltr308", 0 },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, ltr308_id);
 
 static const struct of_device_id ltr308_of_match[] = {
 	{ .compatible = "lite-on,ltr308als01" },
+	{ .compatible = "liteon,ltr308als01" },
+	{ .compatible = "liteon,ltr308" },
 	{ }
 };
 MODULE_DEVICE_TABLE(of, ltr308_of_match);

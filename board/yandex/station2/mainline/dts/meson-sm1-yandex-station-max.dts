@@ -24,6 +24,10 @@
 		serial2 = &uart_A;
 		ethernet0 = &ethmac;
 		spi0 = &spicc1;
+		i2c0 = &i2c0;
+		i2c1 = &i2c1;
+		i2c2 = &i2c2;
+		i2c3 = &i2c3;
 	};
 
 	chosen {
@@ -239,7 +243,7 @@
 
 	/* Lite-On LTR-308ALS-01 Ambient Light Sensor */
 	ltr308als01: light-sensor@53 {
-		compatible = "liteon,ltr308als01", "liteon,ltr308";
+		compatible = "lite-on,ltr308als01", "liteon,ltr308als01", "liteon,ltr308";
 		reg = <0x53>;
 		status = "okay";
 	};
@@ -258,6 +262,7 @@
 		#address-cells = <1>;
 		#size-cells = <0>;
 		max-brightness-scale = <200>;
+		do-not-reset;
 		status = "okay";
 
 		/* 12 RGB LEDs = 36 channels */
@@ -306,6 +311,7 @@
 		#address-cells = <1>;
 		#size-cells = <0>;
 		max-brightness-scale = <200>;
+		do-not-reset;
 		status = "okay";
 
 		/* 12 RGB LEDs = 36 channels */

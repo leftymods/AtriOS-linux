@@ -3,8 +3,9 @@ set -e
 PROJECT_ROOT="/home/lmods/MainlineAtriOS"
 cd "$PROJECT_ROOT/cache/kernel"
 
-echo "=== Copying defconfig and running olddefconfig ==="
+echo "=== Copying defconfig and DTS and running olddefconfig ==="
 cp "$PROJECT_ROOT/board/yandex/station2/mainline/linux_7.0_yndxsttion53_defconfig" .config
+cp "$PROJECT_ROOT/board/yandex/station2/mainline/dts/meson-sm1-yandex-station-max.dts" arch/arm64/boot/dts/amlogic/meson-sm1-yandex-station-max.dts
 export ARCH=arm64
 export CROSS_COMPILE=aarch64-linux-gnu-
 make olddefconfig
