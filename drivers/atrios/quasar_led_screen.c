@@ -5,9 +5,6 @@
 #include <linux/init.h>
 #include <linux/spi/spi.h>
 #include <linux/gpio/consumer.h>
-#ifndef CONFIG_FB_BACKLIGHT
-#define CONFIG_FB_BACKLIGHT 1
-#endif
 #include <linux/fb.h>
 #include <linux/backlight.h>
 #include <linux/hwmon.h>

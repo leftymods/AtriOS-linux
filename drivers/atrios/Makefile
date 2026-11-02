@@ -18,7 +18,7 @@ obj-$(CONFIG_YANDEX_SND_SOC_ES8156) += snd-soc-es8156.o
 obj-$(CONFIG_YANDEX_SND_SOC_ES7210) += snd-soc-es7210.o
 obj-$(CONFIG_YANDEX_SND_SOC_TAS5825M) += snd-soc-tas5825m.o
 
-ccflags-y += -DCONFIG_FB_BACKLIGHT=1 -Wno-error
+ccflags-y += -Wno-error
 
 KDIR ?= $(shell pwd)/../../linux-7.0
 PWD := $(shell pwd)

@@ -3,9 +3,6 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
-#ifndef CONFIG_FB_BACKLIGHT
-#define CONFIG_FB_BACKLIGHT 1
-#endif
 #include <linux/fb.h>
 #include <linux/backlight.h>
 #include <linux/leds.h>

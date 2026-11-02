@@ -15,9 +15,6 @@
 #include <linux/of.h>
 #include <linux/gpio/consumer.h>
 #include <linux/gpio/driver.h>
-#ifndef CONFIG_FB_BACKLIGHT
-#define CONFIG_FB_BACKLIGHT 1
-#endif
 #include <linux/fb.h>
 #include <linux/uaccess.h>
 #include <linux/backlight.h>

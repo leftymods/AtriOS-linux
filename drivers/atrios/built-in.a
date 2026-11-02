@@ -1,0 +1,28 @@
+!<thin>
+//                                              238       `
+gowin_led_device.o/
+quasar_led_screen.o/
+quasar_led_ring.o/
+quasar_pcba_ids.o/
+rotary-volume.o/
+gpio_keypad.o/
+zigbee-control.o/
+ltr308als01.o/
+leds-is31fl32xx.o/
+snd-soc-sy6045s.o/
+snd-soc-es8156.o/
+snd-soc-es7210.o/
+snd-soc-tas5825m.o/
+/0              0           0     0     644     39176     `
+/20             0           0     0     644     24880     `
+/41             0           0     0     644     12456     `
+/60             0           0     0     644     9640      `
+/79             0           0     0     644     7640      `
+/96             0           0     0     644     11000     `
+/111            0           0     0     644     6912      `
+/129            0           0     0     644     14264     `
+/144            0           0     0     644     11496     `
+/163            0           0     0     644     21632     `
+/182            0           0     0     644     13048     `
+/200            0           0     0     644     14104     `
+/218            0           0     0     644     11968     `
