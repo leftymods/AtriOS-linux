@@ -78,6 +78,10 @@ case "$1" in
       done
     fi
 
+    # Unblock rfkill and bring up wlan0
+    rfkill unblock all 2>/dev/null || true
+    ip link set wlan0 up 2>/dev/null || true
+
     echo "[AtriOS] Drivers loaded."
     ;;
   stop)

@@ -79,25 +79,30 @@ def main():
 
     # 0. Detect UART port
     uart_dev = None
-    for cand in ["/dev/ttyAML2", "/dev/ttyAML1", "/dev/ttyS1"]:
+    for cand in ["/dev/ttyAML1", "/dev/ttyAML2", "/dev/ttyS1"]:
         if os.path.exists(cand):
             uart_dev = cand
             break
     if not uart_dev:
-        uart_dev = "/dev/ttyAML2"
+        uart_dev = "/dev/ttyAML1"
+
+    def do_hw_reset():
+        for pin in [493, 494]:
+            if not os.path.exists(f"/sys/class/gpio/gpio{pin}"):
+                os.system(f"echo {pin} > /sys/class/gpio/export 2>/dev/null; echo out > /sys/class/gpio/gpio{pin}/direction 2>/dev/null")
+        if os.path.exists("/sys/class/gpio/gpio493/value"):
+            os.system("echo 0 > /sys/class/gpio/gpio493/value 2>/dev/null; echo 0 > /sys/class/gpio/gpio494/value 2>/dev/null; sleep 0.5; echo 1 > /sys/class/gpio/gpio493/value 2>/dev/null; sleep 0.2; echo 1 > /sys/class/gpio/gpio494/value 2>/dev/null; sleep 0.5")
 
     # 1. Hardware reset
     print(f"[rtk-bt-bridge] Resetting RTL8822CS module on {uart_dev}...", flush=True)
-    if os.path.exists("/sys/class/gpio/gpio493/value"):
-        os.system("echo 0 > /sys/class/gpio/gpio493/value 2>/dev/null; echo 0 > /sys/class/gpio/gpio494/value 2>/dev/null; sleep 1; echo 1 > /sys/class/gpio/gpio493/value 2>/dev/null; sleep 0.2; echo 1 > /sys/class/gpio/gpio494/value 2>/dev/null; sleep 0.5")
+    do_hw_reset()
 
     # 2. Upload RAM firmware
     print("[rtk-bt-bridge] Uploading firmware via rtk_hciattach...", flush=True)
     ret = os.system(f"/usr/bin/rtk_hciattach -s 115200 {uart_dev} rtk_h5 >/dev/null 2>&1")
     if ret != 0:
         print(f"[rtk-bt-bridge] rtk_hciattach failed (code {ret}), retrying once...", flush=True)
-        if os.path.exists("/sys/class/gpio/gpio493/value"):
-            os.system("echo 0 > /sys/class/gpio/gpio493/value 2>/dev/null; echo 0 > /sys/class/gpio/gpio494/value 2>/dev/null; sleep 1; echo 1 > /sys/class/gpio/gpio493/value 2>/dev/null; sleep 0.2; echo 1 > /sys/class/gpio/gpio494/value 2>/dev/null; sleep 0.5")
+        do_hw_reset()
         ret = os.system(f"/usr/bin/rtk_hciattach -s 115200 {uart_dev} rtk_h5 >/dev/null 2>&1")
 
     # 3. Open UART at 3M baud 8E1

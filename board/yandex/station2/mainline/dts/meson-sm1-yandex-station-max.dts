@@ -20,8 +20,8 @@
 
 	aliases {
 		serial0 = &uart_AO;
-		serial1 = &uart_AO_B;
-		serial2 = &uart_A;
+		serial1 = &uart_A;
+		serial2 = &uart_AO_B;
 		ethernet0 = &ethmac;
 		spi0 = &spicc1;
 		i2c0 = &i2c0;
@@ -226,18 +226,12 @@
 	pinctrl-0 = <&uart_a_pins>, <&uart_a_cts_rts_pins>;
 	pinctrl-names = "default";
 	uart-has-rtscts;
-
-	bluetooth {
-		compatible = "realtek,rtl8822cs-bt";
-		enable-gpios = <&gpio GPIOX_18 GPIO_ACTIVE_HIGH>;
-		host-wake-gpios = <&gpio GPIOX_19 GPIO_ACTIVE_HIGH>;
-	};
 };
 
 /* I2C0: LED Ring Controllers, ALS, EEPROM */
 &i2c0 {
 	status = "okay";
-	pinctrl-0 = <&i2c0_sda_z0_pins>, <&i2c0_sck_z1_pins>;
+	pinctrl-0 = <&i2c0_sda_c_pins>, <&i2c0_sck_c_pins>;
 	pinctrl-names = "default";
 	clock-frequency = <400000>;
 
@@ -427,9 +421,8 @@
 /* SPICC1: Gowin FPGA LED Matrix Screen Controller */
 &spicc1 {
 	status = "okay";
-	pinctrl-0 = <&spicc1_pins>;
+	pinctrl-0 = <&spicc1_pins>, <&spicc1_ss0_pins>;
 	pinctrl-names = "default";
-	cs-gpios = <&gpio GPIOH_6 GPIO_ACTIVE_LOW>;
 	#address-cells = <1>;
 	#size-cells = <0>;
 

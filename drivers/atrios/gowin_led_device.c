@@ -1107,6 +1107,11 @@ static int select_jtag_mode(struct gowin_priv *priv)
 
 	if (IS_ERR_OR_NULL(priv->jtag_tck) || IS_ERR_OR_NULL(priv->jtag_tdi) ||
 	    IS_ERR_OR_NULL(priv->jtag_tms) || IS_ERR_OR_NULL(priv->jtag_tdo)) {
+		dev_err(dev, "[GOWIN-JTAG] Failed to get JTAG GPIOs: tck=%ld, tdi=%ld, tms=%ld, tdo=%ld\n",
+			PTR_ERR_OR_ZERO(priv->jtag_tck),
+			PTR_ERR_OR_ZERO(priv->jtag_tdi),
+			PTR_ERR_OR_ZERO(priv->jtag_tms),
+			PTR_ERR_OR_ZERO(priv->jtag_tdo));
 		if (!IS_ERR_OR_NULL(priv->jtag_tck))
 			devm_gpiod_put(dev, priv->jtag_tck);
 		if (!IS_ERR_OR_NULL(priv->jtag_tdi))
@@ -1125,6 +1130,7 @@ static int select_jtag_mode(struct gowin_priv *priv)
 	if (priv->jtag_sel)
 		gpiod_set_value_cansleep(priv->jtag_sel, 0);
 
+	dev_info(dev, "[GOWIN-JTAG] JTAG mode enabled successfully\n");
 	priv->jtag_mode = true;
 	return 0;
 }
@@ -1257,15 +1263,20 @@ static int jtag_read_code(struct gowin_priv *priv, u32 *code)
 
 static int check_status_code(struct gowin_priv *priv)
 {
-	u32 idcode;
+	u32 idcode = 0;
 	int ret;
 
 	ret = jtag_read_code(priv, &idcode);
-	if (ret)
+	if (ret) {
+		dev_err(priv->dev, "[GOWIN-JTAG] jtag_read_code failed: %d\n", ret);
 		return ret;
+	}
 
-	if ((idcode & 0x0fffffff) != 0x0080181b)
+	dev_info(priv->dev, "[GOWIN-JTAG] IDCODE=0x%08x (expected 0x0080181b)\n", idcode);
+	if ((idcode & 0x0fffffff) != 0x0080181b) {
+		dev_err(priv->dev, "[GOWIN-JTAG] IDCODE mismatch: 0x%08x != 0x0080181b\n", idcode);
 		return -ENODEV;
+	}
 
 	return 0;
 }
@@ -1275,6 +1286,16 @@ static int jtag_prog_fpga(struct gowin_priv *priv, const struct firmware *fw)
 	const u8 *data = fw->data;
 	int len = fw->size;
 	int offset = 0;
+	int ret;
+
+	dev_info(priv->dev, "[GOWIN-JTAG] Starting FPGA programming (%d bytes)...\n", len);
+
+	/* Check IDCODE first to verify JTAG bus connectivity */
+	ret = check_status_code(priv);
+	if (ret) {
+		dev_err(priv->dev, "[GOWIN-JTAG] Pre-flash IDCODE check failed (%d), aborting\n", ret);
+		return ret;
+	}
 
 	jtag_tap_move(priv, 0);
 	msleep(10);
@@ -1292,10 +1313,13 @@ static int jtag_prog_fpga(struct gowin_priv *priv, const struct firmware *fw)
 	jtag_write_inst(priv, 0x02);
 	msleep(100);
 
-	if (check_status_code(priv))
+	if (check_status_code(priv)) {
+		dev_err(priv->dev, "[GOWIN-JTAG] Post-flash check_status_code failed\n");
 		return -EIO;
+	}
 
 	jtag_tap_move(priv, 4);
+	dev_info(priv->dev, "[GOWIN-JTAG] FPGA bitstream programmed successfully!\n");
 	return 0;
 }
 
@@ -1336,22 +1360,31 @@ static int lp_handle_firmware_update(struct gowin_priv *priv)
 	const struct firmware *fw;
 	int ret;
 
-	/* First check if FPGA is already running in PA application mode */
+	/* First check if FPGA is already running in PA application mode with VALID firmware */
 	ret = get_lp_status(priv, NULL);
-	if (ret == 0) {
+	dev_info(priv->dev, "[GOWIN] Initial check: get_lp_status ret=%d (board_rev=%u, fw_version=%u, uf_crc=0x%04x)\n",
+		 ret, priv->board_rev, priv->fw_version, priv->uf_crc);
+
+	if (ret == 0 && priv->fw_version > 0 && priv->uf_crc != 0) {
 		snprintf(priv->fw_upd_status, sizeof(priv->fw_upd_status),
 			 "ok: running (board_rev=%u fw_version=%u uf_crc=0x%04x)",
 			 priv->board_rev, priv->fw_version, priv->uf_crc);
+		dev_info(priv->dev, "[GOWIN] FPGA already running valid firmware (version %u)\n", priv->fw_version);
 		return 0;
 	}
 
 	/* Try hardware reset once before attempting JTAG flash */
+	dev_info(priv->dev, "[GOWIN] Resetting FPGA to probe status...\n");
 	fpga_hw_reset(priv);
 	ret = get_lp_status(priv, NULL);
-	if (ret == 0) {
+	dev_info(priv->dev, "[GOWIN] Post-reset check: get_lp_status ret=%d (board_rev=%u, fw_version=%u, uf_crc=0x%04x)\n",
+		 ret, priv->board_rev, priv->fw_version, priv->uf_crc);
+
+	if (ret == 0 && priv->fw_version > 0 && priv->uf_crc != 0) {
 		snprintf(priv->fw_upd_status, sizeof(priv->fw_upd_status),
 			 "ok: reset (board_rev=%u fw_version=%u uf_crc=0x%04x)",
 			 priv->board_rev, priv->fw_version, priv->uf_crc);
+		dev_info(priv->dev, "[GOWIN] FPGA operational after reset (version %u)\n", priv->fw_version);
 		return 0;
 	}
 
@@ -1360,15 +1393,19 @@ static int lp_handle_firmware_update(struct gowin_priv *priv)
 	else
 		fw_name = "yandex_led_screen_fpga.bin";
 
+	dev_info(priv->dev, "[GOWIN] Requesting firmware bitstream '%s'...\n", fw_name);
 	ret = request_firmware(&fw, fw_name, priv->dev);
 	if (ret) {
 		snprintf(priv->fw_upd_status, sizeof(priv->fw_upd_status),
 			 "fw not found: %s (status=%d)", fw_name, ret);
+		dev_err(priv->dev, "[GOWIN] request_firmware('%s') failed: %d\n", fw_name, ret);
 		return ret;
 	}
 
 	snprintf(priv->fw_upd_status, sizeof(priv->fw_upd_status),
 		 "flashing %s (%zu bytes)", fw_name, fw->size);
+	dev_info(priv->dev, "[GOWIN] Firmware '%s' loaded (%zu bytes). Flashing via JTAG...\n",
+		 fw_name, fw->size);
 
 	ret = lp_update_firmware(priv, fw);
 	release_firmware(fw);
@@ -1376,9 +1413,15 @@ static int lp_handle_firmware_update(struct gowin_priv *priv)
 	if (ret) {
 		snprintf(priv->fw_upd_status, sizeof(priv->fw_upd_status),
 			 "flash failed: %d", ret);
+		dev_err(priv->dev, "[GOWIN] Firmware flash failed with error %d\n", ret);
 	} else {
 		snprintf(priv->fw_upd_status, sizeof(priv->fw_upd_status),
 			 "ok: %s programmed", fw_name);
+		dev_info(priv->dev, "[GOWIN] Firmware flash complete! Probing new status...\n");
+		msleep(100);
+		get_lp_status(priv, NULL);
+		dev_info(priv->dev, "[GOWIN] Final status: board_rev=%u, fw_version=%u, uf_crc=0x%04x\n",
+			 priv->board_rev, priv->fw_version, priv->uf_crc);
 	}
 
 	return ret;
