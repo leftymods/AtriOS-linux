@@ -45,7 +45,7 @@ build_emmc_image() {
 echo '=== Starting ${OS_NAME} ${RELEASE_NAME} from eMMC ==='
 setenv fdt_high 0x20000000
 setenv initrd_high 0x20000000
-setenv bootargs 'root=LABEL=ROOTFS rootwait rw console=${SERIAL_CONSOLE} earlycon=meson,0xff803000 earlycon loglevel=8 ignore_loglevel printk.time=1 keep_bootcon init=/sbin/init'
+setenv bootargs 'root=PARTUUID=4a7e8b12-02 rootwait rw console=${SERIAL_CONSOLE} earlycon=meson,0xff803000 earlycon loglevel=8 ignore_loglevel printk.time=1 keep_bootcon init=/sbin/init'
 if test -z '\${kernel_addr_r}'; then setenv kernel_addr_r 0x08080000; fi
 if test -z '\${fdt_addr_r}'; then setenv fdt_addr_r 0x08008000; fi
 
@@ -68,7 +68,7 @@ EOF
 LABEL ${OS_NAME}-${RELEASE_NAME}
     LINUX /Image
     FDT /${DTS_NAME}.dtb
-    APPEND root=LABEL=ROOTFS rootwait rw console=${SERIAL_CONSOLE} earlycon=meson,0xff803000 earlycon loglevel=8 ignore_loglevel printk.time=1 keep_bootcon init=/sbin/init
+    APPEND root=PARTUUID=4a7e8b12-02 rootwait rw console=${SERIAL_CONSOLE} earlycon=meson,0xff803000 earlycon loglevel=8 ignore_loglevel printk.time=1 keep_bootcon init=/sbin/init
 EOF
 
     # uEnv.txt
@@ -76,7 +76,7 @@ EOF
 dtb_name=/${DTS_NAME}.dtb
 fdt_high=0x20000000
 initrd_high=0x20000000
-bootargs=root=LABEL=ROOTFS rootwait rw console=${SERIAL_CONSOLE} earlycon=meson,0xff803000 earlycon loglevel=8 ignore_loglevel printk.time=1 keep_bootcon init=/sbin/init
+bootargs=root=PARTUUID=4a7e8b12-02 rootwait rw console=${SERIAL_CONSOLE} earlycon=meson,0xff803000 earlycon loglevel=8 ignore_loglevel printk.time=1 keep_bootcon init=/sbin/init
 EOF
 
     # 2. Build 128MB FAT32 BOOT Partition
@@ -119,7 +119,7 @@ ${img_path}2 : start=${p2_start}, size=${p2_size}, type=83
 
     # 6. Burn Bootloader (MBR record in sector 0, rest at sector 1)
     display_alert "INFO" "Injecting bootloader (${bootloader_full})..."
-    dd if="$bootloader_full" of="$img_path" bs=1 count=442 conv=notrunc status=none
+    dd if="$bootloader_full" of="$img_path" bs=1 count=440 conv=notrunc status=none
     dd if="$bootloader_full" of="$img_path" bs="$sector_size" skip=1 seek=1 conv=notrunc status=none
 
     # Clean temporary files
