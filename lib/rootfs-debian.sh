@@ -86,10 +86,52 @@ EOF
     # Set root password to empty / root
     sudo chroot "$stage_dir" /bin/sh -c "echo 'root:root' | chpasswd" 2>/dev/null || true
 
-    # Enable serial console ttyAML0
+    # Ensure /etc/securetty allows serial console login
+    cat <<EOF | sudo tee -a "$stage_dir/etc/securetty" >/dev/null
+ttyAML0
+console
+tty0
+tty1
+EOF
+
+    # Enable serial console ttyAML0 in systemd
     if [ -d "$stage_dir/etc/systemd/system" ]; then
         sudo chroot "$stage_dir" /bin/sh -c "systemctl enable serial-getty@ttyAML0.service" 2>/dev/null || true
     fi
+
+    # Universal /sbin/init & /init wrapper: guarantees instant interactive root console on ttyAML0
+    cat <<'INITEOF' | sudo tee "$stage_dir/sbin/init" >/dev/null
+#!/bin/sh
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+export TERM=linux
+export HOME=/root
+
+mount -t proc proc /proc 2>/dev/null || true
+mount -t sysfs sysfs /sys 2>/dev/null || true
+mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
+mkdir -p /dev/pts /dev/shm
+mount -t devpts devpts /dev/pts 2>/dev/null || true
+mount -t tmpfs tmpfs /dev/shm 2>/dev/null || true
+
+# If systemd is installed, launch it
+if [ -x /lib/systemd/systemd ] && [ ! -f /etc/nosystemd ]; then
+    exec /lib/systemd/systemd "$@"
+fi
+
+# Print banner to console
+cat /etc/issue 2>/dev/null || echo "Welcome to AtriOS-aml!"
+
+# Launch interactive root login shell on ttyAML0
+if [ -x /sbin/agetty ]; then
+    exec /sbin/agetty --autologin root --noclear 115200 ttyAML0 linux
+elif [ -x /sbin/getty ]; then
+    exec /sbin/getty -n -l /bin/bash 115200 ttyAML0 linux
+else
+    exec /bin/bash -l < /dev/ttyAML0 > /dev/ttyAML0 2>&1
+fi
+INITEOF
+    sudo chmod +x "$stage_dir/sbin/init"
+    sudo ln -sf /sbin/init "$stage_dir/init"
 
     # 4. Install Kernel Modules
     display_alert "INFO" "Installing kernel modules into rootfs..."
