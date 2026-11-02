@@ -15,7 +15,7 @@
 
 / {
 	compatible = "leftymods,station-max", "amlogic,sm1";
-	model = "AtriOS-aml Station Max (leftymods)";
+	model = "YNDXstationMAX53";
 	amlogic-dt-id = "yandex_station_2g";
 
 	aliases {

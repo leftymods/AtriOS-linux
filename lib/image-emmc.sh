@@ -43,9 +43,9 @@ build_emmc_image() {
     # boot.cmd
     cat > "$boot_staging/boot.cmd" <<EOF
 echo '=== Starting ${OS_NAME} ${RELEASE_NAME} from eMMC ==='
-setenv fdt_high 0xffffffffffffffff
-setenv initrd_high 0xffffffffffffffff
-setenv bootargs 'root=LABEL=ROOTFS rootwait rw console=${SERIAL_CONSOLE} earlycon=aml_uart,0xff803000 init=/sbin/init'
+setenv fdt_high 0x20000000
+setenv initrd_high 0x20000000
+setenv bootargs 'root=LABEL=ROOTFS rootwait rw console=${SERIAL_CONSOLE} earlycon=meson,0xff803000 earlycon loglevel=8 ignore_loglevel printk.time=1 keep_bootcon init=/sbin/init'
 if test -z '\${kernel_addr_r}'; then setenv kernel_addr_r 0x08080000; fi
 if test -z '\${fdt_addr_r}'; then setenv fdt_addr_r 0x08008000; fi
 
@@ -68,15 +68,15 @@ EOF
 LABEL ${OS_NAME}-${RELEASE_NAME}
     LINUX /Image
     FDT /${DTS_NAME}.dtb
-    APPEND root=LABEL=ROOTFS rootwait rw console=${SERIAL_CONSOLE} earlycon=aml_uart,0xff803000 init=/sbin/init
+    APPEND root=LABEL=ROOTFS rootwait rw console=${SERIAL_CONSOLE} earlycon=meson,0xff803000 earlycon loglevel=8 ignore_loglevel printk.time=1 keep_bootcon init=/sbin/init
 EOF
 
     # uEnv.txt
     cat > "$boot_staging/uEnv.txt" <<EOF
 dtb_name=/${DTS_NAME}.dtb
-fdt_high=0xffffffffffffffff
-initrd_high=0xffffffffffffffff
-bootargs=root=LABEL=ROOTFS rootwait rw console=${SERIAL_CONSOLE} earlycon=aml_uart,0xff803000 init=/sbin/init
+fdt_high=0x20000000
+initrd_high=0x20000000
+bootargs=root=LABEL=ROOTFS rootwait rw console=${SERIAL_CONSOLE} earlycon=meson,0xff803000 earlycon loglevel=8 ignore_loglevel printk.time=1 keep_bootcon init=/sbin/init
 EOF
 
     # 2. Build 128MB FAT32 BOOT Partition
