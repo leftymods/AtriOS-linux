@@ -13,7 +13,6 @@
 #include <linux/module.h>
 #include <linux/spi/spi.h>
 #include <linux/of.h>
-#include <linux/of_gpio.h>
 #include <linux/gpio/consumer.h>
 #include <linux/gpio/driver.h>
 #ifndef CONFIG_FB_BACKLIGHT

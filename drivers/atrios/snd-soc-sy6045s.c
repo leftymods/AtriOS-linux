@@ -248,7 +248,7 @@ static int sy6045s_reg_switch_get(struct snd_kcontrol *kcontrol,
 				  struct snd_ctl_elem_value *ucontrol)
 {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 18, 0)
-	struct snd_soc_component *comp = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *comp = snd_kcontrol_chip(kcontrol);
 	struct sy6045s_priv *sy = snd_soc_component_get_drvdata(comp);
 #else
 	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(kcontrol);
@@ -267,7 +267,7 @@ static int sy6045s_reg_switch_put(struct snd_kcontrol *kcontrol,
 				  struct snd_ctl_elem_value *ucontrol)
 {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 18, 0)
-	struct snd_soc_component *comp = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *comp = snd_kcontrol_chip(kcontrol);
 	struct sy6045s_priv *sy = snd_soc_component_get_drvdata(comp);
 #else
 	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(kcontrol);

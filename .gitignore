@@ -21,3 +21,7 @@ modules.order
 Module.symvers
 .tmp_versions/
 output/
+
+# Cache directories for kernel and u-boot sources
+cache/
+u-boot-mainline/

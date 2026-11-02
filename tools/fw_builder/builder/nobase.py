@@ -24,7 +24,9 @@ does not enable secure boot and ``ampack pack`` does not require them.
 """
 from __future__ import annotations
 
+import hashlib
 import shutil
+import struct
 import subprocess
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -35,11 +37,31 @@ DEVICE_UPGRADE_DIR = REPO_ROOT / "device" / "yandex" / "station_max" / "upgrade"
 
 BOOTLOADER_IMG = DEVICE_UPGRADE_DIR / "bootloader.img"
 SD_UBOOT_IMG = DEVICE_UPGRADE_DIR / "u-boot.bin.sd.bin"
+USB_BL2_IMG = DEVICE_UPGRADE_DIR / "u-boot.bin.usb.bl2"
+USB_TPL_IMG = DEVICE_UPGRADE_DIR / "u-boot.bin.usb.tpl"
 BOOTLOADER_ENC_IMG = DEVICE_UPGRADE_DIR / "bootloader.img.encrypt"
 SD_UBOOT_ENC_IMG = DEVICE_UPGRADE_DIR / "u-boot.bin.encrypt.sd.bin"
 PLATFORM_CONF = DEVICE_UPGRADE_DIR / "platform.conf"
 SD_BURN_INI = DEVICE_UPGRADE_DIR / "aml_sdc_burn.ini"
 LOGO_IMG = DEVICE_UPGRADE_DIR / "logo.PARTITION"
+
+def validate_bootloader_fip(bootloader_path: Path) -> None:
+    """Verify that bootloader image contains a valid FIP TOC to prevent USB boot failure."""
+    sz = bootloader_path.stat().st_size
+    if sz < 0x14000:
+        raise ValueError(f"Bootloader {bootloader_path} size {sz} < 81920 bytes (EOF risk)")
+    with open(bootloader_path, "rb") as f:
+        f.seek(0x10000)
+        chunk = f.read(0x4000)
+    if len(chunk) < 0x4000:
+        raise ValueError(f"Failed to read 16KB FIP TOC from {bootloader_path}")
+    magic = struct.unpack("<I", chunk[0x10:0x14])[0]
+    if magic != 0xAA640001:
+        raise ValueError(f"Invalid FIP TOC magic at offset 0x10010: 0x{magic:08x} != 0xaa640001")
+    calc_sha = hashlib.sha256(chunk[0x10:0x3FE0]).digest()
+    stored_sha = chunk[0x3FE0:0x4000]
+    if calc_sha != stored_sha:
+        raise ValueError(f"FIP TOC SHA-256 mismatch in {bootloader_path}")
 
 DEFAULT_DTS = TOOL_ROOT / "overlay" / "dts" / "sm1_s905x3_yandex.dts"
 DEFAULT_KERNEL = TOOL_ROOT / "overlay" / "boot" / "Image.gz"
@@ -73,7 +95,6 @@ def required_assets() -> List[Path]:
         SD_UBOOT_IMG,
         PLATFORM_CONF,
         SD_BURN_INI,
-        LOGO_IMG,
         DEFAULT_DTS,
         DEFAULT_KERNEL,
         DEFAULT_CMDLINE,
@@ -226,13 +247,15 @@ def synthesize_staging(
         produced[name] = str(path.resolve())
 
     # --- Bootloader / USB burning items -------------------------------------
+    validate_bootloader_fip(BOOTLOADER_IMG)
+    tpl_src = USB_TPL_IMG if USB_TPL_IMG.exists() else BOOTLOADER_IMG
+
     _copy(BOOTLOADER_IMG, staging / "DDR.USB")
-    _copy(BOOTLOADER_IMG, staging / "UBOOT.USB")
+    _copy(tpl_src, staging / "UBOOT.USB")
     _copy(BOOTLOADER_IMG, staging / "bootloader.PARTITION")
     _copy(SD_UBOOT_IMG, staging / "aml_sdc_burn.UBOOT")
     _copy(PLATFORM_CONF, staging / "platform.conf")
     _copy(SD_BURN_INI, staging / "aml_sdc_burn.ini")
-    _copy(LOGO_IMG, staging / "logo.PARTITION")
     for name in (
         "DDR.USB",
         "UBOOT.USB",
@@ -240,9 +263,12 @@ def synthesize_staging(
         "aml_sdc_burn.UBOOT",
         "platform.conf",
         "aml_sdc_burn.ini",
-        "logo.PARTITION",
     ):
         record(name, staging / name)
+
+    if LOGO_IMG.exists():
+        _copy(LOGO_IMG, staging / "logo.PARTITION")
+        record("logo.PARTITION", staging / "logo.PARTITION")
 
     if BOOTLOADER_ENC_IMG.exists():
         _copy(BOOTLOADER_ENC_IMG, staging / "DDR_ENC.USB")
