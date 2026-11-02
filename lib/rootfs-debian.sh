@@ -20,6 +20,9 @@ build_debian_micro_rootfs() {
 
     mkdir -p "$PROJECT_ROOT/cache" "$PROJECT_ROOT/output/images"
 
+    # Ensure binfmt_misc for arm64 is active on host
+    sudo service binfmt-support status >/dev/null 2>&1 || sudo service binfmt-support start 2>/dev/null || true
+
     # 1. Bootstrap base if not cached
     if [ ! -f "$cache_dir/etc/debian_version" ]; then
         display_alert "INFO" "Downloading minimal Debian ${suite} arm64 base via debootstrap (first stage)..."
@@ -46,7 +49,22 @@ build_debian_micro_rootfs() {
     # 2.5 Apply RootFS Overlay
     if [ -n "${ROOTFS_OVERLAY:-}" ] && [ -d "$PROJECT_ROOT/$ROOTFS_OVERLAY" ]; then
         display_alert "INFO" "Applying RootFS Overlay from" "$ROOTFS_OVERLAY"
-        sudo rsync -a "$PROJECT_ROOT/$ROOTFS_OVERLAY/" "$stage_dir/"
+        sudo rsync -aK "$PROJECT_ROOT/$ROOTFS_OVERLAY/" "$stage_dir/"
+    fi
+
+    # Ensure standard Debian UsrMerge symlinks are preserved (lib -> usr/lib, etc.)
+    for d in bin sbin lib; do
+        if [ -d "$stage_dir/$d" ] && [ ! -L "$stage_dir/$d" ]; then
+            sudo cp -a "$stage_dir/$d/." "$stage_dir/usr/$d/"
+            sudo rm -rf "$stage_dir/$d"
+            sudo ln -s "usr/$d" "$stage_dir/$d"
+        fi
+    done
+    if [ ! -e "$stage_dir/lib64" ]; then
+        sudo ln -s usr/lib "$stage_dir/lib64" 2>/dev/null || true
+    fi
+    if [ ! -e "$stage_dir/usr/lib/ld-linux-aarch64.so.1" ]; then
+        sudo ln -sf aarch64-linux-gnu/ld-linux-aarch64.so.1 "$stage_dir/usr/lib/ld-linux-aarch64.so.1" 2>/dev/null || true
     fi
 
     # 3. Configure System & Branding
@@ -95,7 +113,6 @@ EOF
     # Configure default shell for root to fish
     echo "/usr/bin/fish" | sudo tee -a "$stage_dir/etc/shells" >/dev/null
     echo "/bin/fish" | sudo tee -a "$stage_dir/etc/shells" >/dev/null
-    sudo ln -sf /usr/bin/fish "$stage_dir/bin/fish"
     sudo sed -i 's|root:x:0:0:root:/root:/bin/bash|root:x:0:0:root:/root:/usr/bin/fish|' "$stage_dir/etc/passwd" 2>/dev/null || true
     sudo sed -i 's|root:x:0:0:root:/root:/bin/sh|root:x:0:0:root:/root:/usr/bin/fish|' "$stage_dir/etc/passwd" 2>/dev/null || true
 
@@ -166,7 +183,7 @@ else
 fi
 INITEOF
     sudo chmod +x "$stage_dir/sbin/init"
-    sudo ln -sf /sbin/init "$stage_dir/init"
+    sudo ln -sf sbin/init "$stage_dir/init"
 
     # 4. Install Kernel Modules
     display_alert "INFO" "Installing kernel modules into rootfs..."
@@ -207,6 +224,13 @@ INITEOF
                 "$stage_dir/var/lib/apt/lists"/* \
                 "$stage_dir/tmp"/* \
                 "$stage_dir/var/tmp"/*
+
+    # Validate executables inside chroot before stripping
+    display_alert "INFO" "Validating RootFS binaries and dynamic loader..."
+    sudo cp /usr/bin/qemu-aarch64-static "$stage_dir/usr/bin/"
+    sudo chroot "$stage_dir" /bin/sh -c "/bin/dash -c 'echo Dash test: OK'"
+    sudo chroot "$stage_dir" /bin/sh -c "/usr/bin/fish --version"
+    sudo chroot "$stage_dir" /bin/sh -c "test -x /sbin/init && echo Init script: OK"
 
     # Remove qemu binary before packing
     sudo rm -f "$stage_dir/usr/bin/qemu-aarch64-static"
