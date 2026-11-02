@@ -3,15 +3,15 @@
 # AtriOS Build System - Main Entry Point
 # ==============================================================================
 # Usage:
-#   ./compile.sh                                 # Default build (station-max, Nebula)
-#   ./compile.sh BOARD=station-max               # Build eMMC image
-#   ./compile.sh BOARD=station-max RELEASE=Nebula # Specify custom release name
+#   ./compile.sh                                 # Default build (yndxsttion53, Nebula)
+#   ./compile.sh BOARD=yndxsttion53               # Build eMMC image
+#   ./compile.sh BOARD=yndxsttion53 RELEASE=Nebula # Specify custom release name
 #   ./compile.sh TARGET=kernel                   # Compile Linux kernel
 #   ./compile.sh TARGET=packages                 # Build .deb packages for U-Boot & Kernel
 #   ./compile.sh TARGET=rootfs                   # Build super micro Debian rootfs
 #   ./compile.sh TARGET=uboot                    # Build bootloader
 #   ./compile.sh list                            # Show supported boards
-#   ./compile.sh info station-max                # Show board details
+#   ./compile.sh info yndxsttion53                # Show board details
 #   ./compile.sh clean                           # Clean build artifacts
 # ==============================================================================
 set -euo pipefail
@@ -28,7 +28,7 @@ source "$PROJECT_ROOT/lib/rootfs-debian.sh"
 source "$PROJECT_ROOT/lib/image-emmc.sh"
 
 # Default parameters
-BOARD="station-max"
+BOARD="yndxsttion53"
 TARGET="image"
 RELEASE=""
 
@@ -99,7 +99,7 @@ Examples:
   ./compile.sh
   ./compile.sh TARGET=packages
   ./compile.sh TARGET=rootfs
-  ./compile.sh BOARD=station-max RELEASE=Nebula
+  ./compile.sh BOARD=yndxsttion53 RELEASE=Nebula
   ./compile.sh list
   ./compile.sh info
 EOF

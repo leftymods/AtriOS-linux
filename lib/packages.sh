@@ -40,7 +40,7 @@ CTRL
 #!/bin/sh
 set -e
 
-UBOOT_SRC="/usr/lib/u-boot/station-max/u-boot.bin.sd.bin"
+UBOOT_SRC="/usr/lib/u-boot/${BOARD}/u-boot.bin.sd.bin"
 TARGET_DEV="/dev/mmcblk0"
 
 if [ -f "$UBOOT_SRC" ] && [ -b "$TARGET_DEV" ]; then
@@ -115,7 +115,7 @@ set -e
 
 echo "[AtriOS] Updating kernel artifacts in /boot..."
 if [ -d /boot ]; then
-    cp -f /boot/meson-sm1-yandex-station-max.dtb /boot/dtb.img 2>/dev/null || true
+    cp -f /boot/${DTS_NAME}.dtb /boot/dtb.img 2>/dev/null || true
     sync
 fi
 
