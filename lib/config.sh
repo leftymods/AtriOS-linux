@@ -42,9 +42,9 @@ load_board_config() {
     IMAGE_FORMAT="${IMAGE_FORMAT:-emmc}"
     IMAGE_FILENAME="${OS_NAME}-${RELEASE_NAME}-${BOARD}-emmc.img"
     BOOTLOADER_BIN="${BOOTLOADER_BIN:-device/yandex/station_max/upgrade/u-boot.bin.sd.bin}"
-    KERNEL_IMAGE="${KERNEL_IMAGE:-/home/lmods/linux-7.3.1/arch/arm64/boot/Image}"
+    KERNEL_IMAGE="${KERNEL_IMAGE:-cache/kernel/arch/arm64/boot/Image}"
     DTB_IMAGE="${DTB_IMAGE:-output/images/meson-sm1-yandex-station-max.dtb}"
-    ROOTFS_IMAGE="${ROOTFS_IMAGE:-buildroot/output/images/rootfs.ext4}"
+    ROOTFS_IMAGE="${ROOTFS_IMAGE:-output/images/rootfs-debian-micro.ext4}"
 
     display_alert "INFO" "OS / Release:" "${OS_NAME} ${RELEASE_NAME} (v${RELEASE_VERSION})"
     display_alert "INFO" "Target board:" "${BOARD_NAME} (${BOARD})"
