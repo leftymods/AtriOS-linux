@@ -4,19 +4,19 @@
 # Compatible with Mainline Linux 7.0+ and Amlogic Vendor 4.9.113
 #
 
-obj-m += gowin_led_device.o
-obj-m += quasar_led_screen.o
-obj-m += quasar_led_ring.o
-obj-m += quasar_pcba_ids.o
-obj-m += rotary-volume.o
-obj-m += gpio_keypad.o
-obj-m += zigbee-control.o
-obj-m += ltr308als01.o
-obj-m += leds-is31fl32xx.o
-obj-m += snd-soc-sy6045s.o
-obj-m += snd-soc-es8156.o
-obj-m += snd-soc-es7210.o
-obj-m += snd-soc-tas5825m.o
+obj-$(CONFIG_YANDEX_GOWIN_LED_DEVICE) += gowin_led_device.o
+obj-$(CONFIG_YANDEX_QUASAR_LED_SCREEN) += quasar_led_screen.o
+obj-$(CONFIG_YANDEX_QUASAR_LED_RING) += quasar_led_ring.o
+obj-$(CONFIG_YANDEX_QUASAR_PCBA_IDS) += quasar_pcba_ids.o
+obj-$(CONFIG_YANDEX_ROTARY_VOLUME) += rotary-volume.o
+obj-$(CONFIG_YANDEX_GPIO_KEYPAD) += gpio_keypad.o
+obj-$(CONFIG_YANDEX_ZIGBEE_CONTROL) += zigbee-control.o
+obj-$(CONFIG_YANDEX_LTR308ALS01) += ltr308als01.o
+obj-$(CONFIG_YANDEX_LEDS_IS31FL32XX) += leds-is31fl32xx.o
+obj-$(CONFIG_YANDEX_SND_SOC_SY6045S) += snd-soc-sy6045s.o
+obj-$(CONFIG_YANDEX_SND_SOC_ES8156) += snd-soc-es8156.o
+obj-$(CONFIG_YANDEX_SND_SOC_ES7210) += snd-soc-es7210.o
+obj-$(CONFIG_YANDEX_SND_SOC_TAS5825M) += snd-soc-tas5825m.o
 
 ccflags-y += -DCONFIG_FB_BACKLIGHT=1 -Wno-error
 

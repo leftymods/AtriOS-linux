@@ -43,6 +43,12 @@ build_debian_micro_rootfs() {
     sudo rsync -aHAX "$cache_dir/" "$stage_dir/"
     sudo cp /usr/bin/qemu-aarch64-static "$stage_dir/usr/bin/"
 
+    # 2.5 Apply RootFS Overlay
+    if [ -n "${ROOTFS_OVERLAY:-}" ] && [ -d "$PROJECT_ROOT/$ROOTFS_OVERLAY" ]; then
+        display_alert "INFO" "Applying RootFS Overlay from" "$ROOTFS_OVERLAY"
+        sudo rsync -a "$PROJECT_ROOT/$ROOTFS_OVERLAY/" "$stage_dir/"
+    fi
+
     # 3. Configure System & Branding
     display_alert "INFO" "Applying ${OS_NAME} ${RELEASE_NAME} configuration & identity..."
 
@@ -86,6 +92,20 @@ EOF
     # Set root password to empty / root
     sudo chroot "$stage_dir" /bin/sh -c "echo 'root:root' | chpasswd" 2>/dev/null || true
 
+    # Configure default shell for root to fish
+    echo "/usr/bin/fish" | sudo tee -a "$stage_dir/etc/shells" >/dev/null
+    echo "/bin/fish" | sudo tee -a "$stage_dir/etc/shells" >/dev/null
+    sudo ln -sf /usr/bin/fish "$stage_dir/bin/fish"
+    sudo sed -i 's|root:x:0:0:root:/root:/bin/bash|root:x:0:0:root:/root:/usr/bin/fish|' "$stage_dir/etc/passwd" 2>/dev/null || true
+    sudo sed -i 's|root:x:0:0:root:/root:/bin/sh|root:x:0:0:root:/root:/usr/bin/fish|' "$stage_dir/etc/passwd" 2>/dev/null || true
+
+    # Ensure permissions and line endings for atrios and fish
+    sudo chmod +x "$stage_dir/usr/bin/atrios" "$stage_dir/usr/bin/fish" 2>/dev/null || true
+    if [ -d "$stage_dir/usr/lib/atrios" ]; then
+        sudo chmod -R +x "$stage_dir/usr/lib/atrios" 2>/dev/null || true
+    fi
+    sudo dos2unix "$stage_dir/usr/bin/atrios" "$stage_dir/etc/fish/config.fish" 2>/dev/null || true
+
     # Ensure /etc/securetty allows serial console login
     cat <<EOF | sudo tee -a "$stage_dir/etc/securetty" >/dev/null
 ttyAML0
@@ -99,7 +119,7 @@ EOF
         sudo chroot "$stage_dir" /bin/sh -c "systemctl enable serial-getty@ttyAML0.service" 2>/dev/null || true
     fi
 
-    # Universal /sbin/init & /init wrapper: guarantees instant interactive root console on ttyAML0
+    # Universal /sbin/init & /init wrapper: silences dmesg console spam and launches fish shell on ttyAML0
     cat <<'INITEOF' | sudo tee "$stage_dir/sbin/init" >/dev/null
 #!/bin/sh
 export PATH=/bin:/sbin:/usr/bin:/usr/sbin
@@ -113,6 +133,10 @@ mkdir -p /dev/pts /dev/shm
 mount -t devpts devpts /dev/pts 2>/dev/null || true
 mount -t tmpfs tmpfs /dev/shm 2>/dev/null || true
 
+# Silence kernel console logging so runtime dmesg doesn't pollute the interactive shell
+dmesg -n 1 2>/dev/null || true
+echo 1 > /proc/sys/kernel/printk 2>/dev/null || true
+
 # If systemd is installed, launch it
 if [ -x /lib/systemd/systemd ] && [ ! -f /etc/nosystemd ]; then
     exec /lib/systemd/systemd "$@"
@@ -121,13 +145,24 @@ fi
 # Print banner to console
 cat /etc/issue 2>/dev/null || echo "Welcome to AtriOS-aml!"
 
+# Determine preferred shell (fish > bash > sh)
+if [ -x /usr/bin/fish ]; then
+    DEFAULT_SHELL="/usr/bin/fish"
+elif [ -x /bin/fish ]; then
+    DEFAULT_SHELL="/bin/fish"
+elif [ -x /bin/bash ]; then
+    DEFAULT_SHELL="/bin/bash"
+else
+    DEFAULT_SHELL="/bin/sh"
+fi
+
 # Launch interactive root login shell on ttyAML0
 if [ -x /sbin/agetty ]; then
-    exec /sbin/agetty --autologin root --noclear 115200 ttyAML0 linux
+    exec /sbin/agetty --autologin root --login-program "$DEFAULT_SHELL" --noclear 115200 ttyAML0 linux
 elif [ -x /sbin/getty ]; then
-    exec /sbin/getty -n -l /bin/bash 115200 ttyAML0 linux
+    exec /sbin/getty -n -l "$DEFAULT_SHELL" 115200 ttyAML0 linux
 else
-    exec /bin/bash -l < /dev/ttyAML0 > /dev/ttyAML0 2>&1
+    exec "$DEFAULT_SHELL" -l < /dev/ttyAML0 > /dev/ttyAML0 2>&1
 fi
 INITEOF
     sudo chmod +x "$stage_dir/sbin/init"
@@ -135,13 +170,14 @@ INITEOF
 
     # 4. Install Kernel Modules
     display_alert "INFO" "Installing kernel modules into rootfs..."
-    local kver="7.3.1"
+    local kver="7.3.1-AtriOS-aml"
     local mod_dest="$stage_dir/usr/lib/modules/${kver}"
     sudo mkdir -p "$mod_dest"
     
-    local mod_src="$PROJECT_ROOT/cache/kernel/drivers/atrios"
-    if [ -d "$mod_src" ]; then
-        sudo find "$mod_src" -name "*.ko" -exec cp {} "$mod_dest/" \; 2>/dev/null || true
+    local kernel_cache="$PROJECT_ROOT/cache/kernel"
+    if [ -d "$kernel_cache" ]; then
+        display_alert "INFO" "Running modules_install from kernel tree..."
+        sudo make -C "$kernel_cache" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- INSTALL_MOD_PATH="$stage_dir" modules_install 2>/dev/null || true
     fi
     sudo ln -sf usr/lib/modules "$stage_dir/lib/modules" 2>/dev/null || true
 
@@ -167,6 +203,7 @@ INITEOF
                 "$stage_dir/usr/share/lintian" \
                 "$stage_dir/usr/share/linda" \
                 "$stage_dir/var/cache/apt/archives"/*.deb \
+                "$stage_dir/var/cache/apt"/*.bin \
                 "$stage_dir/var/lib/apt/lists"/* \
                 "$stage_dir/tmp"/* \
                 "$stage_dir/var/tmp"/*
@@ -177,8 +214,8 @@ INITEOF
     # 7. Create ext4 filesystem image
     display_alert "INFO" "Generating ext4 image (${rootfs_img})..."
     rm -f "$rootfs_img"
-    # Sized to 512MB (plenty for micro-debian and update packages)
-    truncate -s 512M "$rootfs_img"
+    # Sized to 1024MB (matches partition 2 size on disk image)
+    truncate -s 1024M "$rootfs_img"
     sudo mke2fs -q -F -t ext4 -L "ROOTFS" -d "$stage_dir" "$rootfs_img" >/dev/null
 
     local final_size="$(stat -c %s "$rootfs_img")"
