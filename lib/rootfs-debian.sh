@@ -189,14 +189,15 @@ fi
 while true; do
     CONSOLE_DEV="ttyAML0"
     [ -e "/dev/$CONSOLE_DEV" ] || CONSOLE_DEV="console"
-    if [ -x /sbin/agetty ]; then
-        /sbin/agetty --autologin root --noclear --local-line 115200 "$CONSOLE_DEV" linux
-    elif [ -x /sbin/getty ]; then
-        /sbin/getty -n -l "$DEFAULT_SHELL" 115200 "$CONSOLE_DEV" linux
-    elif [ -x /usr/bin/setsid ]; then
-        /usr/bin/setsid -c -w "$DEFAULT_SHELL" -l < "/dev/$CONSOLE_DEV" > "/dev/$CONSOLE_DEV" 2>&1
+
+    chmod 666 "/dev/$CONSOLE_DEV" 2>/dev/null || true
+
+    if [ -x /usr/bin/setsid ]; then
+        /usr/bin/setsid -c -w "$DEFAULT_SHELL" -l < "/dev/$CONSOLE_DEV" > "/dev/$CONSOLE_DEV" 2>&1 || \
+        /usr/bin/setsid -c -w /bin/bash -l < "/dev/$CONSOLE_DEV" > "/dev/$CONSOLE_DEV" 2>&1 || \
+        /usr/bin/setsid -c -w /bin/sh -l < "/dev/$CONSOLE_DEV" > "/dev/$CONSOLE_DEV" 2>&1 || true
     else
-        "$DEFAULT_SHELL" -l < "/dev/$CONSOLE_DEV" > "/dev/$CONSOLE_DEV" 2>&1
+        "$DEFAULT_SHELL" -l < "/dev/$CONSOLE_DEV" > "/dev/$CONSOLE_DEV" 2>&1 || true
     fi
     sleep 1
 done
