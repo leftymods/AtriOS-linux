@@ -173,14 +173,21 @@ else
     DEFAULT_SHELL="/bin/sh"
 fi
 
-# Launch interactive root login shell on ttyAML0
-if [ -x /sbin/agetty ]; then
-    exec /sbin/agetty --autologin root --login-program "$DEFAULT_SHELL" --noclear 115200 ttyAML0 linux
-elif [ -x /sbin/getty ]; then
-    exec /sbin/getty -n -l "$DEFAULT_SHELL" 115200 ttyAML0 linux
-else
-    exec "$DEFAULT_SHELL" -l < /dev/ttyAML0 > /dev/ttyAML0 2>&1
-fi
+# Launch interactive root login shell with proper controlling TTY inside a supervisor loop
+while true; do
+    CONSOLE_DEV="ttyAML0"
+    [ -e "/dev/$CONSOLE_DEV" ] || CONSOLE_DEV="console"
+    if [ -x /sbin/agetty ]; then
+        /sbin/agetty --autologin root --noclear --local-line 115200 "$CONSOLE_DEV" linux
+    elif [ -x /sbin/getty ]; then
+        /sbin/getty -n -l "$DEFAULT_SHELL" 115200 "$CONSOLE_DEV" linux
+    elif [ -x /usr/bin/setsid ]; then
+        /usr/bin/setsid -c -w "$DEFAULT_SHELL" -l < "/dev/$CONSOLE_DEV" > "/dev/$CONSOLE_DEV" 2>&1
+    else
+        "$DEFAULT_SHELL" -l < "/dev/$CONSOLE_DEV" > "/dev/$CONSOLE_DEV" 2>&1
+    fi
+    sleep 1
+done
 INITEOF
     sudo chmod +x "$stage_dir/sbin/init"
     sudo ln -sf sbin/init "$stage_dir/init"
