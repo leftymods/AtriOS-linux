@@ -966,6 +966,12 @@ static ssize_t lp_fb_read(struct fb_info *fbi, char __user *buf,
 	return count;
 }
 
+static int lp_fb_cursor(struct fb_info *fbi, struct fb_cursor *cursor)
+{
+	/* Ignore cursor rendering requests from fbcon to prevent screen clipping */
+	return 0;
+}
+
 static struct fb_ops fb_ops = {
 	.owner = THIS_MODULE,
 	.fb_open = lp_fb_open,
@@ -980,6 +986,7 @@ static struct fb_ops fb_ops = {
 	.fb_fillrect = lp_fb_fillrect,
 	.fb_copyarea = lp_fb_copyarea,
 	.fb_imageblit = lp_fb_imageblit,
+	.fb_cursor = lp_fb_cursor,
 };
 
 static int fb_init(struct gowin_priv *priv)

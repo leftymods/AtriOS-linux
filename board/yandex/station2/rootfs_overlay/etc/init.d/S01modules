@@ -30,6 +30,8 @@ case "$1" in
 
     # 2. Rotary knob & sensors
     load_mod rotary-volume
+        load_mod gpio_keypad
+        load_mod quasar_pcba_ids
     load_mod ltr308als01
 
     # 3. Displays: Gowin 25x16 screen & IS31FL32xx LED ring
@@ -40,6 +42,14 @@ case "$1" in
     for t in /sys/class/leds/*ring*/trigger /sys/class/leds/*led_ring*/trigger; do
       [ -f "$t" ] && echo led_ring_fb > "$t" 2>/dev/null || true
     done
+
+    # Disable fbcon cursor/console on screen framebuffer to prevent screen clipping
+    for vt in /sys/class/vtconsole/vtcon*; do
+      if [ -f "$vt/name" ] && grep -q "frame buffer" "$vt/name" 2>/dev/null; then
+        echo 0 > "$vt/bind" 2>/dev/null || true
+      fi
+    done
+    echo 0 > /sys/class/graphics/fbcon/cursor_blink 2>/dev/null || true
 
     # 4. Wireless (Realtek RTL8822CS/ES) - Power up SDIO & BT reset GPIO
     if [ -x /usr/lib/atrios/wifi-power ]; then

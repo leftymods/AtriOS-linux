@@ -196,11 +196,11 @@ static void led_ring_trigger_activate(struct led_classdev *led)
 #endif
 
 	if (strstr(name, "red") || strstr(name, "_r"))
-		color_idx = 0;
+		color_idx = 2;
 	else if (strstr(name, "green") || strstr(name, "_g"))
 		color_idx = 1;
 	else if (strstr(name, "blue") || strstr(name, "_b"))
-		color_idx = 2;
+		color_idx = 0;
 	else {
 		dev_err(led->dev, "[LED_RING] failed to parse led color in '%s'\n", name);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 19, 0)

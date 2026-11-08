@@ -9,6 +9,14 @@ case "$1" in
     echo "3 3 1 3" > /proc/sys/kernel/printk 2>/dev/null || true
     dmesg -n 3 2>/dev/null || true
 
+    # Disable fbcon cursor/console on screen framebuffer to prevent screen clipping
+    for vt in /sys/class/vtconsole/vtcon*; do
+      if [ -f "$vt/name" ] && grep -q "frame buffer" "$vt/name" 2>/dev/null; then
+        echo 0 > "$vt/bind" 2>/dev/null || true
+      fi
+    done
+    echo 0 > /sys/class/graphics/fbcon/cursor_blink 2>/dev/null || true
+
     # Link framebuffers for screen and ring
     for fb in /sys/class/graphics/fb*; do
       if [ -f "$fb/name" ]; then
