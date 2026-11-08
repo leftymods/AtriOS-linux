@@ -1,0 +1,5 @@
+#!/bin/sh
+sync
+[ -x /usr/bin/atrios ] && /usr/bin/atrios ring off 2>/dev/null || true
+[ -e /dev/fb_ring ] && dd if=/dev/zero of=/dev/fb_ring bs=1 count=576 2>/dev/null || true
+python3 -c "import ctypes; libc=ctypes.CDLL('libc.so.6'); libc.sync(); libc.reboot(0x4321fedc)"

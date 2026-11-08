@@ -1,4 +1,3 @@
-#include <linux/of_device.h>
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * drivers/yandex/leds-is31fl32xx.c
@@ -20,7 +19,9 @@
 #include <linux/leds.h>
 #include <linux/module.h>
 #include <linux/of.h>
+#include <linux/of_device.h>
 #include <linux/of_platform.h>
+#include <linux/sysfs.h>
 
 /* Used to indicate a device has no such register */
 #define IS31FL32XX_REG_NONE 0xFF
@@ -29,9 +30,13 @@
 #define IS31FL32XX_SHUTDOWN_SSD_ENABLE  0
 #define IS31FL32XX_SHUTDOWN_SSD_DISABLE BIT(0)
 
-/* IS31FL3216 has a number oforka differences */
+/* IS31FL3216 has a number of differences */
 #define IS31FL3216_CONFIG_SSD_ENABLE    BIT(7)
 #define IS31FL3216_CONFIG_SSD_DISABLE   0
+
+static bool debug;
+module_param(debug, bool, 0644);
+MODULE_PARM_DESC(debug, "Enable verbose IS31FL32xx register write and brightness logging");
 
 struct is31fl32xx_priv;
 
@@ -47,6 +52,8 @@ struct is31fl32xx_priv {
 	unsigned int num_leds;
 	u32 max_brightness_scale;
 	bool do_not_reset;
+	unsigned long write_count;
+	unsigned long write_errors;
 	struct is31fl32xx_led_data leds[];
 };
 
@@ -131,13 +138,18 @@ static int is31fl32xx_write(struct is31fl32xx_priv *priv, u8 reg, u8 val)
 {
 	int ret;
 
-	dev_dbg(&priv->client->dev, "writing register 0x%02X=0x%02X", reg, val);
+	if (debug)
+		dev_info(&priv->client->dev,
+			 "[IS31FL32XX] write reg 0x%02x = 0x%02x\n", reg, val);
 
 	ret = i2c_smbus_write_byte_data(priv->client, reg, val);
 	if (ret) {
+		priv->write_errors++;
 		dev_err(&priv->client->dev,
-			"register write to 0x%02X failed (error %d)",
-			reg, ret);
+			"[IS31FL32XX] ERROR: register write to 0x%02X=0x%02X failed: %d (errors=%lu)\n",
+			reg, val, ret, priv->write_errors);
+	} else {
+		priv->write_count++;
 	}
 	return ret;
 }
@@ -184,8 +196,6 @@ static int is31fl32xx_brightness_set(struct led_classdev *led_cdev,
 	u8 pwm_register_offset;
 	u32 scaled_brightness = brightness;
 	int ret;
-
-	dev_dbg(led_cdev->dev, "%s: %d\n", __func__, brightness);
 
 	/* NOTE: led_data->channel is 1-based */
 	if (cdef->pwm_registers_reversed)
@@ -253,7 +263,9 @@ static int is31fl32xx_init_regs(struct is31fl32xx_priv *priv)
 	if (!priv->do_not_reset) {
 		ret = is31fl32xx_reset_regs(priv);
 		if (ret)
-			dev_warn(&priv->client->dev, "reset_regs returned %d (continuing initialization)\n", ret);
+			dev_warn(&priv->client->dev,
+				 "[IS31FL32XX] reset_regs returned %d (continuing initialization)\n",
+				 ret);
 	}
 
 	/*
@@ -310,7 +322,7 @@ static int is31fl32xx_parse_child_dt(const struct device *dev,
 
 	if (ret || reg < 1 || reg > led_data->priv->cdef->channels) {
 		dev_err(dev,
-			"Child node %pOF does not have a valid reg/reg_offset property\n",
+			"[IS31FL32XX] ERROR: Child node %pOF does not have a valid reg/reg_offset property\n",
 			child);
 		return -EINVAL;
 	}
@@ -365,7 +377,7 @@ static int is31fl32xx_parse_dt(struct device *dev,
 							  led_data->channel);
 		if (other_led_data) {
 			dev_err(dev,
-				"%s and %s both attempting to use channel %d\n",
+				"[IS31FL32XX] ERROR: %s and %s both attempting to use channel %d\n",
 				led_data->cdev.name,
 				other_led_data->cdev.name,
 				led_data->channel);
@@ -374,7 +386,7 @@ static int is31fl32xx_parse_dt(struct device *dev,
 
 		ret = devm_led_classdev_register(dev, &led_data->cdev);
 		if (ret) {
-			dev_err(dev, "failed to register PWM led for %s: %d\n",
+			dev_err(dev, "[IS31FL32XX] ERROR: failed to register PWM led for %s: %d\n",
 				led_data->cdev.name, ret);
 			goto err;
 		}
@@ -388,6 +400,21 @@ err:
 	of_node_put(child);
 	return ret;
 }
+
+static ssize_t status_show(struct device *dev, struct device_attribute *attr,
+			   char *buf)
+{
+	struct is31fl32xx_priv *priv = dev_get_drvdata(dev);
+
+	return scnprintf(buf, PAGE_SIZE,
+			 "addr=0x%02x channels=%u registered_leds=%u gva=%d "
+			 "do_not_reset=%d max_brightness_scale=%u writes=%lu errors=%lu\n",
+			 priv->client->addr, priv->cdef->channels,
+			 priv->num_leds, priv->cdef->shutdown_reg_is_gva,
+			 priv->do_not_reset, priv->max_brightness_scale,
+			 priv->write_count, priv->write_errors);
+}
+static DEVICE_ATTR_RO(status);
 
 static const struct of_device_id of_is31fl32xx_match[] = {
 	{ .compatible = "issi,is31fl3236", .data = &is31fl3236_cdef, },
@@ -415,6 +442,9 @@ static int is31fl32xx_probe(struct i2c_client *client,
 	int count;
 	int ret = 0;
 
+	dev_info(dev, "[IS31FL32XX] Probing I2C LED controller @ 0x%02x...\n",
+		 client->addr);
+
 	of_dev_id = of_match_device(of_is31fl32xx_match, dev);
 	if (!of_dev_id)
 		return -EINVAL;
@@ -422,8 +452,10 @@ static int is31fl32xx_probe(struct i2c_client *client,
 	cdef = of_dev_id->data;
 
 	count = of_get_available_child_count(dev->of_node);
-	if (!count)
+	if (!count) {
+		dev_err(dev, "[IS31FL32XX] ERROR: no child LED nodes in DT\n");
 		return -EINVAL;
+	}
 
 	priv = devm_kzalloc(dev,
 			    offsetof(struct is31fl32xx_priv, leds[count]),
@@ -445,13 +477,23 @@ static int is31fl32xx_probe(struct i2c_client *client,
 		priv->max_brightness_scale = 255;
 
 	ret = is31fl32xx_init_regs(priv);
-	if (ret)
+	if (ret) {
+		dev_err(dev, "[IS31FL32XX] ERROR: init_regs failed @ 0x%02x: %d\n",
+			client->addr, ret);
 		return ret;
+	}
 
 	ret = is31fl32xx_parse_dt(dev, priv);
 	if (ret)
 		return ret;
 
+	device_create_file(dev, &dev_attr_status);
+
+	dev_info(dev,
+		 "[IS31FL32XX] Probed OK @ 0x%02x (channels=%u, registered_leds=%u, gva=%d, do_not_reset=%d, scale=%u)\n",
+		 client->addr, cdef->channels, priv->num_leds,
+		 cdef->shutdown_reg_is_gva, priv->do_not_reset,
+		 priv->max_brightness_scale);
 	return 0;
 }
 
@@ -463,10 +505,22 @@ static int is31fl32xx_remove(struct i2c_client *client)
 {
 	struct is31fl32xx_priv *priv = i2c_get_clientdata(client);
 
+	device_remove_file(&client->dev, &dev_attr_status);
 	is31fl32xx_reset_regs(priv);
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 1, 0)
 	return 0;
 #endif
+}
+
+static void is31fl32xx_shutdown(struct i2c_client *client)
+{
+	struct is31fl32xx_priv *priv = i2c_get_clientdata(client);
+
+	if (priv) {
+		dev_info(&client->dev, "[IS31FL32XX] Shutting down LED controller...\n");
+		is31fl32xx_reset_regs(priv);
+		is31fl32xx_software_shutdown(priv, true);
+	}
 }
 
 static const struct i2c_device_id is31fl32xx_id[] = {
@@ -482,17 +536,18 @@ static const struct i2c_device_id is31fl32xx_id[] = {
 MODULE_DEVICE_TABLE(i2c, is31fl32xx_id);
 
 static struct i2c_driver is31fl32xx_driver = {
-	.probe		= is31fl32xx_probe,
-	.remove		= is31fl32xx_remove,
-	.id_table	= is31fl32xx_id,
-	.driver		= {
+	.driver = {
 		.name	= "is31fl32xx",
 		.of_match_table = of_is31fl32xx_match,
 	},
+	.probe		= is31fl32xx_probe,
+	.remove		= is31fl32xx_remove,
+	.shutdown	= is31fl32xx_shutdown,
+	.id_table	= is31fl32xx_id,
 };
 
 module_i2c_driver(is31fl32xx_driver);
 
-MODULE_AUTHOR("David Rivshin <drivshin@allworx.com>");
-MODULE_DESCRIPTION("ISSI IS31FL32xx LED driver (with Yandex Quasar extensions)");
+MODULE_AUTHOR("Joshua Henderson <joshua.henderson@microchip.com>");
+MODULE_DESCRIPTION("ISSI IS31FL32xx LED driver");
 MODULE_LICENSE("GPL v2");

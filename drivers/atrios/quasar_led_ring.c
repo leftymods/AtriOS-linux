@@ -11,6 +11,7 @@
 #include <linux/list.h>
 #include <linux/mutex.h>
 #include <linux/uaccess.h>
+#include <linux/reboot.h>
 
 #define XRES		24
 #define YRES		24
@@ -291,6 +292,33 @@ static struct led_trigger led_ring_trigger = {
 
 /* ---- Init / Exit ---- */
 
+static int led_ring_reboot_notify(struct notifier_block *nb,
+				  unsigned long action, void *data)
+{
+	struct led_ring_node *node;
+
+	pr_info("[LED_RING] Shutdown/reboot (action=%lu): turning off LED ring\n", action);
+
+	mutex_lock(&ring_priv.list_lock);
+	ring_priv.brightness = 0;
+	if (ring_fb && ring_fb->screen_buffer)
+		memset(ring_fb->screen_buffer, 0, ring_fb->screen_size);
+
+	list_for_each_entry(node, &ring_priv.led_list, list) {
+		int ret = led_set_brightness_sync(node->led, 0);
+		if (ret == -ENOTSUPP)
+			led_set_brightness(node->led, 0);
+	}
+	mutex_unlock(&ring_priv.list_lock);
+
+	return NOTIFY_DONE;
+}
+
+static struct notifier_block led_ring_reboot_nb = {
+	.notifier_call = led_ring_reboot_notify,
+	.priority = 255,
+};
+
 static int __init led_ring_init(void)
 {
 	struct fb_info *info;
@@ -372,6 +400,8 @@ static int __init led_ring_init(void)
 	}
 	pr_info("[LED_RING] Trigger 'led_ring_fb' registered OK\n");
 
+	register_reboot_notifier(&led_ring_reboot_nb);
+
 	return 0;
 
 err_unreg_bl:
@@ -400,6 +430,7 @@ static void __exit led_ring_exit(void)
 	ring_priv.attached_leds = 0;
 	mutex_unlock(&ring_priv.list_lock);
 
+	unregister_reboot_notifier(&led_ring_reboot_nb);
 	unregister_framebuffer(ring_fb);
 	framebuffer_release(ring_fb);
 }
