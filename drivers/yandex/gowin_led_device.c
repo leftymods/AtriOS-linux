@@ -13,12 +13,8 @@
 #include <linux/module.h>
 #include <linux/spi/spi.h>
 #include <linux/of.h>
-#include <linux/of_gpio.h>
 #include <linux/gpio/consumer.h>
 #include <linux/gpio/driver.h>
-#ifndef CONFIG_FB_BACKLIGHT
-#define CONFIG_FB_BACKLIGHT 1
-#endif
 #include <linux/fb.h>
 #include <linux/uaccess.h>
 #include <linux/backlight.h>
@@ -110,6 +106,48 @@ struct gowin_touch_regs {
 	u32 touch_mask;
 };
 
+
+enum gowin_pattern {
+	PATTERN_NONE = 0,
+	PATTERN_GRADIENT_H,
+	PATTERN_GRADIENT_V,
+	PATTERN_GRADIENT_DIAG,
+	PATTERN_SPOTLIGHT,
+	PATTERN_BREATHE,
+	PATTERN_WAVE_H,
+	PATTERN_WAVE_V,
+	PATTERN_CYLON,
+	PATTERN_RAIN,
+	PATTERN_CHECKER,
+};
+
+static const u8 gowin_gamma_lut[256] = {
+	0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   1,   1,   1,   1,
+	1,   1,   1,   1,   2,   2,   2,   2,   2,   2,   3,   3,   3,   3,   4,   4,
+	4,   5,   5,   5,   5,   6,   6,   6,   7,   7,   7,   8,   8,   8,   9,   9,
+	10,  10,  11,  11,  11,  12,  12,  13,  13,  14,  14,  15,  15,  16,  16,  17,
+	18,  18,  19,  19,  20,  21,  21,  22,  23,  23,  24,  25,  25,  26,  27,  28,
+	28,  29,  30,  31,  32,  32,  33,  34,  35,  36,  37,  38,  39,  39,  40,  41,
+	42,  43,  44,  45,  46,  47,  48,  49,  50,  52,  53,  54,  55,  56,  57,  59,
+	60,  61,  62,  64,  65,  66,  67,  69,  70,  71,  73,  74,  75,  77,  78,  80,
+	81,  83,  84,  86,  87,  89,  90,  92,  94,  95,  97,  98, 100, 102, 103, 105,
+	107, 109, 110, 112, 114, 116, 118, 120, 122, 124, 126, 127, 130, 132, 134, 136,
+	138, 140, 142, 145, 147, 149, 151, 154, 156, 158, 161, 163, 166, 168, 170, 173,
+	175, 178, 180, 183, 186, 188, 191, 194, 196, 199, 202, 204, 207, 210, 213, 216,
+	219, 222, 225, 228, 231, 234, 237, 240, 243, 246, 250, 253, 255, 255
+};
+
+static const u8 gowin_sin_table[64] = {
+	128, 140, 152, 165, 176, 188, 198, 208,
+	218, 226, 234, 240, 245, 250, 253, 254,
+	255, 254, 253, 250, 245, 240, 234, 226,
+	218, 208, 198, 188, 176, 165, 152, 140,
+	128, 115, 103,  90,  79,  67,  57,  47,
+	 37,  29,  21,  15,  10,   5,   2,   1,
+	  0,   1,   2,   5,  10,  15,  21,  29,
+	 37,  47,  57,  67,  79,  90, 103, 115
+};
+
 struct gowin_priv {
 	struct spi_device *spi;
 	struct device *dev;
@@ -125,6 +163,12 @@ struct gowin_priv {
 	struct work_struct uart_rx_work;
 	struct timer_list uart_timer;
 	struct delayed_work fb_push_work;
+	struct delayed_work pattern_work;
+	enum gowin_pattern pattern;
+	unsigned int pattern_speed_ms;
+	bool gamma_enabled;
+	u32 pattern_tick;
+	u8 rain_pos[32];
 
 	bool has_gpio;
 	bool has_uart;
@@ -423,8 +467,8 @@ static int lp_gpio_get_value(struct gpio_chip *chip, unsigned int offset)
 	return (priv->gpio_cached >> offset) & 1;
 }
 
-static void lp_gpio_set_value(struct gpio_chip *chip, unsigned int offset,
-			      int value)
+static int lp_gpio_set_value(struct gpio_chip *chip, unsigned int offset,
+			     int value)
 {
 	struct gowin_priv *priv = gpiochip_get_data(chip);
 
@@ -434,6 +478,7 @@ static void lp_gpio_set_value(struct gpio_chip *chip, unsigned int offset,
 		priv->gpio_cached &= ~BIT(offset);
 
 	set_gpio_app_cmd(priv);
+	return 0;
 }
 
 static int lp_gpio_direction_output(struct gpio_chip *chip,
@@ -492,7 +537,7 @@ static void lp_uart_close(struct tty_struct *tty, struct file *filp)
 	tty_port_close(tty->port, tty, filp);
 }
 
-static int lp_uart_write_room(struct tty_struct *tty)
+static unsigned int lp_uart_write_room(struct tty_struct *tty)
 {
 	return GOWIN_TTY_BUF_SIZE;
 }
@@ -717,7 +762,13 @@ static void deinit_touch(struct gowin_priv *priv)
 
 static int lp_fb_sync(struct fb_info *fbi)
 {
-	struct gowin_priv *priv = (struct gowin_priv *)fbi->par;
+	struct gowin_priv *priv = fbi->par;
+
+	if (priv->pattern != PATTERN_NONE) {
+		priv->pattern = PATTERN_NONE;
+		cancel_delayed_work(&priv->pattern_work);
+	}
+
 	const u8 *src = (const u8 *)fbi->screen_buffer;
 	int npixels = priv->width * priv->height;
 	int i, ret;
@@ -736,16 +787,180 @@ static int lp_fb_sync(struct fb_info *fbi)
 			u8 b = src[i * 3 + 0];
 			u8 g = src[i * 3 + 1];
 			u8 r = src[i * 3 + 2];
-			priv->lum_buf[i] = max3(r, g, b);
+			u8 val = max3(r, g, b);
+			priv->lum_buf[i] = priv->gamma_enabled ? gowin_gamma_lut[val] : val;
 		}
 	} else {
-		memcpy(priv->lum_buf, src, npixels);
+		if (priv->gamma_enabled) {
+			for (i = 0; i < npixels; i++)
+				priv->lum_buf[i] = gowin_gamma_lut[src[i]];
+		} else {
+			memcpy(priv->lum_buf, src, npixels);
+		}
 	}
 
 	ret = show_pic_app_cmd_locked(priv, priv->lum_buf);
 	mutex_unlock(&priv->lock);
 
 	return ret;
+}
+
+
+static void gowin_render_pattern(struct gowin_priv *priv)
+{
+	int w = priv->width;
+	int h = priv->height;
+	int npixels = w * h;
+	u8 *buf = priv->lum_buf;
+	u32 tick = priv->pattern_tick;
+	int x, y, i;
+
+	if (!buf || npixels <= 0)
+		return;
+
+	switch (priv->pattern) {
+	case PATTERN_GRADIENT_H:
+		for (y = 0; y < h; y++) {
+			for (x = 0; x < w; x++)
+				buf[y * w + x] = (x * 255) / (w - 1);
+		}
+		break;
+
+	case PATTERN_GRADIENT_V:
+		for (y = 0; y < h; y++) {
+			u8 val = (y * 255) / (h - 1);
+			for (x = 0; x < w; x++)
+				buf[y * w + x] = val;
+		}
+		break;
+
+	case PATTERN_GRADIENT_DIAG:
+		for (y = 0; y < h; y++) {
+			for (x = 0; x < w; x++)
+				buf[y * w + x] = ((x + y) * 255) / (w + h - 2);
+		}
+		break;
+
+	case PATTERN_SPOTLIGHT: {
+		int cx = w / 2;
+		int cy = h / 2;
+		for (y = 0; y < h; y++) {
+			for (x = 0; x < w; x++) {
+				int dx = (x - cx) * 2;
+				int dy = (y - cy) * 3;
+				int d2 = dx * dx + dy * dy;
+				int val = 255 - (d2 * 3) / 4;
+				buf[y * w + x] = (val > 0) ? (u8)val : 0;
+			}
+		}
+		break;
+	}
+
+	case PATTERN_BREATHE: {
+		u8 lum = gowin_sin_table[tick & 63];
+		memset(buf, lum, npixels);
+		break;
+	}
+
+	case PATTERN_WAVE_H:
+		for (x = 0; x < w; x++) {
+			u8 lum = gowin_sin_table[(x * 3 + tick) & 63];
+			for (y = 0; y < h; y++)
+				buf[y * w + x] = lum;
+		}
+		break;
+
+	case PATTERN_WAVE_V:
+		for (y = 0; y < h; y++) {
+			u8 lum = gowin_sin_table[(y * 4 + tick) & 63];
+			for (x = 0; x < w; x++)
+				buf[y * w + x] = lum;
+		}
+		break;
+
+	case PATTERN_CYLON: {
+		int period = (w - 1) * 2;
+		int pos = tick % period;
+		if (pos >= w)
+			pos = period - pos;
+		memset(buf, 0, npixels);
+		for (y = 0; y < h; y++) {
+			buf[y * w + pos] = 255;
+			if (pos > 0)
+				buf[y * w + (pos - 1)] = 80;
+			if (pos < w - 1)
+				buf[y * w + (pos + 1)] = 80;
+			if (pos > 1)
+				buf[y * w + (pos - 2)] = 15;
+			if (pos < w - 2)
+				buf[y * w + (pos + 2)] = 15;
+		}
+		break;
+	}
+
+	case PATTERN_RAIN: {
+		memset(buf, 0, npixels);
+		for (x = 0; x < w; x++) {
+			int head = (priv->rain_pos[x] + (tick * (x % 3 + 1)) / 2) % (h + 8);
+			for (y = 0; y < h; y++) {
+				int dist = head - y;
+				if (dist == 0)
+					buf[y * w + x] = 255;
+				else if (dist == 1)
+					buf[y * w + x] = 160;
+				else if (dist == 2)
+					buf[y * w + x] = 80;
+				else if (dist == 3)
+					buf[y * w + x] = 30;
+				else if (dist == 4)
+					buf[y * w + x] = 10;
+			}
+		}
+		break;
+	}
+
+	case PATTERN_CHECKER:
+		for (y = 0; y < h; y++) {
+			for (x = 0; x < w; x++) {
+				buf[y * w + x] = (((x ^ y) + (tick / 8)) & 1) ? 255 : 0;
+			}
+		}
+		break;
+
+	default:
+		return;
+	}
+
+	if (priv->gamma_enabled) {
+		for (i = 0; i < npixels; i++)
+			buf[i] = gowin_gamma_lut[buf[i]];
+	}
+
+	mutex_lock(&priv->lock);
+	show_pic_app_cmd_locked(priv, buf);
+	mutex_unlock(&priv->lock);
+}
+
+static void gowin_pattern_work_fn(struct work_struct *work)
+{
+	struct gowin_priv *priv = container_of(to_delayed_work(work),
+					       struct gowin_priv,
+					       pattern_work);
+
+	if (priv->pattern == PATTERN_NONE || priv->removed)
+		return;
+
+	priv->pattern_tick++;
+	gowin_render_pattern(priv);
+
+	if (priv->pattern == PATTERN_GRADIENT_H ||
+	    priv->pattern == PATTERN_GRADIENT_V ||
+	    priv->pattern == PATTERN_GRADIENT_DIAG ||
+	    priv->pattern == PATTERN_SPOTLIGHT)
+		return;
+
+	schedule_delayed_work(&priv->pattern_work,
+			      msecs_to_jiffies(priv->pattern_speed_ms ? priv->pattern_speed_ms : 40));
 }
 
 static void lp_fb_push_work_fn(struct work_struct *work)
@@ -926,6 +1141,10 @@ static int fb_init(struct gowin_priv *priv)
 	int ret;
 
 	INIT_DELAYED_WORK(&priv->fb_push_work, lp_fb_push_work_fn);
+	INIT_DELAYED_WORK(&priv->pattern_work, gowin_pattern_work_fn);
+	priv->pattern = PATTERN_NONE;
+	priv->pattern_speed_ms = 40;
+	priv->gamma_enabled = true;
 
 	priv->lum_buf = devm_kzalloc(dev, npixels, GFP_KERNEL);
 	priv->tx_buf = devm_kzalloc(dev, 4 + npixels + 2, GFP_KERNEL);
@@ -981,6 +1200,7 @@ static int fb_init(struct gowin_priv *priv)
 	fbi->pseudo_palette = priv->pseudo_palette;
 	fbi->flags = FBINFO_VIRTFB;
 	fbi->fbops = &fb_ops;
+	fbi->device = dev;
 
 	ret = register_framebuffer(fbi);
 	if (ret) {
@@ -1006,6 +1226,7 @@ err_fb:
 static void fb_exit(struct gowin_priv *priv)
 {
 	cancel_delayed_work_sync(&priv->fb_push_work);
+	cancel_delayed_work_sync(&priv->pattern_work);
 	if (priv->fbi) {
 		unregister_framebuffer(priv->fbi);
 		vfree(priv->fb_mem);
@@ -1085,6 +1306,25 @@ static void backlight_exit(struct gowin_priv *priv)
 /* JTAG -- Gowin FPGA programming                                      */
 /* ------------------------------------------------------------------ */
 
+
+static void set_soc_pinmux_spi(void)
+{
+	void __iomem *reg = ioremap(0xff6346ec, 4);
+	if (reg) {
+		writel(0x30330000, reg);
+		iounmap(reg);
+	}
+}
+
+static void set_soc_pinmux_gpio(void)
+{
+	void __iomem *reg = ioremap(0xff6346ec, 4);
+	if (reg) {
+		writel(0x00000000, reg);
+		iounmap(reg);
+	}
+}
+
 static int select_jtag_mode(struct gowin_priv *priv)
 {
 	struct device *dev = priv->dev;
@@ -1120,21 +1360,15 @@ static int select_jtag_mode(struct gowin_priv *priv)
 	if (priv->jtag_sel)
 		gpiod_set_value_cansleep(priv->jtag_sel, 0);
 
+	set_soc_pinmux_gpio();
 	priv->jtag_mode = true;
 	return 0;
 }
 
+
 static void restore_spi_master_pins(struct spi_device *spi)
 {
-	struct device *mdev = spi->master ? spi->master->dev.parent : NULL;
-
-	if (!mdev)
-		mdev = spi->master ? &spi->master->dev : NULL;
-	if (!mdev)
-		return;
-
-	if (mdev->pins && mdev->pins->p && mdev->pins->default_state)
-		pinctrl_select_state(mdev->pins->p, mdev->pins->default_state);
+	set_soc_pinmux_spi();
 }
 
 static int select_spi_mode(struct gowin_priv *priv)
@@ -1166,6 +1400,7 @@ static int select_spi_mode(struct gowin_priv *priv)
 
 	restore_spi_master_pins(priv->spi);
 
+	set_soc_pinmux_spi();
 	priv->jtag_mode = false;
 	return 0;
 }
@@ -1248,8 +1483,12 @@ static int check_status_code(struct gowin_priv *priv)
 	if (ret)
 		return ret;
 
-	if ((idcode & 0x0fffffff) != 0x0080181b)
+	dev_info(priv->dev, "[GOWIN-JTAG] Read IDCODE=0x%08x\n", idcode);
+
+	if ((idcode & 0x0fffffff) != 0x0080181b && (idcode & 0x0fffffff) != 0x0100381b) {
+		dev_err(priv->dev, "[GOWIN-JTAG] Unknown IDCODE 0x%08x\n", idcode);
 		return -ENODEV;
+	}
 
 	return 0;
 }
@@ -1558,6 +1797,118 @@ static ssize_t press_key_store(struct device *dev,
 }
 
 /* Main group attributes */
+
+static ssize_t pattern_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct gowin_priv *priv = dev_get_drvdata(dev);
+	const char *name = "none";
+
+	switch (priv->pattern) {
+	case PATTERN_GRADIENT_H:    name = "gradient_h"; break;
+	case PATTERN_GRADIENT_V:    name = "gradient_v"; break;
+	case PATTERN_GRADIENT_DIAG: name = "gradient_diag"; break;
+	case PATTERN_SPOTLIGHT:     name = "spotlight"; break;
+	case PATTERN_BREATHE:       name = "breathe"; break;
+	case PATTERN_WAVE_H:        name = "wave_h"; break;
+	case PATTERN_WAVE_V:        name = "wave_v"; break;
+	case PATTERN_CYLON:         name = "cylon"; break;
+	case PATTERN_RAIN:          name = "rain"; break;
+	case PATTERN_CHECKER:       name = "checker"; break;
+	default: break;
+	}
+
+	return sysfs_emit(buf, "%s\n", name);
+}
+
+static ssize_t pattern_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t len)
+{
+	struct gowin_priv *priv = dev_get_drvdata(dev);
+	char mode[32];
+
+	if (sscanf(buf, "%31s", mode) != 1)
+		return -EINVAL;
+
+	cancel_delayed_work_sync(&priv->pattern_work);
+
+	if (!strcmp(mode, "none") || !strcmp(mode, "off") || !strcmp(mode, "0")) {
+		priv->pattern = PATTERN_NONE;
+		lp_fb_sync(priv->fbi);
+	} else if (!strcmp(mode, "gradient_h") || !strcmp(mode, "gradient")) {
+		priv->pattern = PATTERN_GRADIENT_H;
+	} else if (!strcmp(mode, "gradient_v")) {
+		priv->pattern = PATTERN_GRADIENT_V;
+	} else if (!strcmp(mode, "gradient_diag")) {
+		priv->pattern = PATTERN_GRADIENT_DIAG;
+	} else if (!strcmp(mode, "spotlight") || !strcmp(mode, "radial")) {
+		priv->pattern = PATTERN_SPOTLIGHT;
+	} else if (!strcmp(mode, "breathe") || !strcmp(mode, "pulse")) {
+		priv->pattern = PATTERN_BREATHE;
+	} else if (!strcmp(mode, "wave_h") || !strcmp(mode, "wave")) {
+		priv->pattern = PATTERN_WAVE_H;
+	} else if (!strcmp(mode, "wave_v")) {
+		priv->pattern = PATTERN_WAVE_V;
+	} else if (!strcmp(mode, "cylon") || !strcmp(mode, "scanner")) {
+		priv->pattern = PATTERN_CYLON;
+	} else if (!strcmp(mode, "rain")) {
+		priv->pattern = PATTERN_RAIN;
+	} else if (!strcmp(mode, "checker")) {
+		priv->pattern = PATTERN_CHECKER;
+	} else {
+		return -EINVAL;
+	}
+
+	if (priv->pattern != PATTERN_NONE) {
+		priv->pattern_tick = 0;
+		schedule_delayed_work(&priv->pattern_work, 0);
+	}
+
+	return len;
+}
+static DEVICE_ATTR_RW(pattern);
+
+static ssize_t pattern_speed_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct gowin_priv *priv = dev_get_drvdata(dev);
+	return sysfs_emit(buf, "%u\n", priv->pattern_speed_ms);
+}
+
+static ssize_t pattern_speed_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t len)
+{
+	struct gowin_priv *priv = dev_get_drvdata(dev);
+	unsigned int val;
+
+	if (kstrtouint(buf, 0, &val) || val < 1 || val > 1000)
+		return -EINVAL;
+
+	priv->pattern_speed_ms = val;
+	return len;
+}
+static DEVICE_ATTR_RW(pattern_speed);
+
+static ssize_t gamma_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct gowin_priv *priv = dev_get_drvdata(dev);
+	return sysfs_emit(buf, "%d\n", priv->gamma_enabled ? 1 : 0);
+}
+
+static ssize_t gamma_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t len)
+{
+	struct gowin_priv *priv = dev_get_drvdata(dev);
+	bool val;
+
+	if (kstrtobool(buf, &val))
+		return -EINVAL;
+
+	priv->gamma_enabled = val;
+	if (priv->pattern != PATTERN_NONE)
+		schedule_delayed_work(&priv->pattern_work, 0);
+	else if (priv->fbi)
+		lp_fb_sync(priv->fbi);
+
+	return len;
+}
+static DEVICE_ATTR_RW(gamma);
+
 static DEVICE_ATTR_RO(help);
 static DEVICE_ATTR_RO(open_fb_count);
 static DEVICE_ATTR_RO(fw_upd_status);
@@ -1573,6 +1924,9 @@ static DEVICE_ATTR_WO(press_key);
 
 static struct attribute *lp_common_attrs[] = {
 	&dev_attr_help.attr,
+	&dev_attr_pattern.attr,
+	&dev_attr_pattern_speed.attr,
+	&dev_attr_gamma.attr,
 	&dev_attr_open_fb_count.attr,
 	&dev_attr_fw_upd_status.attr,
 	&dev_attr_crc_errors.attr,
