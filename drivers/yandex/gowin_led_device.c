@@ -39,6 +39,14 @@
 #define sysfs_emit(buf, fmt, ...) scnprintf(buf, PAGE_SIZE, fmt, ##__VA_ARGS__)
 #endif
 
+#ifndef FBINFO_VIRTFB
+#define FBINFO_VIRTFB 0
+#endif
+
+static bool debug;
+module_param(debug, bool, 0644);
+MODULE_PARM_DESC(debug, "Enable verbose Gowin FPGA SPI protocol and framebuffer debug logs");
+
 #define GOWIN_DRV_NAME		"led_panel"
 #define GOWIN_FB_NAME_SCREEN	"YNDX LED screen"
 #define GOWIN_FB_NAME_PANEL	"led_panel_fb"
@@ -106,48 +114,6 @@ struct gowin_touch_regs {
 	u32 touch_mask;
 };
 
-
-enum gowin_pattern {
-	PATTERN_NONE = 0,
-	PATTERN_GRADIENT_H,
-	PATTERN_GRADIENT_V,
-	PATTERN_GRADIENT_DIAG,
-	PATTERN_SPOTLIGHT,
-	PATTERN_BREATHE,
-	PATTERN_WAVE_H,
-	PATTERN_WAVE_V,
-	PATTERN_CYLON,
-	PATTERN_RAIN,
-	PATTERN_CHECKER,
-};
-
-static const u8 gowin_gamma_lut[256] = {
-	0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   1,   1,   1,   1,
-	1,   1,   1,   1,   2,   2,   2,   2,   2,   2,   3,   3,   3,   3,   4,   4,
-	4,   5,   5,   5,   5,   6,   6,   6,   7,   7,   7,   8,   8,   8,   9,   9,
-	10,  10,  11,  11,  11,  12,  12,  13,  13,  14,  14,  15,  15,  16,  16,  17,
-	18,  18,  19,  19,  20,  21,  21,  22,  23,  23,  24,  25,  25,  26,  27,  28,
-	28,  29,  30,  31,  32,  32,  33,  34,  35,  36,  37,  38,  39,  39,  40,  41,
-	42,  43,  44,  45,  46,  47,  48,  49,  50,  52,  53,  54,  55,  56,  57,  59,
-	60,  61,  62,  64,  65,  66,  67,  69,  70,  71,  73,  74,  75,  77,  78,  80,
-	81,  83,  84,  86,  87,  89,  90,  92,  94,  95,  97,  98, 100, 102, 103, 105,
-	107, 109, 110, 112, 114, 116, 118, 120, 122, 124, 126, 127, 130, 132, 134, 136,
-	138, 140, 142, 145, 147, 149, 151, 154, 156, 158, 161, 163, 166, 168, 170, 173,
-	175, 178, 180, 183, 186, 188, 191, 194, 196, 199, 202, 204, 207, 210, 213, 216,
-	219, 222, 225, 228, 231, 234, 237, 240, 243, 246, 250, 253, 255, 255
-};
-
-static const u8 gowin_sin_table[64] = {
-	128, 140, 152, 165, 176, 188, 198, 208,
-	218, 226, 234, 240, 245, 250, 253, 254,
-	255, 254, 253, 250, 245, 240, 234, 226,
-	218, 208, 198, 188, 176, 165, 152, 140,
-	128, 115, 103,  90,  79,  67,  57,  47,
-	 37,  29,  21,  15,  10,   5,   2,   1,
-	  0,   1,   2,   5,  10,  15,  21,  29,
-	 37,  47,  57,  67,  79,  90, 103, 115
-};
-
 struct gowin_priv {
 	struct spi_device *spi;
 	struct device *dev;
@@ -163,12 +129,6 @@ struct gowin_priv {
 	struct work_struct uart_rx_work;
 	struct timer_list uart_timer;
 	struct delayed_work fb_push_work;
-	struct delayed_work pattern_work;
-	enum gowin_pattern pattern;
-	unsigned int pattern_speed_ms;
-	bool gamma_enabled;
-	u32 pattern_tick;
-	u8 rain_pos[32];
 
 	bool has_gpio;
 	bool has_uart;
@@ -192,6 +152,7 @@ struct gowin_priv {
 
 	/* Mode */
 	bool jtag_mode;
+	bool tms_from_spi_cs;
 
 	/* Resolution & Firmware info */
 	int width;
@@ -199,6 +160,9 @@ struct gowin_priv {
 	u16 board_rev;
 	u8 fw_version;
 	u16 uf_crc;
+	u8 device_mode;
+	u32 last_usercode;
+	u32 last_status_code;
 
 	/* GPIO virtual chip cached byte */
 	u8 gpio_cached;
@@ -219,9 +183,13 @@ struct gowin_priv {
 	unsigned int frames_in_queue;
 	unsigned int frame_queue_overflows;
 
-	/* CRC errors */
+	/* CRC & protocol statistics */
 	unsigned int crc_errors_master;
 	unsigned int crc_errors_slave;
+	unsigned long frames_pushed;
+	unsigned long spi_tx_errors;
+	u8 last_status_buf[CMD_GET_STATUS_LEN];
+	u32 last_idcode;
 
 	/* Power saving */
 	bool power_saving;
@@ -262,36 +230,67 @@ static int get_lp_status_locked(struct gowin_priv *priv, u8 *status_buf)
 		.len = CMD_GET_STATUS_LEN,
 	};
 	struct spi_message m;
-	int ret;
+	int tries, ret = -EIO;
 
-	spi_message_init(&m);
-	spi_message_add_tail(&t, &m);
-	ret = spi_sync(priv->spi, &m);
-	if (ret)
-		return ret;
+	for (tries = 0; tries < 5; tries++) {
+		if (tries > 0)
+			usleep_range(10, 20);
 
-	if (crc_itu_t(0, rx, CMD_GET_STATUS_LEN) != 0) {
-		priv->crc_errors_master++;
-		return -EBADMSG;
+		memset(rx, 0, CMD_GET_STATUS_LEN);
+		spi_message_init(&m);
+		spi_message_add_tail(&t, &m);
+		ret = spi_sync(priv->spi, &m);
+		if (ret) {
+			priv->spi_tx_errors++;
+			if (debug)
+				dev_err(priv->dev,
+					"[GOWIN] get_lp_status spi_sync failed: %d\n", ret);
+			return ret;
+		}
+
+		memcpy(priv->last_status_buf, rx, CMD_GET_STATUS_LEN);
+
+		if (crc_itu_t(0, rx, CMD_GET_STATUS_LEN) != 0) {
+			priv->crc_errors_master++;
+			if (debug)
+				dev_warn(priv->dev,
+					 "[GOWIN] status CRC error #%u (try %d): rx=%16ph ...\n",
+					 priv->crc_errors_master, tries + 1, rx);
+			ret = -EBADMSG;
+			continue;
+		}
+
+		if (rx[1] != PA_APP_MODE) {
+			if (debug)
+				dev_warn(priv->dev,
+					 "[GOWIN] unexpected mode byte rx[1]=0x%02x (try %d), rx=%16ph\n",
+					 rx[1], tries + 1, rx);
+			ret = -EPROTO;
+			continue;
+		}
+
+		priv->fw_version = rx[2];
+		priv->board_rev = rx[3] | ((u16)rx[4] << 8);
+		priv->uf_crc = rx[5] | ((u16)rx[6] << 8);
+		priv->frame_queue_overflows = rx[7] | ((u32)rx[8] << 8) |
+					      ((u32)rx[9] << 16) | ((u32)rx[10] << 24);
+		priv->crc_errors_slave = rx[11] | ((u32)rx[12] << 8) |
+					 ((u32)rx[13] << 16) | ((u32)rx[14] << 24);
+		priv->frames_in_queue = rx[15];
+		priv->device_mode = rx[17];
+
+		if (rx[16] & ~PA_STATUS_FRM_OVF) {
+			if (debug)
+				dev_warn(priv->dev,
+					 "[GOWIN] slave cmd error flags rx[16]=0x%02x\n",
+					 rx[16]);
+			return -EIO;
+		}
+
+		return 0;
 	}
 
-	if (rx[1] != PA_APP_MODE)
-		return -EPROTO;
-
-	priv->fw_version = rx[2];
-	priv->board_rev = rx[3] | ((u16)rx[4] << 8);
-	priv->uf_crc = rx[13] | ((u16)rx[14] << 8);
-	priv->frames_in_queue = rx[15];
-
-	if (rx[16] & PA_STATUS_FRM_OVF)
-		priv->frame_queue_overflows++;
-	if (rx[16] & PA_STATUS_CRC_ERROR)
-		priv->crc_errors_slave++;
-
-	if (rx[16] & ~PA_STATUS_FRM_OVF)
-		return -EIO;
-
-	return 0;
+	return ret;
 }
 
 static int get_lp_status(struct gowin_priv *priv, u8 *status_buf)
@@ -326,14 +325,20 @@ static int lp_write_locked(struct gowin_priv *priv, u8 *buf, int total_len)
 		spi_message_init(&m);
 		spi_message_add_tail(&t, &m);
 		ret = spi_sync(priv->spi, &m);
-		if (ret)
+		if (ret) {
+			priv->spi_tx_errors++;
 			return ret;
+		}
 
 		ret = get_lp_status_locked(priv, NULL);
 		if (ret == 0)
 			return 0;
 	}
 
+	if (debug)
+		dev_warn(priv->dev,
+			 "[GOWIN] lp_write_locked cmd=0x%02x len=%d failed after 3 tries: %d\n",
+			 buf[0], total_len, ret);
 	return ret;
 }
 
@@ -352,6 +357,7 @@ static int show_pic_app_cmd_locked(struct gowin_priv *priv, const u8 *lum)
 	int npixels = priv->width * priv->height;
 	int total_len = 4 + npixels + 2;
 	u8 *buf = priv->tx_buf;
+	int ret;
 
 	if (!buf)
 		return -ENOMEM;
@@ -362,13 +368,25 @@ static int show_pic_app_cmd_locked(struct gowin_priv *priv, const u8 *lum)
 	buf[3] = (priv->next_frame_delay >> 8) & 0xff;
 	memcpy(buf + 4, lum, npixels);
 
-	return lp_write_locked(priv, buf, total_len);
+	ret = lp_write_locked(priv, buf, total_len);
+	if (ret == 0) {
+		priv->frames_pushed++;
+		if (debug && (priv->frames_pushed % 30 == 1))
+			dev_info(priv->dev,
+				 "[GOWIN] frame #%lu pushed OK (fiq=%u, fqo=%u, crc_m=%u, crc_s=%u)\n",
+				 priv->frames_pushed, priv->frames_in_queue,
+				 priv->frame_queue_overflows,
+				 priv->crc_errors_master, priv->crc_errors_slave);
+	}
+	return ret;
 }
 
 static int set_brightness_app_cmd(struct gowin_priv *priv, unsigned int val)
 {
 	u8 buf[4] = { CMD_SET_BRIGHTNESS, val & 0xff, 0, 0 };
 
+	if (debug)
+		dev_info(priv->dev, "[GOWIN] set_brightness=%u\n", val);
 	return lp_write(priv, buf, sizeof(buf));
 }
 
@@ -468,7 +486,7 @@ static int lp_gpio_get_value(struct gpio_chip *chip, unsigned int offset)
 }
 
 static int lp_gpio_set_value(struct gpio_chip *chip, unsigned int offset,
-			     int value)
+			      int value)
 {
 	struct gowin_priv *priv = gpiochip_get_data(chip);
 
@@ -512,7 +530,7 @@ static int gpio_init(struct gowin_priv *priv)
 
 	ret = gpiochip_add_data(&priv->gpio_chip, priv);
 	if (ret)
-		dev_err(dev, "gpiochip_add_data failed: %d\n", ret);
+		dev_err(dev, "[GOWIN] gpiochip_add_data failed: %d\n", ret);
 
 	return ret;
 }
@@ -537,7 +555,11 @@ static void lp_uart_close(struct tty_struct *tty, struct file *filp)
 	tty_port_close(tty->port, tty, filp);
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 14, 0)
 static unsigned int lp_uart_write_room(struct tty_struct *tty)
+#else
+static int lp_uart_write_room(struct tty_struct *tty)
+#endif
 {
 	return GOWIN_TTY_BUF_SIZE;
 }
@@ -590,7 +612,7 @@ static void lp_uart_poll(unsigned long data)
 #endif
 
 	if (priv->tty_port.tty)
-		schedule_work(&priv->uart_rx_work);
+		queue_work(system_dfl_wq, &priv->uart_rx_work);
 
 	mod_timer(&priv->uart_timer, jiffies + HZ / 10);
 }
@@ -630,7 +652,7 @@ static int uart_init(struct gowin_priv *priv)
 
 	ret = tty_register_driver(priv->tty_drv);
 	if (ret) {
-		dev_err(dev, "tty_register_driver failed: %d\n", ret);
+		dev_err(dev, "[GOWIN] tty_register_driver failed: %d\n", ret);
 		tty_driver_kref_put(priv->tty_drv);
 		tty_port_destroy(&priv->tty_port);
 		return ret;
@@ -643,7 +665,7 @@ static int uart_init(struct gowin_priv *priv)
 #endif
 	mod_timer(&priv->uart_timer, jiffies + HZ / 10);
 
-	dev_info(dev, "uart ttyLP0 initialized\n");
+	dev_info(dev, "[GOWIN] uart ttyLP0 initialized\n");
 	return 0;
 }
 
@@ -677,8 +699,8 @@ static void touch_work(struct work_struct *work)
 	if (ret)
 		return;
 
-	regs.touch_state = status[5];
-	regs.touch_mask = status[6];
+	regs.touch_state = status[18];
+	regs.touch_mask = status[28];
 
 	if (regs.touch_mask) {
 		input_event(priv->touch_dev, EV_KEY, KEY_BACK, 1);
@@ -762,13 +784,7 @@ static void deinit_touch(struct gowin_priv *priv)
 
 static int lp_fb_sync(struct fb_info *fbi)
 {
-	struct gowin_priv *priv = fbi->par;
-
-	if (priv->pattern != PATTERN_NONE) {
-		priv->pattern = PATTERN_NONE;
-		cancel_delayed_work(&priv->pattern_work);
-	}
-
+	struct gowin_priv *priv = (struct gowin_priv *)fbi->par;
 	const u8 *src = (const u8 *)fbi->screen_buffer;
 	int npixels = priv->width * priv->height;
 	int i, ret;
@@ -787,180 +803,16 @@ static int lp_fb_sync(struct fb_info *fbi)
 			u8 b = src[i * 3 + 0];
 			u8 g = src[i * 3 + 1];
 			u8 r = src[i * 3 + 2];
-			u8 val = max3(r, g, b);
-			priv->lum_buf[i] = priv->gamma_enabled ? gowin_gamma_lut[val] : val;
+			priv->lum_buf[i] = max3(r, g, b);
 		}
 	} else {
-		if (priv->gamma_enabled) {
-			for (i = 0; i < npixels; i++)
-				priv->lum_buf[i] = gowin_gamma_lut[src[i]];
-		} else {
-			memcpy(priv->lum_buf, src, npixels);
-		}
+		memcpy(priv->lum_buf, src, npixels);
 	}
 
 	ret = show_pic_app_cmd_locked(priv, priv->lum_buf);
 	mutex_unlock(&priv->lock);
 
 	return ret;
-}
-
-
-static void gowin_render_pattern(struct gowin_priv *priv)
-{
-	int w = priv->width;
-	int h = priv->height;
-	int npixels = w * h;
-	u8 *buf = priv->lum_buf;
-	u32 tick = priv->pattern_tick;
-	int x, y, i;
-
-	if (!buf || npixels <= 0)
-		return;
-
-	switch (priv->pattern) {
-	case PATTERN_GRADIENT_H:
-		for (y = 0; y < h; y++) {
-			for (x = 0; x < w; x++)
-				buf[y * w + x] = (x * 255) / (w - 1);
-		}
-		break;
-
-	case PATTERN_GRADIENT_V:
-		for (y = 0; y < h; y++) {
-			u8 val = (y * 255) / (h - 1);
-			for (x = 0; x < w; x++)
-				buf[y * w + x] = val;
-		}
-		break;
-
-	case PATTERN_GRADIENT_DIAG:
-		for (y = 0; y < h; y++) {
-			for (x = 0; x < w; x++)
-				buf[y * w + x] = ((x + y) * 255) / (w + h - 2);
-		}
-		break;
-
-	case PATTERN_SPOTLIGHT: {
-		int cx = w / 2;
-		int cy = h / 2;
-		for (y = 0; y < h; y++) {
-			for (x = 0; x < w; x++) {
-				int dx = (x - cx) * 2;
-				int dy = (y - cy) * 3;
-				int d2 = dx * dx + dy * dy;
-				int val = 255 - (d2 * 3) / 4;
-				buf[y * w + x] = (val > 0) ? (u8)val : 0;
-			}
-		}
-		break;
-	}
-
-	case PATTERN_BREATHE: {
-		u8 lum = gowin_sin_table[tick & 63];
-		memset(buf, lum, npixels);
-		break;
-	}
-
-	case PATTERN_WAVE_H:
-		for (x = 0; x < w; x++) {
-			u8 lum = gowin_sin_table[(x * 3 + tick) & 63];
-			for (y = 0; y < h; y++)
-				buf[y * w + x] = lum;
-		}
-		break;
-
-	case PATTERN_WAVE_V:
-		for (y = 0; y < h; y++) {
-			u8 lum = gowin_sin_table[(y * 4 + tick) & 63];
-			for (x = 0; x < w; x++)
-				buf[y * w + x] = lum;
-		}
-		break;
-
-	case PATTERN_CYLON: {
-		int period = (w - 1) * 2;
-		int pos = tick % period;
-		if (pos >= w)
-			pos = period - pos;
-		memset(buf, 0, npixels);
-		for (y = 0; y < h; y++) {
-			buf[y * w + pos] = 255;
-			if (pos > 0)
-				buf[y * w + (pos - 1)] = 80;
-			if (pos < w - 1)
-				buf[y * w + (pos + 1)] = 80;
-			if (pos > 1)
-				buf[y * w + (pos - 2)] = 15;
-			if (pos < w - 2)
-				buf[y * w + (pos + 2)] = 15;
-		}
-		break;
-	}
-
-	case PATTERN_RAIN: {
-		memset(buf, 0, npixels);
-		for (x = 0; x < w; x++) {
-			int head = (priv->rain_pos[x] + (tick * (x % 3 + 1)) / 2) % (h + 8);
-			for (y = 0; y < h; y++) {
-				int dist = head - y;
-				if (dist == 0)
-					buf[y * w + x] = 255;
-				else if (dist == 1)
-					buf[y * w + x] = 160;
-				else if (dist == 2)
-					buf[y * w + x] = 80;
-				else if (dist == 3)
-					buf[y * w + x] = 30;
-				else if (dist == 4)
-					buf[y * w + x] = 10;
-			}
-		}
-		break;
-	}
-
-	case PATTERN_CHECKER:
-		for (y = 0; y < h; y++) {
-			for (x = 0; x < w; x++) {
-				buf[y * w + x] = (((x ^ y) + (tick / 8)) & 1) ? 255 : 0;
-			}
-		}
-		break;
-
-	default:
-		return;
-	}
-
-	if (priv->gamma_enabled) {
-		for (i = 0; i < npixels; i++)
-			buf[i] = gowin_gamma_lut[buf[i]];
-	}
-
-	mutex_lock(&priv->lock);
-	show_pic_app_cmd_locked(priv, buf);
-	mutex_unlock(&priv->lock);
-}
-
-static void gowin_pattern_work_fn(struct work_struct *work)
-{
-	struct gowin_priv *priv = container_of(to_delayed_work(work),
-					       struct gowin_priv,
-					       pattern_work);
-
-	if (priv->pattern == PATTERN_NONE || priv->removed)
-		return;
-
-	priv->pattern_tick++;
-	gowin_render_pattern(priv);
-
-	if (priv->pattern == PATTERN_GRADIENT_H ||
-	    priv->pattern == PATTERN_GRADIENT_V ||
-	    priv->pattern == PATTERN_GRADIENT_DIAG ||
-	    priv->pattern == PATTERN_SPOTLIGHT)
-		return;
-
-	schedule_delayed_work(&priv->pattern_work,
-			      msecs_to_jiffies(priv->pattern_speed_ms ? priv->pattern_speed_ms : 40));
 }
 
 static void lp_fb_push_work_fn(struct work_struct *work)
@@ -1076,24 +928,24 @@ static void lp_fb_fillrect(struct fb_info *fbi, const struct fb_fillrect *rect)
 {
 	struct gowin_priv *priv = fbi->par;
 
-	cfb_fillrect(fbi, rect);
-	mod_delayed_work(system_wq, &priv->fb_push_work, msecs_to_jiffies(20));
+	sys_fillrect(fbi, rect);
+	mod_delayed_work(system_dfl_wq, &priv->fb_push_work, msecs_to_jiffies(20));
 }
 
 static void lp_fb_copyarea(struct fb_info *fbi, const struct fb_copyarea *area)
 {
 	struct gowin_priv *priv = fbi->par;
 
-	cfb_copyarea(fbi, area);
-	mod_delayed_work(system_wq, &priv->fb_push_work, msecs_to_jiffies(20));
+	sys_copyarea(fbi, area);
+	mod_delayed_work(system_dfl_wq, &priv->fb_push_work, msecs_to_jiffies(20));
 }
 
 static void lp_fb_imageblit(struct fb_info *fbi, const struct fb_image *image)
 {
 	struct gowin_priv *priv = fbi->par;
 
-	cfb_imageblit(fbi, image);
-	mod_delayed_work(system_wq, &priv->fb_push_work, msecs_to_jiffies(20));
+	sys_imageblit(fbi, image);
+	mod_delayed_work(system_dfl_wq, &priv->fb_push_work, msecs_to_jiffies(20));
 }
 
 static ssize_t lp_fb_read(struct fb_info *fbi, char __user *buf,
@@ -1141,10 +993,6 @@ static int fb_init(struct gowin_priv *priv)
 	int ret;
 
 	INIT_DELAYED_WORK(&priv->fb_push_work, lp_fb_push_work_fn);
-	INIT_DELAYED_WORK(&priv->pattern_work, gowin_pattern_work_fn);
-	priv->pattern = PATTERN_NONE;
-	priv->pattern_speed_ms = 40;
-	priv->gamma_enabled = true;
 
 	priv->lum_buf = devm_kzalloc(dev, npixels, GFP_KERNEL);
 	priv->tx_buf = devm_kzalloc(dev, 4 + npixels + 2, GFP_KERNEL);
@@ -1200,19 +1048,18 @@ static int fb_init(struct gowin_priv *priv)
 	fbi->pseudo_palette = priv->pseudo_palette;
 	fbi->flags = FBINFO_VIRTFB;
 	fbi->fbops = &fb_ops;
-	fbi->device = dev;
 
 	ret = register_framebuffer(fbi);
 	if (ret) {
-		dev_err(dev, "register_framebuffer failed: %d\n", ret);
+		dev_err(dev, "[GOWIN] ERROR: register_framebuffer failed: %d\n", ret);
 		goto err_mem;
 	}
 
 	/* Clear screen on probe so the panel starts blank */
 	lp_fb_sync(fbi);
 
-	dev_info(dev, "registered framebuffer '%s': %dx%d %dbpp\n",
-		 fbi->fix.id, priv->width, priv->height, bpp);
+	dev_info(dev, "[GOWIN] Registered framebuffer fb%d ('%s'): %dx%d %dbpp\n",
+		 fbi->node, fbi->fix.id, priv->width, priv->height, bpp);
 	return 0;
 
 err_mem:
@@ -1226,7 +1073,6 @@ err_fb:
 static void fb_exit(struct gowin_priv *priv)
 {
 	cancel_delayed_work_sync(&priv->fb_push_work);
-	cancel_delayed_work_sync(&priv->pattern_work);
 	if (priv->fbi) {
 		unregister_framebuffer(priv->fbi);
 		vfree(priv->fb_mem);
@@ -1306,23 +1152,44 @@ static void backlight_exit(struct gowin_priv *priv)
 /* JTAG -- Gowin FPGA programming                                      */
 /* ------------------------------------------------------------------ */
 
-
-static void set_soc_pinmux_spi(void)
+static struct device *get_spi_master_dev(struct spi_device *spi)
 {
-	void __iomem *reg = ioremap(0xff6346ec, 4);
-	if (reg) {
-		writel(0x30330000, reg);
-		iounmap(reg);
-	}
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
+	struct device *mdev = spi->controller ? spi->controller->dev.parent : NULL;
+
+	if (!mdev)
+		mdev = spi->controller ? &spi->controller->dev : NULL;
+#else
+	struct device *mdev = spi->master ? spi->master->dev.parent : NULL;
+
+	if (!mdev)
+		mdev = spi->master ? &spi->master->dev : NULL;
+#endif
+	return mdev;
 }
 
-static void set_soc_pinmux_gpio(void)
+static void idle_spi_master_pins(struct spi_device *spi)
 {
-	void __iomem *reg = ioremap(0xff6346ec, 4);
-	if (reg) {
-		writel(0x00000000, reg);
-		iounmap(reg);
-	}
+	struct device *mdev = get_spi_master_dev(spi);
+
+	if (!mdev)
+		return;
+	pinctrl_pm_select_idle_state(mdev);
+}
+
+static void restore_spi_master_pins(struct spi_device *spi)
+{
+	struct device *mdev = get_spi_master_dev(spi);
+
+	if (!mdev)
+		return;
+	pinctrl_pm_select_default_state(mdev);
+}
+
+static inline void jtag_set_tms(struct gowin_priv *priv, int val)
+{
+	if (priv->jtag_tms)
+		gpiod_set_raw_value(priv->jtag_tms, val ? 1 : 0);
 }
 
 static int select_jtag_mode(struct gowin_priv *priv)
@@ -1332,21 +1199,38 @@ static int select_jtag_mode(struct gowin_priv *priv)
 	if (priv->jtag_mode)
 		return 0;
 
+	/* Switch spicc1 pins (GPIOH_4, GPIOH_5, GPIOH_7) to gpio_periphs ("idle" state) */
+	idle_spi_master_pins(priv->spi);
+
 	if (priv->pinctrl && priv->pinctrl_jtag)
 		pinctrl_select_state(priv->pinctrl, priv->pinctrl_jtag);
 
 	priv->jtag_tck = devm_gpiod_get_optional(dev, "jtag_tck", GPIOD_OUT_LOW);
 	priv->jtag_tdi = devm_gpiod_get_optional(dev, "jtag_tdi", GPIOD_OUT_LOW);
-	priv->jtag_tms = devm_gpiod_get_optional(dev, "jtag_tms", GPIOD_OUT_LOW);
 	priv->jtag_tdo = devm_gpiod_get_optional(dev, "jtag_tdo", GPIOD_IN);
+
+	priv->tms_from_spi_cs = false;
+	priv->jtag_tms = devm_gpiod_get_optional(dev, "jtag_tms", GPIOD_OUT_LOW);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
+	if (IS_ERR_OR_NULL(priv->jtag_tms) && spi_get_csgpiod(priv->spi, 0)) {
+		priv->jtag_tms = spi_get_csgpiod(priv->spi, 0);
+		priv->tms_from_spi_cs = true;
+		jtag_set_tms(priv, 0);
+	}
+#endif
 
 	if (IS_ERR_OR_NULL(priv->jtag_tck) || IS_ERR_OR_NULL(priv->jtag_tdi) ||
 	    IS_ERR_OR_NULL(priv->jtag_tms) || IS_ERR_OR_NULL(priv->jtag_tdo)) {
+		dev_err(dev, "[GOWIN-JTAG] Failed to get JTAG GPIOs: tck=%d, tdi=%d, tms=%d, tdo=%d\n",
+			PTR_ERR_OR_ZERO(priv->jtag_tck),
+			PTR_ERR_OR_ZERO(priv->jtag_tdi),
+			PTR_ERR_OR_ZERO(priv->jtag_tms),
+			PTR_ERR_OR_ZERO(priv->jtag_tdo));
 		if (!IS_ERR_OR_NULL(priv->jtag_tck))
 			devm_gpiod_put(dev, priv->jtag_tck);
 		if (!IS_ERR_OR_NULL(priv->jtag_tdi))
 			devm_gpiod_put(dev, priv->jtag_tdi);
-		if (!IS_ERR_OR_NULL(priv->jtag_tms))
+		if (!priv->tms_from_spi_cs && !IS_ERR_OR_NULL(priv->jtag_tms))
 			devm_gpiod_put(dev, priv->jtag_tms);
 		if (!IS_ERR_OR_NULL(priv->jtag_tdo))
 			devm_gpiod_put(dev, priv->jtag_tdo);
@@ -1354,21 +1238,19 @@ static int select_jtag_mode(struct gowin_priv *priv)
 		priv->jtag_tdi = NULL;
 		priv->jtag_tms = NULL;
 		priv->jtag_tdo = NULL;
+		priv->tms_from_spi_cs = false;
+		restore_spi_master_pins(priv->spi);
 		return -ENODEV;
 	}
 
 	if (priv->jtag_sel)
 		gpiod_set_value_cansleep(priv->jtag_sel, 0);
 
-	set_soc_pinmux_gpio();
+	dev_info(dev, "[GOWIN-JTAG] JTAG mode enabled (tck=hw:%d, tdi=hw:%d, tdo=hw:%d, tms=hw:%d)\n",
+		 desc_to_gpio(priv->jtag_tck), desc_to_gpio(priv->jtag_tdi),
+		 desc_to_gpio(priv->jtag_tdo), desc_to_gpio(priv->jtag_tms));
 	priv->jtag_mode = true;
 	return 0;
-}
-
-
-static void restore_spi_master_pins(struct spi_device *spi)
-{
-	set_soc_pinmux_spi();
 }
 
 static int select_spi_mode(struct gowin_priv *priv)
@@ -1384,8 +1266,12 @@ static int select_spi_mode(struct gowin_priv *priv)
 		priv->jtag_tdi = NULL;
 	}
 	if (priv->jtag_tms) {
-		devm_gpiod_put(dev, priv->jtag_tms);
+		/* Leave physical CS pin HIGH (inactive) for SPI mode */
+		jtag_set_tms(priv, 1);
+		if (!priv->tms_from_spi_cs)
+			devm_gpiod_put(dev, priv->jtag_tms);
 		priv->jtag_tms = NULL;
+		priv->tms_from_spi_cs = false;
 	}
 	if (priv->jtag_tdo) {
 		devm_gpiod_put(dev, priv->jtag_tdo);
@@ -1400,125 +1286,279 @@ static int select_spi_mode(struct gowin_priv *priv)
 
 	restore_spi_master_pins(priv->spi);
 
-	set_soc_pinmux_spi();
 	priv->jtag_mode = false;
 	return 0;
 }
 
-static void jtag_write(struct gowin_priv *priv, const u8 *data, int len)
+static inline void jtag_pulse_tck(struct gowin_priv *priv)
 {
-	int i, bit;
-
-	for (i = 0; i < len; i++) {
-		for (bit = 7; bit >= 0; bit--) {
-			gpiod_set_value(priv->jtag_tdi, (data[i] >> bit) & 1);
-			gpiod_set_value(priv->jtag_tck, 0);
-			ndelay(50);
-			gpiod_set_value(priv->jtag_tck, 1);
-			ndelay(50);
-		}
-	}
+	gpiod_set_value(priv->jtag_tck, 0);
+	ndelay(100);
+	gpiod_set_value(priv->jtag_tck, 1);
+	ndelay(100);
 }
 
-static void jtag_update_tms(struct gowin_priv *priv, u8 tms)
+static inline void jtag_pulse_tck_n(struct gowin_priv *priv, unsigned int count)
+{
+	while (count--)
+		jtag_pulse_tck(priv);
+}
+
+static void jtag_update_tms(struct gowin_priv *priv, u8 tms_bit)
+{
+	jtag_set_tms(priv, tms_bit & 1);
+	jtag_pulse_tck(priv);
+}
+
+/*
+ * Exact Gowin JTAG TAP state transitions from gowin_led_device.ko (0x3828):
+ *   16 = TEST_LOGIC_RESET
+ *    1 = RUN_TEST_IDLE
+ *    4 = SHIFT_DR
+ *    5 = EXIT1_DR
+ *   11 = SHIFT_IR
+ *   12 = EXIT1_IR
+ */
+static void jtag_tap_move(struct gowin_priv *priv, u8 from_state, u8 to_state)
 {
 	int i;
 
-	for (i = 7; i >= 0; i--) {
-		gpiod_set_value(priv->jtag_tms, (tms >> i) & 1);
-		gpiod_set_value(priv->jtag_tck, 0);
-		ndelay(50);
-		gpiod_set_value(priv->jtag_tck, 1);
-		ndelay(50);
+	if (from_state == 16 && to_state == 1) {
+		for (i = 0; i < 8; i++)
+			jtag_update_tms(priv, 1);
+		jtag_update_tms(priv, 0);
+		jtag_update_tms(priv, 0);
+	} else if (from_state == 1 && to_state == 1) {
+		for (i = 0; i < 3; i++)
+			jtag_update_tms(priv, 0);
+	} else if (from_state == 1 && to_state == 11) {
+		jtag_update_tms(priv, 1);
+		jtag_update_tms(priv, 1);
+		jtag_update_tms(priv, 0);
+		jtag_update_tms(priv, 0);
+	} else if (from_state == 1 && to_state == 4) {
+		jtag_update_tms(priv, 1);
+		jtag_update_tms(priv, 0);
+		jtag_update_tms(priv, 0);
+	} else if ((from_state == 12 && to_state == 1) ||
+		   (from_state == 5 && to_state == 1)) {
+		jtag_update_tms(priv, 1);
+		jtag_update_tms(priv, 0);
+		jtag_update_tms(priv, 0);
 	}
 }
 
-static void jtag_tap_move(struct gowin_priv *priv, u8 state)
+static void jtag_write_byte(struct gowin_priv *priv, u8 byte, u8 exit_tms)
 {
-	switch (state) {
-	case 0: jtag_update_tms(priv, 0x7f); break;
-	case 1: jtag_update_tms(priv, 0x00); break;
-	case 2: jtag_update_tms(priv, 0x03); break;
-	case 3: jtag_update_tms(priv, 0x01); break;
-	case 4: jtag_update_tms(priv, 0x07); break;
-	default: break;
+	int bit;
+
+	jtag_set_tms(priv, 0);
+	for (bit = 0; bit < 8; bit++) {
+		gpiod_set_value(priv->jtag_tdi, (byte >> bit) & 1);
+		if (bit == 7)
+			jtag_set_tms(priv, exit_tms & 1);
+		jtag_pulse_tck(priv);
 	}
 }
 
 static void jtag_write_inst(struct gowin_priv *priv, u8 inst)
 {
-	jtag_tap_move(priv, 3);
-	jtag_write(priv, &inst, 1);
-	jtag_tap_move(priv, 2);
+	jtag_tap_move(priv, 1, 11);
+	jtag_write_byte(priv, inst, 1);
+	jtag_tap_move(priv, 12, 1);
+	jtag_tap_move(priv, 1, 1);
+	jtag_tap_move(priv, 1, 1);
+	jtag_tap_move(priv, 1, 1);
 }
 
-static int jtag_read_code(struct gowin_priv *priv, u32 *code)
+static u32 jtag_read_code(struct gowin_priv *priv, u8 inst)
 {
 	u32 val = 0;
 	int i, bit;
 
-	jtag_tap_move(priv, 4);
-	jtag_tap_move(priv, 1);
+	jtag_write_inst(priv, inst);
+	jtag_tap_move(priv, 1, 4);
+	jtag_set_tms(priv, 0);
 
 	for (i = 0; i < 32; i++) {
-		gpiod_set_value(priv->jtag_tck, 0);
-		ndelay(50);
+		if (i == 31)
+			jtag_set_tms(priv, 1);
+		jtag_pulse_tck(priv);
 		bit = gpiod_get_value(priv->jtag_tdo);
 		val |= (u32)(bit & 1) << i;
-		gpiod_set_value(priv->jtag_tck, 1);
-		ndelay(50);
 	}
 
-	jtag_tap_move(priv, 2);
-	*code = val;
+	jtag_tap_move(priv, 5, 1);
+	if (inst == 0x11)
+		priv->last_idcode = val;
+	else if (inst == 0x13)
+		priv->last_usercode = val;
+	else if (inst == 0x41)
+		priv->last_status_code = val;
+
+	return val;
+}
+
+static int check_status_code(struct gowin_priv *priv, u32 status)
+{
+	if ((status & 0xfffdffff) != 0x00019020) {
+		dev_info(priv->dev,
+			"[GOWIN-JTAG] status code: 0x%08x (SRAM erase required)\n",
+			status);
+		return -EPROTO;
+	}
 	return 0;
 }
 
-static int check_status_code(struct gowin_priv *priv)
+static int jtag_erase_flash(struct gowin_priv *priv)
 {
-	u32 idcode;
-	int ret;
+	u32 status;
+	int i;
 
-	ret = jtag_read_code(priv, &idcode);
-	if (ret)
-		return ret;
+	jtag_tap_move(priv, 16, 1);
+	status = jtag_read_code(priv, 0x41);
+	if (check_status_code(priv, status) != 0) {
+		jtag_write_inst(priv, 0x11);
+		jtag_write_inst(priv, 0x15);
+		jtag_write_inst(priv, 0x05);
+		for (i = 0; i < 4000; i++)
+			jtag_update_tms(priv, 0);
+		jtag_write_inst(priv, 0x09);
+		jtag_write_inst(priv, 0x02);
+		jtag_write_inst(priv, 0x3a);
+		jtag_write_inst(priv, 0x02);
+		for (i = 0; i < 1000; i++)
+			jtag_update_tms(priv, 0);
+		status = jtag_read_code(priv, 0x41);
+	}
 
-	dev_info(priv->dev, "[GOWIN-JTAG] Read IDCODE=0x%08x\n", idcode);
+	dev_info(priv->dev, "[GOWIN-JTAG] Erasing FPGA flash (status=0x%08x)...\n", status);
+	jtag_write_inst(priv, 0x11);
+	jtag_write_inst(priv, 0x15);
+	jtag_write_inst(priv, 0x75);
+	for (i = 0; i < 6; i++)
+		jtag_update_tms(priv, 0);
+	jtag_tap_move(priv, 1, 4);
+	for (i = 0; i < 7; i++)
+		jtag_update_tms(priv, 0);
+	jtag_update_tms(priv, 1);
+	jtag_update_tms(priv, 0);
+	for (i = 0; i < 16; i++)
+		jtag_update_tms(priv, 0);
+	jtag_update_tms(priv, 1);
+	jtag_update_tms(priv, 0);
+	jtag_update_tms(priv, 1);
+	jtag_update_tms(priv, 1);
+	for (i = 0; i < 4; i++)
+		jtag_update_tms(priv, 0);
 
-	if ((idcode & 0x0fffffff) != 0x0080181b && (idcode & 0x0fffffff) != 0x0100381b) {
-		dev_err(priv->dev, "[GOWIN-JTAG] Unknown IDCODE 0x%08x\n", idcode);
+	jtag_pulse_tck_n(priv, 320000);
+	jtag_write_inst(priv, 0x3a);
+	jtag_write_inst(priv, 0x02);
+	msleep(200);
+	jtag_write_inst(priv, 0x11);
+	jtag_write_inst(priv, 0x3c);
+	jtag_write_inst(priv, 0x02);
+	msleep(200);
+
+	status = jtag_read_code(priv, 0x41);
+	if (status & 0x0f) {
+		dev_err(priv->dev, "[GOWIN-JTAG] Flash erase failed: status=0x%08x (error bits set)\n", status);
+		return -EPROTO;
+	}
+	dev_info(priv->dev, "[GOWIN-JTAG] Flash erase verified OK (status=0x%08x)\n", status);
+	return 0;
+}
+
+static int jtag_prog_fpga(struct gowin_priv *priv, const struct firmware *fw,
+			  u32 expected_user_code)
+{
+	size_t aligned_len = ALIGN(fw->size, 256);
+	size_t num_pages = aligned_len / 256;
+	size_t page, offset;
+	u8 *buf;
+	u32 idcode, usercode;
+	int i, bit;
+
+	jtag_tap_move(priv, 16, 1);
+	idcode = jtag_read_code(priv, 0x11);
+	dev_info(priv->dev, "[GOWIN-JTAG] Programming FPGA (%zu bytes, IDCODE=0x%08x)...\n",
+		 aligned_len, idcode);
+	if (idcode == 0 || idcode == 0xffffffff) {
+		dev_err(priv->dev, "[GOWIN-JTAG] Invalid IDCODE 0x%08x, aborting\n", idcode);
 		return -ENODEV;
 	}
 
-	return 0;
-}
+	buf = kmalloc(aligned_len, GFP_KERNEL);
+	if (!buf)
+		return -ENOMEM;
 
-static int jtag_prog_fpga(struct gowin_priv *priv, const struct firmware *fw)
-{
-	const u8 *data = fw->data;
-	int len = fw->size;
-	int offset = 0;
+	memset(buf, 0xff, aligned_len);
+	memcpy(buf, fw->data, fw->size);
+	buf[0] = 'G';
+	buf[1] = 'W';
+	buf[2] = '1';
+	buf[3] = 'N';
 
-	jtag_tap_move(priv, 0);
-	msleep(10);
+	jtag_write_inst(priv, 0x15);
+	for (i = 0; i < 4000; i++)
+		jtag_update_tms(priv, 0);
 
-	jtag_write_inst(priv, 0x06);
-	msleep(1);
+	for (page = 0; page < num_pages; page++) {
+		const u8 *p = buf + page * 256;
 
-	while (len > 0) {
-		int chunk = min(len, 256);
-		jtag_write(priv, data + offset, chunk);
-		offset += chunk;
-		len -= chunk;
+		jtag_write_inst(priv, 0x15);
+		jtag_write_inst(priv, 0x71);
+		if (page > 0)
+			jtag_pulse_tck_n(priv, 16);
+
+		jtag_tap_move(priv, 1, 4);
+		for (i = 0; i < 6; i++) {
+			gpiod_set_value(priv->jtag_tdi, 0);
+			jtag_pulse_tck(priv);
+		}
+		for (bit = 0; bit < 26; bit++) {
+			gpiod_set_value(priv->jtag_tdi, (page >> bit) & 1);
+			if (bit == 25)
+				jtag_set_tms(priv, 1);
+			jtag_pulse_tck(priv);
+		}
+		jtag_tap_move(priv, 5, 1);
+		jtag_pulse_tck_n(priv, 360);
+
+		for (offset = 0; offset < 256; offset += 4) {
+			jtag_tap_move(priv, 1, 4);
+			jtag_write_byte(priv, p[offset + 3], 0);
+			jtag_write_byte(priv, p[offset + 2], 0);
+			jtag_write_byte(priv, p[offset + 1], 0);
+			jtag_write_byte(priv, p[offset + 0], 1);
+			jtag_tap_move(priv, 5, 1);
+			jtag_tap_move(priv, 1, 1);
+			jtag_tap_move(priv, 1, 1);
+			jtag_tap_move(priv, 1, 1);
+			jtag_pulse_tck_n(priv, 24);
+		}
+		jtag_pulse_tck_n(priv, 14);
 	}
 
+	jtag_write_inst(priv, 0x3a);
 	jtag_write_inst(priv, 0x02);
-	msleep(100);
+	for (i = 0; i < 300; i++)
+		jtag_update_tms(priv, 0);
+	jtag_write_inst(priv, 0x11);
+	jtag_write_inst(priv, 0x3c);
+	jtag_write_inst(priv, 0x02);
+	msleep(300);
+	kfree(buf);
 
-	if (check_status_code(priv))
-		return -EIO;
+	usercode = jtag_read_code(priv, 0x13);
+	dev_info(priv->dev, "[GOWIN-JTAG] Post-program USERCODE=0x%08x (expected 0x%08x)\n",
+		 usercode, expected_user_code);
+	if (expected_user_code && usercode != expected_user_code) {
+		dev_warn(priv->dev, "[GOWIN-JTAG] USERCODE mismatch: actual=0x%08x expected=0x%08x (proceeding)\n",
+			 usercode, expected_user_code);
+	}
 
-	jtag_tap_move(priv, 4);
 	return 0;
 }
 
@@ -1538,7 +1578,7 @@ static void fpga_hw_reset(struct gowin_priv *priv)
 }
 
 static int lp_update_firmware(struct gowin_priv *priv,
-			      const struct firmware *fw)
+			      const struct firmware *fw, u32 expected_user_code)
 {
 	int ret;
 
@@ -1547,7 +1587,11 @@ static int lp_update_firmware(struct gowin_priv *priv,
 		return ret;
 
 	fpga_hw_reset(priv);
-	ret = jtag_prog_fpga(priv, fw);
+	ret = jtag_erase_flash(priv);
+	if (ret == 0) {
+		msleep(200);
+		ret = jtag_prog_fpga(priv, fw, expected_user_code);
+	}
 
 	select_spi_mode(priv);
 	return ret;
@@ -1556,52 +1600,101 @@ static int lp_update_firmware(struct gowin_priv *priv,
 static int lp_handle_firmware_update(struct gowin_priv *priv)
 {
 	const char *fw_name;
-	const struct firmware *fw;
+	const char *manifest_name;
+	const struct firmware *fw = NULL;
+	const struct firmware *manifest_fw = NULL;
+	u8 manifest_ver = 0, force_upd = 0;
+	u16 manifest_crc = 0, manifest_uf_crc = 0;
+	u32 manifest_user_code = 0;
 	int ret;
 
-	/* First check if FPGA is already running in PA application mode */
+	if (priv->dev_type == LED_PANEL) {
+		fw_name = "yandex_led_panel.bin";
+		manifest_name = "yandex_led_panel.bin.manifest";
+	} else {
+		fw_name = "yandex_led_screen_fpga.bin";
+		manifest_name = "yandex_led_screen_fpga.bin.manifest";
+	}
+
+	if (request_firmware(&manifest_fw, manifest_name, priv->dev) == 0 &&
+	    manifest_fw && manifest_fw->data) {
+		char mbuf[128];
+		size_t mlen = min_t(size_t, manifest_fw->size, sizeof(mbuf) - 1);
+
+		memcpy(mbuf, manifest_fw->data, mlen);
+		mbuf[mlen] = '\0';
+		sscanf(mbuf,
+		       "fw_version = %hhu\ncrc16 = %hx\nuser_code = %x\nuf_crc16 = %hx\nforce_upd = %hhu",
+		       &manifest_ver, &manifest_crc, &manifest_user_code,
+		       &manifest_uf_crc, &force_upd);
+		release_firmware(manifest_fw);
+	}
+
+	/*
+	 * Call get_lp_status twice just like vendor gowin_led_device.ko (0x2a10/0x2a1c):
+	 * the first SPI transfer wakes/syncs the slave state machine.
+	 */
+	get_lp_status(priv, NULL);
 	ret = get_lp_status(priv, NULL);
-	if (ret == 0) {
+	dev_info(priv->dev, "[GOWIN] Initial check: get_lp_status ret=%d (board_rev=%u, fw_version=%u, uf_crc=0x%04x)\n",
+		 ret, priv->board_rev, priv->fw_version, priv->uf_crc);
+
+	if (ret == 0 && priv->fw_version > 0 && !force_upd &&
+	    (manifest_ver == 0 || priv->fw_version >= manifest_ver)) {
 		snprintf(priv->fw_upd_status, sizeof(priv->fw_upd_status),
 			 "ok: running (board_rev=%u fw_version=%u uf_crc=0x%04x)",
 			 priv->board_rev, priv->fw_version, priv->uf_crc);
+		dev_info(priv->dev, "[GOWIN] FPGA already running valid firmware (version %u)\n", priv->fw_version);
 		return 0;
 	}
 
 	/* Try hardware reset once before attempting JTAG flash */
+	dev_info(priv->dev, "[GOWIN] Resetting FPGA to probe status...\n");
 	fpga_hw_reset(priv);
+	get_lp_status(priv, NULL);
 	ret = get_lp_status(priv, NULL);
-	if (ret == 0) {
+	dev_info(priv->dev, "[GOWIN] Post-reset check: get_lp_status ret=%d (board_rev=%u, fw_version=%u, uf_crc=0x%04x)\n",
+		 ret, priv->board_rev, priv->fw_version, priv->uf_crc);
+
+	if (ret == 0 && priv->fw_version > 0 && !force_upd &&
+	    (manifest_ver == 0 || priv->fw_version >= manifest_ver)) {
 		snprintf(priv->fw_upd_status, sizeof(priv->fw_upd_status),
 			 "ok: reset (board_rev=%u fw_version=%u uf_crc=0x%04x)",
 			 priv->board_rev, priv->fw_version, priv->uf_crc);
+		dev_info(priv->dev, "[GOWIN] FPGA operational after reset (version %u)\n", priv->fw_version);
 		return 0;
 	}
 
-	if (priv->dev_type == LED_PANEL)
-		fw_name = "yandex_led_panel.bin";
-	else
-		fw_name = "yandex_led_screen_fpga.bin";
-
+	dev_info(priv->dev, "[GOWIN] Requesting firmware bitstream '%s'...\n", fw_name);
 	ret = request_firmware(&fw, fw_name, priv->dev);
 	if (ret) {
 		snprintf(priv->fw_upd_status, sizeof(priv->fw_upd_status),
 			 "fw not found: %s (status=%d)", fw_name, ret);
+		dev_err(priv->dev, "[GOWIN] request_firmware('%s') failed: %d\n", fw_name, ret);
 		return ret;
 	}
 
 	snprintf(priv->fw_upd_status, sizeof(priv->fw_upd_status),
 		 "flashing %s (%zu bytes)", fw_name, fw->size);
+	dev_info(priv->dev, "[GOWIN] Firmware '%s' loaded (%zu bytes). Flashing via JTAG...\n",
+		 fw_name, fw->size);
 
-	ret = lp_update_firmware(priv, fw);
+	ret = lp_update_firmware(priv, fw, manifest_user_code);
 	release_firmware(fw);
 
 	if (ret) {
 		snprintf(priv->fw_upd_status, sizeof(priv->fw_upd_status),
 			 "flash failed: %d", ret);
+		dev_err(priv->dev, "[GOWIN] Firmware flash failed with error %d\n", ret);
 	} else {
 		snprintf(priv->fw_upd_status, sizeof(priv->fw_upd_status),
 			 "ok: %s programmed", fw_name);
+		dev_info(priv->dev, "[GOWIN] Firmware flash complete! Probing new status...\n");
+		msleep(100);
+		get_lp_status(priv, NULL);
+		get_lp_status(priv, NULL);
+		dev_info(priv->dev, "[GOWIN] Final status: board_rev=%u, fw_version=%u, uf_crc=0x%04x\n",
+			 priv->board_rev, priv->fw_version, priv->uf_crc);
 	}
 
 	return ret;
@@ -1624,7 +1717,7 @@ static ssize_t help_show(struct device *dev,
 		"gpio_mode            - (rw) jtag|spi\n"
 		"frame_queue_overflows- frame queue overflow count\n"
 		"next_frame_delay     - (rw) frame delay\n"
-		"show_debug_info      - touch debug registers\n"
+		"show_debug_info      - full live hardware & SPI status\n"
 		"frames_in_queue      - frames in queue\n"
 		"press_key            - (wo) keycode to send\n"
 		"jtag/jtag_reconfig   - (rw) JTAG reconfig pin\n"
@@ -1758,10 +1851,27 @@ static ssize_t show_debug_info_show(struct device *dev,
 				    char *buf)
 {
 	struct gowin_priv *priv = dev_get_drvdata(dev);
-	get_lp_status(priv, NULL);
-	return sysfs_emit(buf, "board_rev=%u fw_version=%u uf_crc=0x%04x fiq=%u fqo=%u\n",
+	int st_ret = get_lp_status(priv, NULL);
+
+	return sysfs_emit(buf,
+			  "status_ret=%d mode=%s fw_upd_status=\"%s\"\n"
+			  "board_rev=%u fw_version=%u uf_crc=0x%04x last_idcode=0x%08x\n"
+			  "frames_pushed=%lu fiq=%u fqo=%u crc_master=%u crc_slave=%u spi_err=%lu\n"
+			  "brightness=%u/%u reset_gpio=hw:%d jtag_sel_gpio=hw:%d reconfig_gpio=hw:%d\n"
+			  "last_rx=%16ph\n",
+			  st_ret, priv->jtag_mode ? "jtag" : "spi",
+			  priv->fw_upd_status,
 			  priv->board_rev, priv->fw_version, priv->uf_crc,
-			  priv->frames_in_queue, priv->frame_queue_overflows);
+			  priv->last_idcode,
+			  priv->frames_pushed, priv->frames_in_queue,
+			  priv->frame_queue_overflows,
+			  priv->crc_errors_master, priv->crc_errors_slave,
+			  priv->spi_tx_errors,
+			  priv->brightness, priv->max_brightness,
+			  priv->reset_gpio ? desc_to_gpio(priv->reset_gpio) : -1,
+			  priv->jtag_sel ? desc_to_gpio(priv->jtag_sel) : -1,
+			  priv->jtag_reconfig ? desc_to_gpio(priv->jtag_reconfig) : -1,
+			  priv->last_status_buf);
 }
 
 static ssize_t frames_in_queue_show(struct device *dev,
@@ -1797,118 +1907,6 @@ static ssize_t press_key_store(struct device *dev,
 }
 
 /* Main group attributes */
-
-static ssize_t pattern_show(struct device *dev, struct device_attribute *attr, char *buf)
-{
-	struct gowin_priv *priv = dev_get_drvdata(dev);
-	const char *name = "none";
-
-	switch (priv->pattern) {
-	case PATTERN_GRADIENT_H:    name = "gradient_h"; break;
-	case PATTERN_GRADIENT_V:    name = "gradient_v"; break;
-	case PATTERN_GRADIENT_DIAG: name = "gradient_diag"; break;
-	case PATTERN_SPOTLIGHT:     name = "spotlight"; break;
-	case PATTERN_BREATHE:       name = "breathe"; break;
-	case PATTERN_WAVE_H:        name = "wave_h"; break;
-	case PATTERN_WAVE_V:        name = "wave_v"; break;
-	case PATTERN_CYLON:         name = "cylon"; break;
-	case PATTERN_RAIN:          name = "rain"; break;
-	case PATTERN_CHECKER:       name = "checker"; break;
-	default: break;
-	}
-
-	return sysfs_emit(buf, "%s\n", name);
-}
-
-static ssize_t pattern_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t len)
-{
-	struct gowin_priv *priv = dev_get_drvdata(dev);
-	char mode[32];
-
-	if (sscanf(buf, "%31s", mode) != 1)
-		return -EINVAL;
-
-	cancel_delayed_work_sync(&priv->pattern_work);
-
-	if (!strcmp(mode, "none") || !strcmp(mode, "off") || !strcmp(mode, "0")) {
-		priv->pattern = PATTERN_NONE;
-		lp_fb_sync(priv->fbi);
-	} else if (!strcmp(mode, "gradient_h") || !strcmp(mode, "gradient")) {
-		priv->pattern = PATTERN_GRADIENT_H;
-	} else if (!strcmp(mode, "gradient_v")) {
-		priv->pattern = PATTERN_GRADIENT_V;
-	} else if (!strcmp(mode, "gradient_diag")) {
-		priv->pattern = PATTERN_GRADIENT_DIAG;
-	} else if (!strcmp(mode, "spotlight") || !strcmp(mode, "radial")) {
-		priv->pattern = PATTERN_SPOTLIGHT;
-	} else if (!strcmp(mode, "breathe") || !strcmp(mode, "pulse")) {
-		priv->pattern = PATTERN_BREATHE;
-	} else if (!strcmp(mode, "wave_h") || !strcmp(mode, "wave")) {
-		priv->pattern = PATTERN_WAVE_H;
-	} else if (!strcmp(mode, "wave_v")) {
-		priv->pattern = PATTERN_WAVE_V;
-	} else if (!strcmp(mode, "cylon") || !strcmp(mode, "scanner")) {
-		priv->pattern = PATTERN_CYLON;
-	} else if (!strcmp(mode, "rain")) {
-		priv->pattern = PATTERN_RAIN;
-	} else if (!strcmp(mode, "checker")) {
-		priv->pattern = PATTERN_CHECKER;
-	} else {
-		return -EINVAL;
-	}
-
-	if (priv->pattern != PATTERN_NONE) {
-		priv->pattern_tick = 0;
-		schedule_delayed_work(&priv->pattern_work, 0);
-	}
-
-	return len;
-}
-static DEVICE_ATTR_RW(pattern);
-
-static ssize_t pattern_speed_show(struct device *dev, struct device_attribute *attr, char *buf)
-{
-	struct gowin_priv *priv = dev_get_drvdata(dev);
-	return sysfs_emit(buf, "%u\n", priv->pattern_speed_ms);
-}
-
-static ssize_t pattern_speed_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t len)
-{
-	struct gowin_priv *priv = dev_get_drvdata(dev);
-	unsigned int val;
-
-	if (kstrtouint(buf, 0, &val) || val < 1 || val > 1000)
-		return -EINVAL;
-
-	priv->pattern_speed_ms = val;
-	return len;
-}
-static DEVICE_ATTR_RW(pattern_speed);
-
-static ssize_t gamma_show(struct device *dev, struct device_attribute *attr, char *buf)
-{
-	struct gowin_priv *priv = dev_get_drvdata(dev);
-	return sysfs_emit(buf, "%d\n", priv->gamma_enabled ? 1 : 0);
-}
-
-static ssize_t gamma_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t len)
-{
-	struct gowin_priv *priv = dev_get_drvdata(dev);
-	bool val;
-
-	if (kstrtobool(buf, &val))
-		return -EINVAL;
-
-	priv->gamma_enabled = val;
-	if (priv->pattern != PATTERN_NONE)
-		schedule_delayed_work(&priv->pattern_work, 0);
-	else if (priv->fbi)
-		lp_fb_sync(priv->fbi);
-
-	return len;
-}
-static DEVICE_ATTR_RW(gamma);
-
 static DEVICE_ATTR_RO(help);
 static DEVICE_ATTR_RO(open_fb_count);
 static DEVICE_ATTR_RO(fw_upd_status);
@@ -1924,9 +1922,6 @@ static DEVICE_ATTR_WO(press_key);
 
 static struct attribute *lp_common_attrs[] = {
 	&dev_attr_help.attr,
-	&dev_attr_pattern.attr,
-	&dev_attr_pattern_speed.attr,
-	&dev_attr_gamma.attr,
 	&dev_attr_open_fb_count.attr,
 	&dev_attr_fw_upd_status.attr,
 	&dev_attr_crc_errors.attr,
@@ -1981,10 +1976,24 @@ static ssize_t jtag_fpga_prog_show(struct device *dev,
 static ssize_t jtag_codes_show(struct device *dev,
 			       struct device_attribute *attr, char *buf)
 {
-	u32 idcode = 0, usercode = 0;
+	struct gowin_priv *priv = dev_get_drvdata(dev);
+	u32 idcode, usercode, status_code;
 
-	return sysfs_emit(buf, "ID=0x%08x USER=0x%08x STATUS=0\n",
-			  idcode, usercode);
+	mutex_lock(&priv->lock);
+	if (priv->jtag_mode) {
+		jtag_tap_move(priv, 16, 1);
+		idcode = jtag_read_code(priv, 0x11);
+		usercode = jtag_read_code(priv, 0x13);
+		status_code = jtag_read_code(priv, 0x41);
+	} else {
+		idcode = priv->last_idcode;
+		usercode = priv->last_usercode;
+		status_code = priv->last_status_code;
+	}
+	mutex_unlock(&priv->lock);
+
+	return sysfs_emit(buf, "ID=0x%08x USER=0x%08x STATUS=0x%08x\n",
+			  idcode, usercode, status_code);
 }
 
 static ssize_t jtag_erase_flash_show(struct device *dev,
@@ -2054,6 +2063,9 @@ static int probe(struct spi_device *spi)
 	struct gowin_priv *priv;
 	int ret;
 
+	dev_info(dev, "[GOWIN] Probing Gowin FPGA LED controller (spi max_speed=%u Hz)...\n",
+		 spi->max_speed_hz);
+
 	match = of_match_node(led_device_of_match, dev->of_node);
 	if (!match || !match->data)
 		return -EINVAL;
@@ -2076,7 +2088,9 @@ static int probe(struct spi_device *spi)
 	spi->bits_per_word = 8;
 	if (!spi->max_speed_hz)
 		spi->max_speed_hz = 4000000;
-	spi_setup(spi);
+	ret = spi_setup(spi);
+	if (ret)
+		dev_warn(dev, "[GOWIN] spi_setup returned %d\n", ret);
 
 	/*
 	 * Request ONLY reset, jtag_reconfig, and jtag_sel in probe()!
@@ -2086,7 +2100,7 @@ static int probe(struct spi_device *spi)
 	 */
 	priv->reset_gpio = devm_gpiod_get_optional(dev, "reset", GPIOD_OUT_LOW);
 	if (IS_ERR(priv->reset_gpio)) {
-		dev_warn(dev, "reset_gpio unavailable (%ld), continuing\n",
+		dev_warn(dev, "[GOWIN] reset_gpio unavailable (%ld), continuing\n",
 			 PTR_ERR(priv->reset_gpio));
 		priv->reset_gpio = NULL;
 	}
@@ -2105,6 +2119,12 @@ static int probe(struct spi_device *spi)
 	priv->irq_gpio = devm_gpiod_get_optional(dev, "irq", GPIOD_IN);
 	if (IS_ERR(priv->irq_gpio))
 		priv->irq_gpio = NULL;
+
+	dev_info(dev, "[GOWIN] GPIOs: reset=hw:%d, jtag_reconfig=hw:%d, jtag_sel=hw:%d, irq=hw:%d\n",
+		 priv->reset_gpio ? desc_to_gpio(priv->reset_gpio) : -1,
+		 priv->jtag_reconfig ? desc_to_gpio(priv->jtag_reconfig) : -1,
+		 priv->jtag_sel ? desc_to_gpio(priv->jtag_sel) : -1,
+		 priv->irq_gpio ? desc_to_gpio(priv->irq_gpio) : -1);
 
 	/* pinctrl */
 	priv->pinctrl = devm_pinctrl_get(dev);
@@ -2163,10 +2183,11 @@ static int probe(struct spi_device *spi)
 	if (ret)
 		goto err_touch;
 
-	dev_info(dev, "led %s probed: %dx%d (board_rev=%u, fw_version=%u, uf_crc=0x%04x)\n",
+	dev_info(dev, "[GOWIN] LED %s probed OK: %dx%d (board_rev=%u, fw_version=%u, uf_crc=0x%04x, status='%s')\n",
 		 (priv->dev_type == LED_SCREEN) ? "screen" : "panel",
 		 priv->width, priv->height,
-		 priv->board_rev, priv->fw_version, priv->uf_crc);
+		 priv->board_rev, priv->fw_version, priv->uf_crc,
+		 priv->fw_upd_status);
 	return 0;
 
 err_touch:
@@ -2201,7 +2222,7 @@ static int remove(struct spi_device *spi)
 	fb_exit(priv);
 	gpio_exit(priv);
 
-	dev_info(priv->dev, "led panel removed\n");
+	dev_info(priv->dev, "[GOWIN] LED panel removed\n");
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 18, 0)
 	return 0;
 #endif
