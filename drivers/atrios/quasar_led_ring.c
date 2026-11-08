@@ -17,6 +17,10 @@
 #define BPP		8
 #define FB_SIZE		(XRES * YRES * BPP / 8)
 
+static bool debug;
+module_param(debug, bool, 0644);
+MODULE_PARM_DESC(debug, "Enable verbose LED ring framebuffer sync logging");
+
 struct led_ring_node {
 	struct list_head	list;
 	struct led_classdev	*led;
@@ -27,9 +31,13 @@ static struct fb_info *ring_fb;
 static struct backlight_device *ring_bl;
 static struct led_ring_priv {
 	int			brightness;
+	unsigned int		attached_leds;
+	unsigned long		sync_count;
 	struct mutex		list_lock;
 	struct list_head	led_list;
 } ring_priv;
+
+static int ring_fb_sync(struct fb_info *info);
 
 /* ---- Backlight ---- */
 
@@ -40,8 +48,11 @@ static int bl_get_brightness(struct backlight_device *bd)
 
 static int bl_update_status(struct backlight_device *bd)
 {
-	ring_priv.brightness = bd->props.brightness;
-	pr_info("set led ring brightness %u\n", ring_priv.brightness);
+	ring_priv.brightness = clamp_t(int, bd->props.brightness, 0, 255);
+	pr_info("[LED_RING] set backlight brightness=%d (attached_leds=%u)\n",
+		ring_priv.brightness, ring_priv.attached_leds);
+	if (ring_fb)
+		ring_fb_sync(ring_fb);
 	return 0;
 }
 
@@ -60,11 +71,20 @@ static int ring_fb_mmap(struct fb_info *info, struct vm_area_struct *vma)
 static int ring_fb_sync(struct fb_info *info)
 {
 	struct led_ring_node *node;
+	int scale = clamp_t(int, ring_priv.brightness, 0, 255);
 
 	mutex_lock(&ring_priv.list_lock);
+	ring_priv.sync_count++;
+	if (debug && (ring_priv.sync_count % 25 == 1))
+		pr_info("[LED_RING] fb_sync #%lu (attached_leds=%u, scale=%d/255, rgb0=[%u,%u,%u])\n",
+			ring_priv.sync_count, ring_priv.attached_leds, scale,
+			((u8 *)info->screen_buffer)[0],
+			((u8 *)info->screen_buffer)[1],
+			((u8 *)info->screen_buffer)[2]);
+
 	list_for_each_entry(node, &ring_priv.led_list, list) {
 		u8 pixel = ((u8 *)info->screen_buffer)[node->pixel_offset];
-		int brightness = (pixel * info->var.xres) / info->var.yres;
+		int brightness = (pixel * scale) / 255;
 		int ret;
 
 		ret = led_set_brightness_sync(node->led, brightness);
@@ -121,6 +141,11 @@ static ssize_t ring_fb_write(struct fb_info *info, const char __user *buf,
 	return count;
 }
 
+static int ring_fb_cursor(struct fb_info *info, struct fb_cursor *cursor)
+{
+	return 0;
+}
+
 static struct fb_ops ring_fb_ops = {
 	.owner		= THIS_MODULE,
 	.fb_check_var	= ring_fb_check_var,
@@ -130,6 +155,10 @@ static struct fb_ops ring_fb_ops = {
 	.fb_pan_display	= ring_fb_pan_display,
 	.fb_release	= ring_fb_release,
 	.fb_sync	= ring_fb_sync,
+	.fb_cursor	= ring_fb_cursor,
+	.fb_fillrect	= sys_fillrect,
+	.fb_copyarea	= sys_copyarea,
+	.fb_imageblit	= sys_imageblit,
 };
 
 /* ---- LED trigger ---- */
@@ -149,7 +178,7 @@ static void led_ring_trigger_activate(struct led_classdev *led)
 
 	if (led->max_brightness != 255) {
 		dev_err(led->dev,
-			"cannot activate led_ring_fb trigger for led with max_brightness != %d\n",
+			"[LED_RING] cannot activate led_ring_fb trigger for led with max_brightness != %d\n",
 			255);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 19, 0)
 		return -EINVAL;
@@ -173,7 +202,7 @@ static void led_ring_trigger_activate(struct led_classdev *led)
 	else if (strstr(name, "blue") || strstr(name, "_b"))
 		color_idx = 2;
 	else {
-		dev_err(led->dev, "failed to parse led color in '%s'\n", name);
+		dev_err(led->dev, "[LED_RING] failed to parse led color in '%s'\n", name);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 19, 0)
 		return -EINVAL;
 #else
@@ -202,7 +231,7 @@ static void led_ring_trigger_activate(struct led_classdev *led)
 		while (p && *p >= '0' && *p <= '9' && idx < 6)
 			num_buf[idx++] = *p++;
 		if (idx == 0 || kstrtoll(num_buf, 10, &pos) || pos < 1 || pos > 24) {
-			dev_err(led->dev, "failed to parse led position in '%s'\n", name);
+			dev_err(led->dev, "[LED_RING] failed to parse led position in '%s'\n", name);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 19, 0)
 			return -EINVAL;
 #else
@@ -214,7 +243,7 @@ static void led_ring_trigger_activate(struct led_classdev *led)
 
 	node = kzalloc(sizeof(*node), GFP_KERNEL);
 	if (!node) {
-		dev_err(led->dev, "failed to allocate led_node\n");
+		dev_err(led->dev, "[LED_RING] failed to allocate led_node\n");
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 19, 0)
 		return -ENOMEM;
 #else
@@ -227,6 +256,10 @@ static void led_ring_trigger_activate(struct led_classdev *led)
 
 	mutex_lock(&ring_priv.list_lock);
 	list_add_tail(&node->list, &ring_priv.led_list);
+	ring_priv.attached_leds++;
+	if (debug || ring_priv.attached_leds == 72)
+		pr_info("[LED_RING] bound LED '%s' -> pixel_offset=%d (total_attached=%u/72)\n",
+			name, led_num, ring_priv.attached_leds);
 	mutex_unlock(&ring_priv.list_lock);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 19, 0)
 	return 0;
@@ -241,6 +274,8 @@ static void led_ring_trigger_deactivate(struct led_classdev *led)
 	list_for_each_entry_safe(node, tmp, &ring_priv.led_list, list) {
 		if (node->led == led) {
 			list_del(&node->list);
+			if (ring_priv.attached_leds > 0)
+				ring_priv.attached_leds--;
 			kfree(node);
 			break;
 		}
@@ -266,19 +301,21 @@ static int __init led_ring_init(void)
 	};
 	int ret;
 
+	pr_info("[LED_RING] Initializing quasar_led_ring driver...\n");
+
 	mutex_init(&ring_priv.list_lock);
 	INIT_LIST_HEAD(&ring_priv.led_list);
 	ring_priv.brightness = 255;
 
 	info = framebuffer_alloc(0, NULL);
 	if (!info) {
-		pr_err("led_ring_fb: failed to allocate framebuffer\n");
+		pr_err("[LED_RING] ERROR: failed to allocate framebuffer\n");
 		return -ENOMEM;
 	}
 
 	info->screen_buffer = vzalloc(FB_SIZE);
 	if (!info->screen_buffer) {
-		pr_err("led_ring_fb: failed to allocate video memory\n");
+		pr_err("[LED_RING] ERROR: failed to allocate video memory\n");
 		ret = -ENOMEM;
 		goto err_release;
 	}
@@ -310,28 +347,30 @@ static int __init led_ring_init(void)
 
 	ret = register_framebuffer(info);
 	if (ret < 0) {
-		pr_err("led_ring_fb: failed to register framebuffer: %d\n", ret);
+		pr_err("[LED_RING] ERROR: failed to register framebuffer: %d\n", ret);
 		goto err_free_video;
 	}
 
 	ring_fb = info;
-	pr_info("led_ring_fb: framebuffer registered\n");
+	pr_info("[LED_RING] Framebuffer registered as fb%d ('%s')\n",
+		info->node, info->fix.id);
 
 	ring_bl = backlight_device_register("quasar_led_ring", NULL,
 					    &ring_priv, &ring_bl_ops,
 					    &bl_props);
 	if (IS_ERR(ring_bl)) {
 		ret = PTR_ERR(ring_bl);
-		pr_err("led_ring_fb: failed to register backlight: %d\n", ret);
+		pr_err("[LED_RING] ERROR: failed to register backlight: %d\n", ret);
 		goto err_unreg_fb;
 	}
-	pr_info("led_ring_fb: backlight registered\n");
+	pr_info("[LED_RING] Backlight 'quasar_led_ring' registered\n");
 
 	ret = led_trigger_register(&led_ring_trigger);
 	if (ret) {
-		pr_err("led_ring_fb: failed to register led trigger: %d\n", ret);
+		pr_err("[LED_RING] ERROR: failed to register led trigger: %d\n", ret);
 		goto err_unreg_bl;
 	}
+	pr_info("[LED_RING] Trigger 'led_ring_fb' registered OK\n");
 
 	return 0;
 
@@ -348,21 +387,26 @@ err_release:
 
 static void __exit led_ring_exit(void)
 {
-	pr_info("led_ring_fb: unregistering trigger\n");
-	led_trigger_unregister(&led_ring_trigger);
+	struct led_ring_node *node, *tmp;
 
-	pr_info("led_ring_fb: unregistering framebuffer\n");
+	led_trigger_unregister(&led_ring_trigger);
 	backlight_device_unregister(ring_bl);
+
+	mutex_lock(&ring_priv.list_lock);
+	list_for_each_entry_safe(node, tmp, &ring_priv.led_list, list) {
+		list_del(&node->list);
+		kfree(node);
+	}
+	ring_priv.attached_leds = 0;
+	mutex_unlock(&ring_priv.list_lock);
+
 	unregister_framebuffer(ring_fb);
-	if (ring_fb->screen_buffer)
-		vfree(ring_fb->screen_buffer);
 	framebuffer_release(ring_fb);
-	ring_fb = NULL;
 }
 
 module_init(led_ring_init);
 module_exit(led_ring_exit);
 
-MODULE_DESCRIPTION("Quasar LED Ring (framebuffer + backlight + LED trigger)");
-MODULE_AUTHOR("AtriOS Team");
+MODULE_DESCRIPTION("Quasar LED ring framebuffer and trigger driver");
+MODULE_AUTHOR("leftymods");
 MODULE_LICENSE("GPL v2");
