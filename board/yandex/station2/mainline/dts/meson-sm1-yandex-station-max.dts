@@ -111,7 +111,7 @@
 		status = "okay";
 		gpios = <&gpio GPIOC_7 GPIO_ACTIVE_HIGH>,
 			<&gpio_ao GPIOAO_10 GPIO_ACTIVE_HIGH>;
-		key-codes = <KEY_VOLUMEUP KEY_VOLUMEDOWN>; /* 115, 114 */
+		key-codes = <KEY_PAGEUP KEY_PAGEDOWN>; /* 104, 109 (used by rotaryd / atrios input) */
 	};
 
 	/* Top Buttons (Action KEY_VOICECOMMAND 582, Mic Mute KEY_MICMUTE 248) */
@@ -138,6 +138,8 @@
 	pcba_ids: pcba-ids {
 		compatible = "pcba-ids";
 		status = "okay";
+		eeproms = <&eeprom_top &eeprom_main &eeprom_aux>;
+		eeprom-names = "top", "main", "led";
 		i2c-bus = <0>;
 		top-eeprom-addr = <0x52>;
 		main-eeprom-addr = <0x50>;
@@ -147,25 +149,63 @@
 	/* Mainline ASoC Sound Card */
 	sound {
 		compatible = "amlogic,axg-sound-card";
-		model = "ATRIOS-AML-SOUND";
-		audio-widgets =
-			"Headphone", "Headphone Jack",
-			"Speaker", "Woofer Speaker",
-			"Speaker", "Tweeter Left",
-			"Speaker", "Tweeter Right",
-			"Microphone", "Mic Array";
+		model = "AML-AUGESOUND";
+		audio-aux-devs = <&tdmout_b>, <&tdmout_c>, <&tdmin_b>;
+		audio-widgets = "Headphone", "Headphones";
 		audio-routing =
-			"Headphone Jack", "Headphone LOUT",
-			"Headphone Jack", "Headphone ROUT",
-			"Woofer Speaker", "Woofer OUTP",
-			"Woofer Speaker", "Woofer OUTN",
-			"Tweeter Left", "Tweeter OUT1",
-			"Tweeter Right", "Tweeter OUT2";
+			"TDMOUT_B IN 0", "FRDDR_A OUT 1",
+			"TDMOUT_B IN 1", "FRDDR_B OUT 1",
+			"TDMOUT_B IN 2", "FRDDR_C OUT 1",
+			"TDM_B Playback", "TDMOUT_B OUT",
+			"TDMOUT_C IN 0", "FRDDR_A OUT 2",
+			"TDMOUT_C IN 1", "FRDDR_B OUT 2",
+			"TDMOUT_C IN 2", "FRDDR_C OUT 2",
+			"TDM_C Playback", "TDMOUT_C OUT",
+			"TDMIN_B IN 0", "TDM_B Capture",
+			"TDMIN_B IN 3", "TDM_B Loopback",
+			"TODDR_A IN 1", "TDMIN_B OUT",
+			"TODDR_B IN 1", "TDMIN_B OUT",
+			"Headphones", "Headphone LOUT",
+			"Headphones", "Headphone ROUT";
+
+		clocks = <&clkc CLKID_MPLL2>,
+			 <&clkc CLKID_MPLL0>,
+			 <&clkc CLKID_MPLL1>;
+
+		assigned-clocks = <&clkc CLKID_MPLL2>,
+				  <&clkc CLKID_MPLL0>,
+				  <&clkc CLKID_MPLL1>;
+		assigned-clock-parents = <0>, <0>, <0>;
+		assigned-clock-rates = <294912000>,
+				       <270950400>,
+				       <393216000>;
 
 		dai-link-0 {
+			sound-dai = <&frddr_a>;
+		};
+
+		dai-link-1 {
+			sound-dai = <&frddr_b>;
+		};
+
+		dai-link-2 {
+			sound-dai = <&frddr_c>;
+		};
+
+		dai-link-3 {
+			sound-dai = <&toddr_a>;
+		};
+
+		dai-link-4 {
+			sound-dai = <&toddr_b>;
+		};
+
+		/* TDM_B: Woofer (SY6045S), Tweeters (SY6045S), Headphone (ES8156), Loopback ADC (ES7210) */
+		dai-link-5 {
 			sound-dai = <&tdmif_b>;
 			dai-format = "i2s";
-			dai-tdm-slot-tx-mask-0 = <1 1>;
+			dai-tdm-slot-tx-mask-2 = <1 1>;
+			dai-tdm-slot-rx-mask-0 = <1 1>;
 			mclk-fs = <256>;
 
 			codec-0 {
@@ -185,7 +225,8 @@
 			};
 		};
 
-		dai-link-1 {
+		/* TDM_C: HDMI Audio */
+		dai-link-6 {
 			sound-dai = <&tdmif_c>;
 			dai-format = "i2s";
 			dai-tdm-slot-tx-mask-0 = <1 1>;
@@ -196,7 +237,8 @@
 			};
 		};
 
-		dai-link-2 {
+		/* HDMI TX Output */
+		dai-link-7 {
 			sound-dai = <&tohdmitx TOHDMITX_I2S_OUT>;
 
 			codec {
@@ -204,6 +246,71 @@
 			};
 		};
 	};
+};
+
+/* Audio Subsystem Controllers & FIFOs */
+&arb {
+	status = "okay";
+};
+
+&clkc_audio {
+	status = "okay";
+};
+
+&frddr_a {
+	status = "okay";
+};
+
+&frddr_b {
+	status = "okay";
+};
+
+&frddr_c {
+	status = "okay";
+};
+
+&toddr_a {
+	status = "okay";
+};
+
+&toddr_b {
+	status = "okay";
+};
+
+&tdmout_b {
+	status = "okay";
+};
+
+&tdmin_b {
+	status = "okay";
+};
+
+&tdmif_b {
+	pinctrl-0 = <&mclk0_ao_pins>, <&tdm_ao_b_fs_pins>,
+		    <&tdm_ao_b_sclk_pins>, <&tdm_ao_b_dout2_pins>,
+		    <&tdm_ao_b_din0_pins>;
+	pinctrl-names = "default";
+	status = "okay";
+
+	assigned-clocks = <&clkc_audio AUD_CLKID_TDM_MCLK_PAD0>,
+			  <&clkc_audio AUD_CLKID_TDM_SCLK_PAD1>,
+			  <&clkc_audio AUD_CLKID_TDM_LRCLK_PAD1>;
+	assigned-clock-parents = <&clkc_audio AUD_CLKID_MST_B_MCLK>,
+				 <&clkc_audio AUD_CLKID_MST_B_SCLK>,
+				 <&clkc_audio AUD_CLKID_MST_B_LRCLK>;
+	assigned-clock-rates = <0>, <0>, <0>;
+};
+
+&tdmif_c {
+	status = "okay";
+};
+
+&tdmout_c {
+	status = "okay";
+};
+
+&tohdmitx {
+	status = "okay";
 };
 
 /* UART_AO: Debug Console */
@@ -216,7 +323,7 @@
 /* UART_AO_B: Auxiliary / Zigbee / MCU */
 &uart_AO_B {
 	status = "okay";
-	pinctrl-0 = <&uart_ao_b_8_9_pins>;
+	pinctrl-0 = <&uart_ao_b_2_3_pins>;
 	pinctrl-names = "default";
 };
 
@@ -367,6 +474,7 @@
 		compatible = "everest,es8156";
 		reg = <0x08>;
 		#sound-dai-cells = <0>;
+		sound-name-prefix = "Headphone";
 		status = "okay";
 	};
 
@@ -375,6 +483,7 @@
 		compatible = "silergy,sy6045s";
 		reg = <0x2a>;
 		#sound-dai-cells = <0>;
+		sound-name-prefix = "Tweeters";
 		vddio-supply = <&fixedregulator_3v3d>;
 		pvdd-supply = <&fixedregulator_20v_amp>;
 		firmware = "sy6045s-tweeters-settings.txt";
@@ -387,6 +496,7 @@
 		compatible = "silergy,sy6045s";
 		reg = <0x2b>;
 		#sound-dai-cells = <0>;
+		sound-name-prefix = "Woofer";
 		vddio-supply = <&fixedregulator_3v3d>;
 		pvdd-supply = <&fixedregulator_20v_amp>;
 		pbtl-mode;
@@ -400,6 +510,7 @@
 		compatible = "everest,es7210_2ch", "everest,es7210";
 		reg = <0x40>;
 		#sound-dai-cells = <0>;
+		sound-name-prefix = "Loopback";
 		status = "okay";
 	};
 
@@ -418,16 +529,28 @@
 	};
 };
 
+&periphs_pinctrl {
+	spicc1_jtag_pins: spicc1-jtag {
+		mux {
+			groups = "GPIOH_4", "GPIOH_5", "GPIOH_7";
+			function = "gpio_periphs";
+		};
+	};
+};
+
 /* SPICC1: Gowin FPGA LED Matrix Screen Controller */
 &spicc1 {
 	status = "okay";
-	pinctrl-0 = <&spicc1_pins>, <&spicc1_ss0_pins>;
-	pinctrl-names = "default";
+	pinctrl-0 = <&spicc1_pins>;
+	pinctrl-1 = <&spicc1_jtag_pins>;
+	pinctrl-names = "default", "idle";
+	num-cs = <1>;
+	cs-gpios = <&gpio GPIOH_6 GPIO_ACTIVE_LOW>;
 	#address-cells = <1>;
 	#size-cells = <0>;
 
 	quasar_led_screen@0 {
-		compatible = "ya,led_screen", "atri,led-panel";
+		compatible = "ya,led_screen";
 		reg = <0>;
 		spi-max-frequency = <4000000>;
 		max-brightness = <200>;
@@ -466,7 +589,8 @@
 &sd_emmc_a {
 	status = "okay";
 	pinctrl-0 = <&sdio_pins>;
-	pinctrl-names = "default";
+	pinctrl-1 = <&sdio_clk_gate_pins>;
+	pinctrl-names = "default", "clk-gate";
 
 	#address-cells = <1>;
 	#size-cells = <0>;
@@ -503,7 +627,11 @@
 /* USB 2.0 / 3.0 Controllers */
 &usb {
 	status = "okay";
-	dr_mode = "otg";
+	dr_mode = "host";
+};
+
+&dwc2 {
+	status = "disabled";
 };
 
 /* Ethernet MAC */

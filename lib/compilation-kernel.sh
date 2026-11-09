@@ -41,6 +41,17 @@ build_kernel() {
         cp "$dts_src" "$kernel_dir/arch/arm64/boot/dts/amlogic/"
     fi
 
+    # 2.5 Apply kernel patches if available
+    local patches_dir="$PROJECT_ROOT/$UBOOT_SOURCE_DIR/patches/linux-7.0"
+    if [ -d "$patches_dir" ]; then
+        for patch_file in "$patches_dir"/*.patch; do
+            if [ -f "$patch_file" ]; then
+                display_alert "INFO" "Applying kernel patch:" "$(basename "$patch_file")"
+                (cd "$kernel_dir" && patch -p1 -N -r - < "$patch_file" 2>/dev/null || true)
+            fi
+        done
+    fi
+
     # 3. Configure kernel
     if [ -f "$defconfig_src" ]; then
         display_alert "INFO" "Applying kernel defconfig:" "${KERNEL_DEFCONFIG}"

@@ -24,6 +24,10 @@
 
 #define DRV_NAME			"ltr308als01"
 
+static bool debug;
+module_param(debug, bool, 0644);
+MODULE_PARM_DESC(debug, "Enable verbose LTR-308ALS sensor read and lux calculation logging");
+
 #define LTR308_REG_MAIN_CTRL		0x00
 #define LTR308_REG_ALS_MEAS_RATE	0x04
 #define LTR308_REG_ALS_GAIN		0x05
@@ -103,6 +107,9 @@ struct ltr308_data {
 	struct regmap *regmap;
 	struct mutex lock;
 	struct regmap_field *fields[F_MAX_FIELDS];
+	unsigned int part_id;
+	unsigned int rev_id;
+	unsigned long read_count;
 };
 
 static bool ltr308_is_volatile_reg(struct device *dev, unsigned int reg)
@@ -132,12 +139,15 @@ static int ltr308_get_lux(struct ltr308_data *data)
 {
 	unsigned int status, low, mid, high;
 	int tries = 10;
-	int ret;
+	int ret, val;
 
 	while (tries--) {
 		ret = regmap_field_read(data->fields[F_DATA_STATUS], &status);
-		if (ret)
+		if (ret) {
+			dev_err(&data->client->dev,
+				"[LTR308] ERROR: failed reading DATA_STATUS: %d\n", ret);
 			return ret;
+		}
 		if (status)
 			break;
 		msleep(25);
@@ -153,7 +163,13 @@ static int ltr308_get_lux(struct ltr308_data *data)
 	if (ret)
 		return ret;
 
-	return (low & 0xff) | ((mid & 0xff) << 8) | ((high & 0x0f) << 16);
+	val = (low & 0xff) | ((mid & 0xff) << 8) | ((high & 0x0f) << 16);
+	data->read_count++;
+	if (debug)
+		dev_info(&data->client->dev,
+			 "[LTR308] read #%lu: raw=%d (0x%05x)\n",
+			 data->read_count, val, val);
+	return val;
 }
 
 static int ltr308_read_raw(struct iio_dev *indio_dev,
@@ -219,6 +235,11 @@ static int ltr308_read_raw(struct iio_dev *indio_dev,
 		}
 		*val = (int)div64_u64(lux_num, lux_den);
 		*val2 = 1000;
+		if (debug)
+			dev_info(&data->client->dev,
+				 "[LTR308] processed lux=%d.%03d (raw=%d, gain=%dx, int_us=%d)\n",
+				 *val / 1000, *val % 1000, raw,
+				 ltr308_gains[gain_idx], ltr308_int_time[res_idx]);
 		ret = IIO_VAL_FRACTIONAL;
 		break;
 
@@ -542,21 +563,37 @@ static irqreturn_t ltr308_interrupt_handler(int irq, void *priv)
 
 static int ltr308_init(struct ltr308_data *data)
 {
-	unsigned int part_id, status;
+	unsigned int part_id = 0, rev_id = 0, status = 0;
 	int ret;
 
 	ret = regmap_field_read(data->fields[F_POWER_ON], &status);
-	if (ret)
+	if (ret) {
+		dev_err(&data->client->dev,
+			"[LTR308] ERROR: failed reading MAIN_STATUS @ 0x%02x: %d\n",
+			data->client->addr, ret);
 		return ret;
+	}
 
 	ret = regmap_field_read(data->fields[F_PART_ID], &part_id);
-	if (ret)
+	if (ret) {
+		dev_err(&data->client->dev,
+			"[LTR308] ERROR: failed reading PART_ID @ 0x%02x: %d\n",
+			data->client->addr, ret);
 		return ret;
+	}
+	regmap_field_read(data->fields[F_REV_ID], &rev_id);
+
+	data->part_id = part_id;
+	data->rev_id = rev_id;
 
 	if (part_id != LTR308_PART_NUMBER_ID)
 		dev_warn(&data->client->dev,
-			 "unexpected part ID 0x%x (expected 0x%x)\n",
-			 part_id, LTR308_PART_NUMBER_ID);
+			 "[LTR308] WARN: unexpected part ID 0x%x (expected 0x%x), rev=0x%x\n",
+			 part_id, LTR308_PART_NUMBER_ID, rev_id);
+	else
+		dev_info(&data->client->dev,
+			 "[LTR308] Chip verified @ 0x%02x: PART_ID=0x%x, REV_ID=0x%x, POWER_ON=%u\n",
+			 data->client->addr, part_id, rev_id, status);
 
 	/* Enable ALS by default so userspace can read illuminance immediately */
 	return regmap_field_write(data->fields[F_ENABLE], 1);
@@ -573,6 +610,10 @@ static int ltr308_probe(struct i2c_client *client,
 	struct iio_dev *indio_dev;
 	int i, ret;
 
+	dev_info(&client->dev,
+		 "[LTR308] Probing LTR-308ALS ambient light sensor @ 0x%02x...\n",
+		 client->addr);
+
 	indio_dev = devm_iio_device_alloc(&client->dev, sizeof(*data));
 	if (!indio_dev)
 		return -ENOMEM;
@@ -584,7 +625,8 @@ static int ltr308_probe(struct i2c_client *client,
 
 	data->regmap = devm_regmap_init_i2c(client, &ltr308_regmap_config);
 	if (IS_ERR(data->regmap)) {
-		dev_err(&client->dev, "Regmap initialization failed.\n");
+		dev_err(&client->dev, "[LTR308] ERROR: Regmap initialization failed: %ld\n",
+			PTR_ERR(data->regmap));
 		return PTR_ERR(data->regmap);
 	}
 
@@ -613,13 +655,18 @@ static int ltr308_probe(struct i2c_client *client,
 						IRQF_TRIGGER_FALLING | IRQF_ONESHOT,
 						"ltr308_thresh_event", indio_dev);
 		if (ret) {
-			dev_err(&client->dev, "request irq (%d) failed\n",
-				client->irq);
+			dev_err(&client->dev, "[LTR308] ERROR: request irq (%d) failed: %d\n",
+				client->irq, ret);
 			return ret;
 		}
 	}
 
-	return devm_iio_device_register(&client->dev, indio_dev);
+	ret = devm_iio_device_register(&client->dev, indio_dev);
+	if (ret == 0)
+		dev_info(&client->dev,
+			 "[LTR308] Probed OK @ 0x%02x (ALS enabled)\n",
+			 client->addr);
+	return ret;
 }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)

@@ -25,6 +25,7 @@
 #include <linux/of.h>
 #include <linux/ctype.h>
 #include <linux/crc32.h>
+#include <linux/sysfs.h>
 #include <crypto/hash.h>
 #include <sound/pcm.h>
 #include <sound/pcm_params.h>
@@ -32,6 +33,10 @@
 #include <sound/tlv.h>
 
 #define SY6045S_DRV_NAME	"sy6045s"
+
+static bool debug = true;
+module_param(debug, bool, 0644);
+MODULE_PARM_DESC(debug, "Enable verbose SY6045S amplifier diagnostics and register logging");
 
 /* Register byte widths (1..20 bytes) indexed by 8-bit register address */
 static const u8 sy6045s_reg_size[256] = {
@@ -103,9 +108,23 @@ struct sy6045s_priv {
 	struct regulator_bulk_data supplies[2];
 	struct mutex io_lock;
 	bool pbtl_mode;
+	bool playing;
+	unsigned long i2c_writes;
+	unsigned long i2c_errors;
 	struct sy6045s_restore_reg *restore_regs;
 	int num_restore_regs;
 };
+
+static const char *sy6045s_role_name(struct sy6045s_priv *sy)
+{
+	if (!sy || !sy->client)
+		return "unknown";
+	if (sy->client->addr == 0x2a)
+		return "Tweeters";
+	if (sy->client->addr == 0x2b)
+		return "Woofer";
+	return sy->pbtl_mode ? "Woofer(PBTL)" : "Stereo(BTL)";
+}
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 18, 0)
 static inline int sy6045s_soc_write(struct sy6045s_priv *sy,
@@ -157,6 +176,7 @@ static void sy6045s_reg_unlock(void *context)
 static int sy6045s_reg_write(void *context, unsigned int reg, unsigned int val)
 {
 	struct i2c_client *client = context;
+	struct sy6045s_priv *sy = i2c_get_clientdata(client);
 	u8 buf[5];
 	u8 sz;
 	int i, shift, ret;
@@ -176,8 +196,16 @@ static int sy6045s_reg_write(void *context, unsigned int reg, unsigned int val)
 		buf[1 + i] = (val >> shift) & 0xff;
 
 	ret = i2c_master_send(client, buf, sz + 1);
-	if (ret == sz + 1)
+	if (ret == sz + 1) {
+		if (sy)
+			sy->i2c_writes++;
 		return 0;
+	}
+	if (sy)
+		sy->i2c_errors++;
+	dev_err(&client->dev,
+		"[SY6045S:%s] I2C write failed reg=0x%02x val=0x%x (sz=%u): ret=%d\n",
+		sy6045s_role_name(sy), reg, val, sz, ret);
 	if (ret < 0)
 		return ret;
 	return -EIO;
@@ -186,6 +214,7 @@ static int sy6045s_reg_write(void *context, unsigned int reg, unsigned int val)
 static int sy6045s_reg_read(void *context, unsigned int reg, unsigned int *val)
 {
 	struct i2c_client *client = context;
+	struct sy6045s_priv *sy = i2c_get_clientdata(client);
 	struct i2c_msg msgs[2];
 	u8 reg_addr = (u8)reg;
 	u8 data[4] = { 0 };
@@ -213,10 +242,14 @@ static int sy6045s_reg_read(void *context, unsigned int reg, unsigned int *val)
 	msgs[1].buf = data;
 
 	ret = i2c_transfer(client->adapter, msgs, 2);
-	if (ret < 0)
-		return ret;
-	if (ret != 2)
-		return -EIO;
+	if (ret != 2) {
+		if (sy)
+			sy->i2c_errors++;
+		dev_err(&client->dev,
+			"[SY6045S:%s] I2C read failed reg=0x%02x (sz=%u): ret=%d\n",
+			sy6045s_role_name(sy), reg, sz, ret);
+		return ret < 0 ? ret : -EIO;
+	}
 
 	shift = (sz - 1) * 8;
 	for (i = 0; i < sz; i++, shift -= 8)
@@ -310,6 +343,10 @@ static void sy6045s_spk_off_work(struct work_struct *work)
 	struct sy6045s_priv *sy = container_of(work, struct sy6045s_priv,
 					       spk_off_work);
 
+	if (debug)
+		dev_info(&sy->client->dev,
+			 "[SY6045S:%s] spk_off_work -> entering standby (reg 0x22 |= 0x10)\n",
+			 sy6045s_role_name(sy));
 	sy6045s_soc_update_bits(sy, 0x22, 0x10, 0x10);
 }
 
@@ -318,6 +355,10 @@ static void sy6045s_spk_on_work(struct work_struct *work)
 	struct sy6045s_priv *sy = container_of(work, struct sy6045s_priv,
 					       spk_on_work);
 
+	if (debug)
+		dev_info(&sy->client->dev,
+			 "[SY6045S:%s] spk_on_work -> exiting standby (reg 0x22 &= ~0x10)\n",
+			 sy6045s_role_name(sy));
 	sy6045s_soc_update_bits(sy, 0x22, 0x10, 0x00);
 }
 
@@ -372,10 +413,31 @@ static int sy6045s_reset_chip(struct sy6045s_priv *sy)
 	int ret;
 
 	ret = i2c_smbus_write_byte_data(sy->client, 0x0f, 0x01);
-	if (ret < 0)
+	if (ret < 0) {
+		sy->i2c_errors++;
+		dev_err(&sy->client->dev,
+			"[SY6045S:%s] soft reset write to 0x0f failed: %d\n",
+			sy6045s_role_name(sy), ret);
 		return ret;
+	}
 	msleep(20);
 	return 0;
+}
+
+static int sy6045s_write_block(struct sy6045s_priv *sy, u8 reg,
+			       u8 len, const u8 *data)
+{
+	int ret = i2c_smbus_write_i2c_block_data(sy->client, reg, len, data);
+
+	if (ret < 0) {
+		sy->i2c_errors++;
+		dev_err(&sy->client->dev,
+			"[SY6045S:%s] block write failed reg=0x%02x len=%u: %d\n",
+			sy6045s_role_name(sy), reg, len, ret);
+	} else {
+		sy->i2c_writes++;
+	}
+	return ret;
 }
 
 static int sy6045s_apply_settings(struct sy6045s_priv *sy, const char *data,
@@ -386,6 +448,7 @@ static int sy6045s_apply_settings(struct sy6045s_priv *sy, const char *data,
 	u8 block[36];
 	int block_len = 0;
 	int line_num = 1;
+	int blocks_written = 0;
 
 	while (p < end) {
 		const char *nl = memchr(p, '\n', end - p);
@@ -394,20 +457,18 @@ static int sy6045s_apply_settings(struct sy6045s_priv *sy, const char *data,
 
 		if (c == '#' || c == 'd' || c == '\n' || c == '\r') {
 			if (block_len > 0) {
-				i2c_smbus_write_i2c_block_data(sy->client,
-							       block[0],
-							       block_len - 1,
-							       &block[1]);
+				sy6045s_write_block(sy, block[0],
+						    block_len - 1, &block[1]);
+				blocks_written++;
 				block_len = 0;
 			}
 		} else if (c == 'w') {
 			size_t pos = 1;
 
 			if (block_len > 0) {
-				i2c_smbus_write_i2c_block_data(sy->client,
-							       block[0],
-							       block_len - 1,
-							       &block[1]);
+				sy6045s_write_block(sy, block[0],
+						    block_len - 1, &block[1]);
+				blocks_written++;
 				block_len = 0;
 			}
 
@@ -443,7 +504,8 @@ static int sy6045s_apply_settings(struct sy6045s_priv *sy, const char *data,
 			block[block_len++] = byte_val;
 		} else {
 			dev_err(&sy->client->dev,
-				"invalid settings at line %d\n", line_num);
+				"[SY6045S:%s] invalid settings at line %d\n",
+				sy6045s_role_name(sy), line_num);
 			return -EINVAL;
 		}
 
@@ -452,13 +514,19 @@ static int sy6045s_apply_settings(struct sy6045s_priv *sy, const char *data,
 	}
 
 	if (block_len > 0) {
-		i2c_smbus_write_i2c_block_data(sy->client, block[0],
-					       block_len - 1, &block[1]);
+		sy6045s_write_block(sy, block[0],
+				    block_len - 1, &block[1]);
+		blocks_written++;
 	}
 
 	if (name)
 		strscpy(sy->settings_file, name, sizeof(sy->settings_file));
 	sy->settings_crc32 = ~crc32_le(~0, (const u8 *)data, size);
+
+	dev_info(&sy->client->dev,
+		 "[SY6045S:%s] applied settings '%s' (%zu bytes, %d blocks, crc32=0x%08x)\n",
+		 sy6045s_role_name(sy), name ? name : "unnamed",
+		 size, blocks_written, sy->settings_crc32);
 	return 0;
 }
 
@@ -467,14 +535,18 @@ static int sy6045s_load_firmware(struct sy6045s_priv *sy, const char *fw_name)
 	const struct firmware *fw;
 	int ret;
 
-	if (!fw_name)
+	if (!fw_name) {
+		dev_info(&sy->client->dev,
+			 "[SY6045S:%s] no firmware filename configured\n",
+			 sy6045s_role_name(sy));
 		return 0;
+	}
 
 	ret = request_firmware(&fw, fw_name, &sy->client->dev);
 	if (ret) {
 		dev_warn(&sy->client->dev,
-			 "firmware '%s' not found (%d), using defaults\n",
-			 fw_name, ret);
+			 "[SY6045S:%s] firmware '%s' not found (%d), using hardware defaults\n",
+			 sy6045s_role_name(sy), fw_name, ret);
 		return 0;
 	}
 
@@ -493,6 +565,10 @@ static int sy6045s_set_dai_fmt(struct snd_soc_dai *dai, unsigned int fmt)
 #endif
 
 	sy->dai_fmt = fmt;
+	if (debug)
+		dev_info(&sy->client->dev,
+			 "[SY6045S:%s] set_dai_fmt: fmt=0x%08x\n",
+			 sy6045s_role_name(sy), fmt);
 	return 0;
 }
 
@@ -508,6 +584,7 @@ static int sy6045s_hw_params(struct snd_pcm_substream *substream,
 	unsigned int fmt = sy->dai_fmt;
 	unsigned int val = 0;
 	bool is_i2s = false;
+	int ret;
 
 	switch (fmt & SND_SOC_DAIFMT_INV_MASK) {
 	case SND_SOC_DAIFMT_NB_NF:
@@ -559,7 +636,14 @@ static int sy6045s_hw_params(struct snd_pcm_substream *substream,
 		break;
 	}
 
-	return sy6045s_soc_write(sy, 0x15, val);
+	ret = sy6045s_soc_write(sy, 0x15, val);
+	if (debug)
+		dev_info(&sy->client->dev,
+			 "[SY6045S:%s] hw_params: rate=%u width=%d ch=%u -> reg 0x15=0x%02x (ret=%d)\n",
+			 sy6045s_role_name(sy), params_rate(params),
+			 params_width(params), params_channels(params),
+			 val, ret);
+	return ret;
 }
 
 static int sy6045s_trigger(struct snd_pcm_substream *substream, int cmd,
@@ -578,6 +662,7 @@ static int sy6045s_trigger(struct snd_pcm_substream *substream, int cmd,
 	case SNDRV_PCM_TRIGGER_START:
 	case SNDRV_PCM_TRIGGER_RESUME:
 	case SNDRV_PCM_TRIGGER_PAUSE_RELEASE:
+		sy->playing = true;
 		if (sy->fault_gpio)
 			gpiod_set_value(sy->fault_gpio, 1);
 		else
@@ -587,6 +672,7 @@ static int sy6045s_trigger(struct snd_pcm_substream *substream, int cmd,
 	case SNDRV_PCM_TRIGGER_STOP:
 	case SNDRV_PCM_TRIGGER_SUSPEND:
 	case SNDRV_PCM_TRIGGER_PAUSE_PUSH:
+		sy->playing = false;
 		if (sy->fault_gpio)
 			gpiod_set_value(sy->fault_gpio, 0);
 		else
@@ -633,6 +719,11 @@ static int sy6045s_init_chip(struct sy6045s_priv *sy)
 {
 	int ret;
 
+	dev_info(&sy->client->dev,
+		 "[SY6045S:%s] Initializing chip (pbtl=%d, fw='%s')...\n",
+		 sy6045s_role_name(sy), sy->pbtl_mode,
+		 sy->fw_name ? sy->fw_name : "none");
+
 	mutex_lock(&sy->io_lock);
 	ret = sy6045s_load_firmware(sy, sy->fw_name);
 	mutex_unlock(&sy->io_lock);
@@ -653,6 +744,9 @@ static int sy6045s_init_chip(struct sy6045s_priv *sy)
 
 out:
 	sy6045s_set_sby_mode_on(sy);
+	dev_info(&sy->client->dev,
+		 "[SY6045S:%s] Chip init complete (ret=%d, i2c_writes=%lu, i2c_errors=%lu)\n",
+		 sy6045s_role_name(sy), ret, sy->i2c_writes, sy->i2c_errors);
 	return ret;
 }
 
@@ -768,14 +862,41 @@ static ssize_t default_settings_store(struct device *dev,
 	return ret < 0 ? ret : count;
 }
 
+static ssize_t status_show(struct device *dev,
+			   struct device_attribute *attr, char *buf)
+{
+	struct sy6045s_priv *sy = dev_get_drvdata(dev);
+	unsigned int r00 = 0, r06 = 0, r07 = 0, r15 = 0, r22 = 0;
+
+	if (sy->regmap) {
+		regmap_read(sy->regmap, 0x00, &r00);
+		regmap_read(sy->regmap, 0x06, &r06);
+		regmap_read(sy->regmap, 0x07, &r07);
+		regmap_read(sy->regmap, 0x15, &r15);
+		regmap_read(sy->regmap, 0x22, &r22);
+	}
+
+	return scnprintf(buf, PAGE_SIZE,
+			 "role=%s addr=0x%02x pbtl=%d playing=%d fw=%s loaded=%s crc32=0x%08x reg00=0x%02x mute(06)=0x%02x mvol(07)=0x%02x i2s(15)=0x%02x sby(22)=0x%02x writes=%lu errors=%lu\n",
+			 sy6045s_role_name(sy), sy->client->addr,
+			 sy->pbtl_mode, sy->playing,
+			 sy->fw_name ? sy->fw_name : "none",
+			 sy->settings_file[0] ? sy->settings_file : "none",
+			 sy->settings_crc32,
+			 r00, r06, r07, r15, r22,
+			 sy->i2c_writes, sy->i2c_errors);
+}
+
 static DEVICE_ATTR_RW(settings_file);
 static DEVICE_ATTR_WO(settings);
 static DEVICE_ATTR_WO(default_settings);
+static DEVICE_ATTR_RO(status);
 
 static struct attribute *sy6045s_attrs[] = {
 	&dev_attr_settings.attr,
 	&dev_attr_settings_file.attr,
 	&dev_attr_default_settings.attr,
+	&dev_attr_status.attr,
 	NULL,
 };
 
@@ -793,6 +914,7 @@ static int sy6045s_i2c_probe(struct i2c_client *client,
 	struct device *dev = &client->dev;
 	struct sy6045s_priv *sy;
 	struct regmap_config regmap_cfg;
+	unsigned int dev_id = 0;
 	int count, i, ret;
 
 	sy = devm_kzalloc(dev, sizeof(*sy), GFP_KERNEL);
@@ -802,6 +924,16 @@ static int sy6045s_i2c_probe(struct i2c_client *client,
 	INIT_WORK(&sy->spk_off_work, sy6045s_spk_off_work);
 	INIT_WORK(&sy->spk_on_work, sy6045s_spk_on_work);
 	mutex_init(&sy->io_lock);
+
+	sy->client = client;
+	i2c_set_clientdata(client, sy);
+
+	of_property_read_string(dev->of_node, "firmware", &sy->fw_name);
+	sy->pbtl_mode = of_property_read_bool(dev->of_node, "pbtl-mode");
+
+	dev_info(dev, "[SY6045S:%s] Probing at I2C 0x%02x (pbtl=%d, fw='%s')...\n",
+		 sy6045s_role_name(sy), client->addr, sy->pbtl_mode,
+		 sy->fw_name ? sy->fw_name : "none");
 
 	memset(&regmap_cfg, 0, sizeof(regmap_cfg));
 	regmap_cfg.reg_bits = 8;
@@ -819,12 +951,6 @@ static int sy6045s_i2c_probe(struct i2c_client *client,
 	if (IS_ERR(sy->regmap))
 		return PTR_ERR(sy->regmap);
 
-	sy->client = client;
-	i2c_set_clientdata(client, sy);
-
-	of_property_read_string(dev->of_node, "firmware", &sy->fw_name);
-	sy->pbtl_mode = of_property_read_bool(dev->of_node, "pbtl-mode");
-
 	sy->supplies[0].supply = "vddio";
 	sy->supplies[1].supply = "pvdd";
 	ret = devm_regulator_bulk_get(dev, ARRAY_SIZE(sy->supplies),
@@ -832,22 +958,42 @@ static int sy6045s_i2c_probe(struct i2c_client *client,
 	if (ret == 0) {
 		ret = regulator_bulk_enable(ARRAY_SIZE(sy->supplies),
 					    sy->supplies);
-		if (ret)
+		if (ret) {
+			dev_err(dev, "[SY6045S:%s] Failed to enable regulators: %d\n",
+				sy6045s_role_name(sy), ret);
 			return ret;
+		}
+		dev_info(dev, "[SY6045S:%s] Enabled vddio and pvdd regulators\n",
+			 sy6045s_role_name(sy));
 	}
 
 	sy->reset_gpio = devm_gpiod_get_optional(dev, "reset", GPIOD_OUT_HIGH);
-	if (IS_ERR(sy->reset_gpio))
-		return PTR_ERR(sy->reset_gpio);
+	if (IS_ERR(sy->reset_gpio)) {
+		ret = PTR_ERR(sy->reset_gpio);
+		dev_err(dev, "[SY6045S:%s] Failed to get reset GPIO: %d\n",
+			sy6045s_role_name(sy), ret);
+		return ret;
+	}
 	if (sy->reset_gpio) {
 		msleep(20);
 		gpiod_set_value_cansleep(sy->reset_gpio, 1);
 		msleep(20);
+		dev_info(dev, "[SY6045S:%s] Released reset GPIO\n",
+			 sy6045s_role_name(sy));
 	}
 
 	sy->fault_gpio = devm_gpiod_get_optional(dev, "fault", GPIOD_OUT_HIGH);
 	if (IS_ERR(sy->fault_gpio))
 		sy->fault_gpio = NULL;
+
+	/* Verify physical I2C communication by reading reg 0x00 */
+	ret = regmap_read(sy->regmap, 0x00, &dev_id);
+	if (ret == 0)
+		dev_info(dev, "[SY6045S:%s] I2C communication OK (reg 0x00 = 0x%02x)\n",
+			 sy6045s_role_name(sy), dev_id);
+	else
+		dev_err(dev, "[SY6045S:%s] WARNING: I2C read reg 0x00 failed (%d)! Check 20V_AMPL / 3V3_D / reset GPIO!\n",
+			sy6045s_role_name(sy), ret);
 
 	count = of_property_count_elems_of_size(dev->of_node, "restore-regs",
 						sizeof(u32));
@@ -876,7 +1022,8 @@ static int sy6045s_i2c_probe(struct i2c_client *client,
 
 	ret = sysfs_create_group(&dev->kobj, &sy6045s_attrs_group);
 	if (ret)
-		dev_warn(dev, "failed to create sysfs group: %d\n", ret);
+		dev_warn(dev, "[SY6045S:%s] failed to create sysfs group: %d\n",
+			 sy6045s_role_name(sy), ret);
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 18, 0)
 	return devm_snd_soc_register_component(dev, &soc_component_dev_sy6045s,

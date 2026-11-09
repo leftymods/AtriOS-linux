@@ -1,0 +1,79 @@
+diff --git a/drivers/net/wireless/realtek/rtw88/coex.c b/drivers/net/wireless/realtek/rtw88/coex.c
+index 289fcfc..bb124ad 100644
+--- a/drivers/net/wireless/realtek/rtw88/coex.c
++++ b/drivers/net/wireless/realtek/rtw88/coex.c
+@@ -2746,6 +2746,16 @@ static void __rtw_coex_init_hw_config(struct rtw_dev *rtwdev, bool wifi_only)
+ 		rtw_coex_write_scbd(rtwdev, COEX_SCBD_ACTIVE | COEX_SCBD_ONOFF,
+ 				    true);
+ 		coex->stop_dm = true;
++		/* Vendor Realtek ex_hal8822e_wifi_only_hw_config: */
++		/* Byte 0x73 = 0x0e (WLAN path owner) */
++		rtw_write8(rtwdev, 0x73, 0x0e);
++		/* LTE indirect 0x38 = 0x7700 (GNT_WL=1, GNT_BT=0) */
++		rtw_coex_write_indirect_reg(rtwdev, 0x38, 0xffff, 0x7700);
++		/* LTE indirect 0xa0 = 0xffff, 0xa4 = 0xffff */
++		rtw_coex_write_indirect_reg(rtwdev, 0xa0, 0xffff, 0xffff);
++		rtw_coex_write_indirect_reg(rtwdev, 0xa4, 0xffff, 0xffff);
++		/* 100% WLAN priority in arbitration tables */
++		rtw_write32(rtwdev, REG_BT_COEX_TABLE0, 0xaaaaaaaa);
++		rtw_write32(rtwdev, REG_BT_COEX_TABLE1, 0xaaaaaaaa);
++		pr_info("[RTW88] wifi_only hardware configured (0x73=0x0e, 0x38=0x7700, tbl=0xaaaaaaaa)\n");
++		return;
+ 	} else {
+ 		rtw_coex_set_ant_path(rtwdev, true, COEX_SET_ANT_INIT);
+ 		rtw_coex_write_scbd(rtwdev, COEX_SCBD_ACTIVE | COEX_SCBD_ONOFF,
+@@ -2824,7 +2834,7 @@ void rtw_coex_ips_notify(struct rtw_dev *rtwdev, u8 type)
+ 	case COEX_IPS_ENTER:
+ 		coex_stat->ips_mode = true;
+ 		__rtw_coex_init_hw_config(rtwdev, false);
+ 		break;
+ 	case COEX_IPS_LEAVE:
+ 		coex_stat->ips_mode = false;
+-		__rtw_coex_init_hw_config(rtwdev, false);
++		__rtw_coex_init_hw_config(rtwdev, !rtwdev->efuse.btcoex);
+ 		break;
+ 	default:
+ 		break;
+diff --git a/drivers/net/wireless/realtek/rtw88/phy.c b/drivers/net/wireless/realtek/rtw88/phy.c
+index a709dcf..1a2bb43 100644
+--- a/drivers/net/wireless/realtek/rtw88/phy.c
++++ b/drivers/net/wireless/realtek/rtw88/phy.c
+@@ -1183,7 +1183,7 @@ static bool check_positive(struct rtw_dev *rtwdev, struct rtw_phy_cond cond,
+ 		if ((cond.rfe & BIT(3)) && cond2.type_apa != drv_cond2.type_apa)
+ 			return false;
+ 	} else {
+-		if (cond.rfe != drv_cond.rfe)
++		if (cond.rfe && cond.rfe != drv_cond.rfe)
+ 			return false;
+ 	}
+ 
+@@ -1198,6 +1198,7 @@ void rtw_parse_tbl_phy_cond(struct rtw_dev *rtwdev, const struct rtw_table *tbl)
+ 	struct rtw_phy_cond pos_cond = {};
+ 	struct rtw_phy_cond2 pos_cond2 = {};
+ 	bool is_matched = true, is_skipped = false;
++	u32 count = 0;
+ 
+ 	BUILD_BUG_ON(sizeof(union phy_table_tile) != sizeof(struct phy_cfg_pair));
+ 
+@@ -1231,7 +1232,9 @@ void rtw_parse_tbl_phy_cond(struct rtw_dev *rtwdev, const struct rtw_table *tbl)
+ 			}
+ 		} else if (is_matched) {
+ 			(*tbl->do_cfg)(rtwdev, tbl, p->cfg.addr, p->cfg.data);
++			count++;
+ 		}
+ 	}
++	pr_info("[RTW88-PHY] table configured %u entries\n", count);
+ }
+ EXPORT_SYMBOL(rtw_parse_tbl_phy_cond);
+diff --git a/drivers/net/wireless/realtek/rtw88/rtw8822c.c b/drivers/net/wireless/realtek/rtw88/rtw8822c.c
+index dd36fbc..fbe8249 100644
+--- a/drivers/net/wireless/realtek/rtw88/rtw8822c.c
++++ b/drivers/net/wireless/realtek/rtw88/rtw8822c.c
+@@ -2264,6 +2264,8 @@ static void rtw8822c_phy_set_param(struct rtw_dev *rtwdev)
+ 	rtw_write_rf(rtwdev, RF_PATH_A, RF_CFGCH, RFREG_MASK, rf_reg18);
+ 	rtw_write_rf(rtwdev, RF_PATH_B, RF_CFGCH, RFREG_MASK, rf_reg18);
++	/* RxA enhance-Q setting (from vendor phydm_hal_api8822e) */
++	rtw_write_rf(rtwdev, RF_PATH_A, 0xdf, BIT(18), IS_CH_2G_BAND(channel) ? 1 : 0);
+ 
+ 	rtw8822c_rstb_3wire(rtwdev, true);
+ }

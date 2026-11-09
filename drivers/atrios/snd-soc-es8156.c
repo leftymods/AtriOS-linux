@@ -18,12 +18,17 @@
 #include <linux/gpio/consumer.h>
 #include <linux/of.h>
 #include <linux/property.h>
+#include <linux/sysfs.h>
 #include <sound/pcm.h>
 #include <sound/pcm_params.h>
 #include <sound/soc.h>
 #include <sound/tlv.h>
 
 #define ES8156_DRV_NAME		"es8156"
+
+static bool debug = true;
+module_param(debug, bool, 0644);
+MODULE_PARM_DESC(debug, "Enable verbose ES8156 headphone DAC diagnostics");
 
 static const struct reg_default es8156_reg_defaults[] = {
 	{ 0x00, 0x1c }, { 0x01, 0x20 }, { 0x02, 0x00 }, { 0x03, 0x01 },
@@ -38,12 +43,16 @@ static const struct reg_default es8156_reg_defaults[] = {
 };
 
 struct es8156_priv {
+	struct i2c_client *client;
 	struct regmap *regmap;
 	struct clk *mclk;
 	u32 mclk_mult;
 	bool sclk_as_mclk;
 	bool dll_enable;
 	bool muted;
+	bool hw_inited;
+	u16 chip_id;
+	u8 chip_ver;
 };
 
 static const DECLARE_TLV_DB_SCALE(dac_vol_tlv, -9550, 50, 1);
@@ -67,7 +76,14 @@ static const struct snd_soc_dapm_route es8156_dapm_routes[] = {
 
 static int es8156_hw_init(struct es8156_priv *es)
 {
-	regmap_write(es->regmap, 0x00, 0x1c);
+	int ret;
+
+	ret = regmap_write(es->regmap, 0x00, 0x1c);
+	if (ret < 0) {
+		dev_err(&es->client->dev,
+			"[ES8156] hw_init failed at reg 0x00: %d\n", ret);
+		return ret;
+	}
 	usleep_range(5000, 5500);
 	regmap_write(es->regmap, 0x00, 0x03);
 	regmap_write(es->regmap, 0x00, 0x3c);
@@ -91,6 +107,11 @@ static int es8156_hw_init(struct es8156_priv *es)
 	regmap_write(es->regmap, 0x00, 0x02);
 	regmap_write(es->regmap, 0x00, 0x03);
 	regmap_write(es->regmap, 0x25, 0x20);
+	es->hw_inited = true;
+
+	dev_info(&es->client->dev,
+		 "[ES8156] hw_init completed (sclk_as_mclk=%d, dll_enable=%d, mclk_mult_idx=%u)\n",
+		 es->sclk_as_mclk, es->dll_enable, es->mclk_mult);
 	return 0;
 }
 
@@ -101,6 +122,9 @@ static int es8156_set_dai_fmt(struct snd_soc_dai *dai, unsigned int fmt)
 #else
 	struct es8156_priv *es = snd_soc_codec_get_drvdata(dai->codec);
 #endif
+
+	if (debug)
+		dev_info(&es->client->dev, "[ES8156] set_dai_fmt: fmt=0x%08x\n", fmt);
 
 	switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
 	case SND_SOC_DAIFMT_BC_FP:
@@ -143,6 +167,12 @@ static int es8156_pcm_hw_params(struct snd_pcm_substream *substream,
 	struct es8156_priv *es = snd_soc_codec_get_drvdata(dai->codec);
 #endif
 
+	if (debug)
+		dev_info(&es->client->dev,
+			 "[ES8156] hw_params: rate=%u width=%d channels=%u\n",
+			 params_rate(params), params_width(params),
+			 params_channels(params));
+
 	switch (params_width(params)) {
 	case 16:
 		regmap_update_bits(es->regmap, 0x11, 0x70, 0x30);
@@ -171,6 +201,9 @@ static int es8156_mute_stream(struct snd_soc_dai *dai, int mute, int direction)
 #endif
 
 	es->muted = !!mute;
+	if (debug)
+		dev_info(&es->client->dev, "[ES8156] mute_stream: mute=%d\n", mute);
+
 	if (mute)
 		regmap_update_bits(es->regmap, 0x13, 0x08, 0x08);
 	else
@@ -249,6 +282,25 @@ static const struct snd_soc_codec_driver soc_codec_dev_es8156 = {
 };
 #endif
 
+static ssize_t status_show(struct device *dev,
+			   struct device_attribute *attr, char *buf)
+{
+	struct es8156_priv *es = dev_get_drvdata(dev);
+	unsigned int r13 = 0, r14 = 0;
+
+	if (es->regmap) {
+		regmap_read(es->regmap, 0x13, &r13);
+		regmap_read(es->regmap, 0x14, &r14);
+	}
+
+	return sysfs_emit(buf,
+			  "addr=0x%02x chip_id=0x%04x ver=0x%02x hw_inited=%d muted=%d reg13=0x%02x vol(14)=0x%02x sclk_as_mclk=%d dll_enable=%d\n",
+			  es->client->addr, es->chip_id, es->chip_ver,
+			  es->hw_inited, es->muted, r13, r14,
+			  es->sclk_as_mclk, es->dll_enable);
+}
+static DEVICE_ATTR_RO(status);
+
 static const struct regmap_config es8156_regmap_config = {
 	.reg_bits = 8,
 	.val_bits = 8,
@@ -268,10 +320,13 @@ static int es8156_i2c_probe(struct i2c_client *client,
 	struct device *dev = &client->dev;
 	struct es8156_priv *es;
 	u32 mult = 1;
+	int id_hi, id_lo, ver;
 
 	es = devm_kzalloc(dev, sizeof(*es), GFP_KERNEL);
 	if (!es)
 		return -ENOMEM;
+
+	es->client = client;
 
 	if (device_property_read_u32(dev, "everest,mclk-multiplier", &mult) == 0) {
 		switch (mult) {
@@ -286,11 +341,28 @@ static int es8156_i2c_probe(struct i2c_client *client,
 	es->sclk_as_mclk = device_property_present(dev, "everest,sclk-as-mclk");
 	es->dll_enable = device_property_present(dev, "everest,dll-enable");
 
+	/* Read physical chip ID registers 0xFD, 0xFE, 0xFF over I2C */
+	id_hi = i2c_smbus_read_byte_data(client, 0xfd);
+	id_lo = i2c_smbus_read_byte_data(client, 0xfe);
+	ver = i2c_smbus_read_byte_data(client, 0xff);
+	if (id_hi >= 0 && id_lo >= 0) {
+		es->chip_id = ((u16)id_hi << 8) | (u8)id_lo;
+		es->chip_ver = ver >= 0 ? (u8)ver : 0;
+		dev_info(dev,
+			 "[ES8156] Probed at I2C 0x%02x: chip_id=0x%04x (expected 0x8155), ver=0x%02x\n",
+			 client->addr, es->chip_id, es->chip_ver);
+	} else {
+		dev_err(dev,
+			"[ES8156] WARNING: Failed to read chip ID at I2C 0x%02x (ret=%d/%d)\n",
+			client->addr, id_hi, id_lo);
+	}
+
 	es->regmap = devm_regmap_init_i2c(client, &es8156_regmap_config);
 	if (IS_ERR(es->regmap))
 		return PTR_ERR(es->regmap);
 
 	i2c_set_clientdata(client, es);
+	device_create_file(dev, &dev_attr_status);
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 18, 0)
 	return devm_snd_soc_register_component(dev, &soc_component_dev_es8156,
@@ -307,6 +379,7 @@ static void es8156_i2c_remove(struct i2c_client *client)
 static int es8156_i2c_remove(struct i2c_client *client)
 #endif
 {
+	device_remove_file(&client->dev, &dev_attr_status);
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 18, 0)
 	snd_soc_unregister_codec(&client->dev);
 #endif

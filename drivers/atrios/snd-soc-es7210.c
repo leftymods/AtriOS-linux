@@ -20,12 +20,17 @@
 #include <linux/of.h>
 #include <linux/of_device.h>
 #include <linux/workqueue.h>
+#include <linux/sysfs.h>
 #include <sound/pcm.h>
 #include <sound/pcm_params.h>
 #include <sound/soc.h>
 #include <sound/tlv.h>
 
 #define ES7210_DRV_NAME		"es7210"
+
+static bool debug = true;
+module_param(debug, bool, 0644);
+MODULE_PARM_DESC(debug, "Enable verbose ES7210 ADC diagnostics");
 
 static const u8 es7210_reg_init_seq[][2] = {
 	{ 0x00, 0x32 }, { 0x01, 0x20 }, { 0x02, 0x02 }, { 0x03, 0x04 },
@@ -53,8 +58,12 @@ static const u8 es7210_tdm_reg_common_cfg[][2] = {
 };
 
 struct es7210_priv {
+	struct i2c_client *client;
 	struct regmap *regmap;
 	u8 channels;
+	u16 chip_id;
+	bool hw_inited;
+	bool muted;
 	struct delayed_work pcm_pop_work;
 };
 
@@ -84,6 +93,9 @@ static void pcm_pop_work_events(struct work_struct *work)
 
 	regmap_update_bits(es->regmap, 0x14, 0x03, 0x00);
 	regmap_update_bits(es->regmap, 0x15, 0x03, 0x00);
+	es->muted = false;
+	if (debug)
+		dev_info(&es->client->dev, "[ES7210] pcm_pop_work: unmuted ADC1..4\n");
 }
 
 static int es7210_pcm_startup(struct snd_pcm_substream *substream,
@@ -95,7 +107,9 @@ static int es7210_pcm_startup(struct snd_pcm_substream *substream,
 	struct es7210_priv *es = snd_soc_codec_get_drvdata(dai->codec);
 #endif
 
-	schedule_delayed_work(&es->pcm_pop_work, 25);
+	if (debug)
+		dev_info(&es->client->dev, "[ES7210] pcm_startup: scheduling unmute\n");
+	queue_delayed_work(system_dfl_wq, &es->pcm_pop_work, 25);
 	return 0;
 }
 
@@ -106,6 +120,9 @@ static int es7210_set_dai_fmt(struct snd_soc_dai *dai, unsigned int fmt)
 #else
 	struct es7210_priv *es = snd_soc_codec_get_drvdata(dai->codec);
 #endif
+
+	if (debug)
+		dev_info(&es->client->dev, "[ES7210] set_dai_fmt: fmt=0x%08x\n", fmt);
 
 	switch (fmt & SND_SOC_DAIFMT_FORMAT_MASK) {
 	case SND_SOC_DAIFMT_I2S:
@@ -142,7 +159,7 @@ static int es7210_set_dai_fmt(struct snd_soc_dai *dai, unsigned int fmt)
 	switch (fmt & SND_SOC_DAIFMT_INV_MASK) {
 	case SND_SOC_DAIFMT_NB_IF:
 	case SND_SOC_DAIFMT_IB_IF:
-		regmap_update_bits(es->regmap, 0x08, 0x08, 0x01);
+		regmap_update_bits(es->regmap, 0x08, 0x08, 0x08);
 		break;
 	case SND_SOC_DAIFMT_NB_NF:
 	case SND_SOC_DAIFMT_IB_NF:
@@ -163,6 +180,10 @@ static int es7210_mute_stream(struct snd_soc_dai *dai, int mute, int direction)
 	struct es7210_priv *es = snd_soc_codec_get_drvdata(dai->codec);
 #endif
 	unsigned int val = mute ? 0x03 : 0x00;
+
+	es->muted = !!mute;
+	if (debug)
+		dev_info(&es->client->dev, "[ES7210] mute_stream: mute=%d\n", mute);
 
 	regmap_update_bits(es->regmap, 0x14, 0x03, val);
 	regmap_update_bits(es->regmap, 0x15, 0x03, val);
@@ -223,6 +244,11 @@ static int es7210_hw_init(struct es7210_priv *es)
 
 	regmap_update_bits(es->regmap, 0x14, 0x03, 0x03);
 	regmap_update_bits(es->regmap, 0x15, 0x03, 0x03);
+	es->hw_inited = true;
+	es->muted = true;
+
+	dev_info(&es->client->dev,
+		 "[ES7210] hw_init completed (channels=%u)\n", es->channels);
 	return 0;
 }
 
@@ -257,6 +283,26 @@ static const struct snd_soc_codec_driver soc_codec_dev_es7210 = {
 };
 #endif
 
+static ssize_t status_show(struct device *dev,
+			   struct device_attribute *attr, char *buf)
+{
+	struct es7210_priv *es = dev_get_drvdata(dev);
+	unsigned int r08 = 0, r11 = 0, r14 = 0, r15 = 0;
+
+	if (es->regmap) {
+		regmap_read(es->regmap, 0x08, &r08);
+		regmap_read(es->regmap, 0x11, &r11);
+		regmap_read(es->regmap, 0x14, &r14);
+		regmap_read(es->regmap, 0x15, &r15);
+	}
+
+	return sysfs_emit(buf,
+			  "addr=0x%02x chip_id=0x%04x channels=%u hw_inited=%d muted=%d mode(08)=0x%02x sdp(11)=0x%02x mute34(14)=0x%02x mute12(15)=0x%02x\n",
+			  es->client->addr, es->chip_id, es->channels,
+			  es->hw_inited, es->muted, r08, r11, r14, r15);
+}
+static DEVICE_ATTR_RO(status);
+
 static const struct regmap_config es7210_regmap_config = {
 	.reg_bits = 8,
 	.val_bits = 8,
@@ -282,12 +328,15 @@ static int es7210_i2c_probe(struct i2c_client *client,
 	struct device *dev = &client->dev;
 	const struct of_device_id *match;
 	struct es7210_priv *es;
+	int id_hi, id_lo;
 	size_t i;
 	int ret;
 
 	es = devm_kzalloc(dev, sizeof(*es), GFP_KERNEL);
 	if (!es)
 		return -ENOMEM;
+
+	es->client = client;
 
 	match = of_match_device(es7210_dt_ids, dev);
 	if (match && match->data)
@@ -297,6 +346,19 @@ static int es7210_i2c_probe(struct i2c_client *client,
 
 	INIT_DELAYED_WORK(&es->pcm_pop_work, pcm_pop_work_events);
 
+	id_hi = i2c_smbus_read_byte_data(client, 0x3d);
+	id_lo = i2c_smbus_read_byte_data(client, 0x3e);
+	if (id_hi >= 0 && id_lo >= 0) {
+		es->chip_id = ((u16)id_hi << 8) | (u8)id_lo;
+		dev_info(dev,
+			 "[ES7210] Probed at I2C 0x%02x: chip_id=0x%04x (expected 0x7210), channels=%u\n",
+			 client->addr, es->chip_id, es->channels);
+	} else {
+		dev_err(dev,
+			"[ES7210] WARNING: Failed to read chip ID at I2C 0x%02x (ret=%d/%d)\n",
+			client->addr, id_hi, id_lo);
+	}
+
 	es->regmap = devm_regmap_init_i2c(client, &es7210_regmap_config);
 	if (IS_ERR(es->regmap))
 		return PTR_ERR(es->regmap);
@@ -305,11 +367,16 @@ static int es7210_i2c_probe(struct i2c_client *client,
 		ret = regmap_write(es->regmap,
 				   es7210_reg_init_seq[i][0],
 				   es7210_reg_init_seq[i][1]);
-		if (ret < 0)
+		if (ret < 0) {
+			dev_err(dev,
+				"[ES7210] Failed to write init reg 0x%02x: %d\n",
+				es7210_reg_init_seq[i][0], ret);
 			return ret;
+		}
 	}
 
 	i2c_set_clientdata(client, es);
+	device_create_file(dev, &dev_attr_status);
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 18, 0)
 	return devm_snd_soc_register_component(dev, &soc_component_dev_es7210,
@@ -328,6 +395,7 @@ static int es7210_i2c_remove(struct i2c_client *client)
 {
 	struct es7210_priv *es = i2c_get_clientdata(client);
 
+	device_remove_file(&client->dev, &dev_attr_status);
 	if (es)
 		cancel_delayed_work_sync(&es->pcm_pop_work);
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 18, 0)

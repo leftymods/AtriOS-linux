@@ -17,7 +17,6 @@ echo "[$(date)] 3. Building eMMC Image..."
 ./compile.sh BOARD=yndxsttion53 TARGET=image
 
 echo "[$(date)] 4. Copying to Windows Desktop origfw..."
-cp -f output/images/AtriOS-Nebula-yndxsttion53-emmc.img /mnt/c/Users/ggala/Desktop/origfw/AtriOS-Nebula-yndxsttion53-emmc.img
 
 echo "[$(date)] 5. Committing to git..."
 git add drivers/atrios/ board/yandex/ lib/ scripts/

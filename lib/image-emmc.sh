@@ -15,7 +15,6 @@ build_emmc_image() {
 
     local out_dir="$PROJECT_ROOT/output/images"
     local img_path="$out_dir/${IMAGE_FILENAME}"
-    local win_dest="/mnt/c/Users/ggala/Desktop/origfw/${IMAGE_FILENAME}"
     
     local boot_staging="/tmp/atrios_boot_staging"
     local boot_vfat="/tmp/atrios_boot.vfat"
@@ -45,7 +44,7 @@ build_emmc_image() {
 echo '=== Starting ${OS_NAME} ${RELEASE_NAME} from eMMC ==='
 setenv fdt_high 0x20000000
 setenv initrd_high 0x20000000
-setenv bootargs 'root=PARTUUID=4a7e8b12-02 rootwait rw console=${SERIAL_CONSOLE} quiet loglevel=3 init=/sbin/init'
+setenv bootargs 'root=PARTUUID=4a7e8b12-02 rootwait rw console=${SERIAL_CONSOLE} loglevel=7 init=/sbin/init'
 if test -z '\${kernel_addr_r}'; then setenv kernel_addr_r 0x08080000; fi
 if test -z '\${fdt_addr_r}'; then setenv fdt_addr_r 0x08008000; fi
 
@@ -68,7 +67,7 @@ EOF
 LABEL ${OS_NAME}-${RELEASE_NAME}
     LINUX /Image
     FDT /${DTS_NAME}.dtb
-    APPEND root=PARTUUID=4a7e8b12-02 rootwait rw console=${SERIAL_CONSOLE} quiet loglevel=3 init=/sbin/init
+    APPEND root=PARTUUID=4a7e8b12-02 rootwait rw console=${SERIAL_CONSOLE} loglevel=7 init=/sbin/init
 EOF
 
     # uEnv.txt
@@ -76,7 +75,7 @@ EOF
 dtb_name=/${DTS_NAME}.dtb
 fdt_high=0x20000000
 initrd_high=0x20000000
-bootargs=root=PARTUUID=4a7e8b12-02 rootwait rw console=${SERIAL_CONSOLE} quiet loglevel=3 init=/sbin/init
+bootargs=root=PARTUUID=4a7e8b12-02 rootwait rw console=${SERIAL_CONSOLE} loglevel=7 init=/sbin/init
 EOF
 
     # 2. Build 128MB FAT32 BOOT Partition
@@ -125,13 +124,9 @@ ${img_path}2 : start=${p2_start}, size=${p2_size}, type=83
     # Clean temporary files
     rm -rf "$boot_staging" "$boot_vfat"
 
-    display_alert "OK" "eMMC image built successfully:" "${img_path}"
-    display_alert "INFO" "Image size:" "$(stat -c %s "$img_path") bytes"
+    cp -f "$img_path" "$out_dir/emmc.img"
 
-    # 7. Copy to Windows Desktop
-    if [ -d "/mnt/c/Users/ggala/Desktop/origfw" ]; then
-        display_alert "INFO" "Transferring image to Windows:" "${win_dest}..."
-        cp "$img_path" "$win_dest"
-        display_alert "OK" "Transferred to Windows successfully:" "${win_dest}"
-    fi
+    display_alert "OK" "eMMC image built successfully:" "${img_path}"
+    display_alert "OK" "Alias created:" "$out_dir/emmc.img"
+    display_alert "INFO" "Image size:" "$(stat -c %s "$img_path") bytes"
 }

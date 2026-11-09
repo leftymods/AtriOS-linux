@@ -54,6 +54,10 @@
 #define QLS_YRES		16
 #define QLS_BPP			3
 
+static bool debug = true;
+module_param(debug, bool, 0644);
+MODULE_PARM_DESC(debug, "Enable verbose Quasar LED screen SPI and protocol logging");
+
 struct sa_device {
 	struct spi_device	*spi;
 	int			crc_check;
@@ -112,6 +116,12 @@ struct qls_priv {
 	int			disable_test_mode;
 	u8			screen_fw_after_start;
 
+	unsigned long		spi_tx_count;
+	unsigned long		spi_rx_count;
+	unsigned long		spi_errors;
+	unsigned long		crc_errors;
+	unsigned long		sync_count;
+
 	struct timer_list	flush_timer;
 	struct work_struct	flush_work;
 	bool			flush_pending;
@@ -126,30 +136,54 @@ static u16 qls_crc16(const u8 *data, int len)
 
 static int spi_send(struct spi_device *spi, const void *buf, size_t len)
 {
+	struct qls_priv *qls = spi_get_drvdata(spi);
 	struct spi_message msg;
 	struct spi_transfer xfer = {
 		.tx_buf = buf,
 		.len = len,
 		.speed_hz = SA_SPI_SPEED,
 	};
+	int ret;
 
 	spi_message_init(&msg);
 	spi_message_add_tail(&xfer, &msg);
-	return spi_sync(spi, &msg);
+	ret = spi_sync(spi, &msg);
+	if (qls) {
+		if (ret) {
+			qls->spi_errors++;
+			dev_err(&spi->dev, "[QLS-SPI] TX error (%zu bytes): %d\n",
+				len, ret);
+		} else {
+			qls->spi_tx_count++;
+		}
+	}
+	return ret;
 }
 
 static int spi_recv(struct spi_device *spi, void *buf, size_t len)
 {
+	struct qls_priv *qls = spi_get_drvdata(spi);
 	struct spi_message msg;
 	struct spi_transfer xfer = {
 		.rx_buf = buf,
 		.len = len,
 		.speed_hz = SA_SPI_SPEED,
 	};
+	int ret;
 
 	spi_message_init(&msg);
 	spi_message_add_tail(&xfer, &msg);
-	return spi_sync(spi, &msg);
+	ret = spi_sync(spi, &msg);
+	if (qls) {
+		if (ret) {
+			qls->spi_errors++;
+			dev_err(&spi->dev, "[QLS-SPI] RX error (%zu bytes): %d\n",
+				len, ret);
+		} else {
+			qls->spi_rx_count++;
+		}
+	}
+	return ret;
 }
 
 /* ---- SA protocol helpers ---- */
@@ -210,7 +244,8 @@ static int sa_send_cmd_short(struct sa_device *sa, u8 cmd,
 	return spi_send(sa->spi, buf, txlen);
 }
 
-static int sa_parse_response(const u8 *buf, int len, struct sa_response *out)
+static int sa_parse_response(struct qls_priv *qls, const u8 *buf, int len,
+			     struct sa_response *out)
 {
 	u16 crc, crc_exp;
 
@@ -237,7 +272,17 @@ static int sa_parse_response(const u8 *buf, int len, struct sa_response *out)
 	crc_exp = buf[14] | ((u16)buf[15] << 8);
 	crc = qls_crc16(buf, 14);
 
-	return crc == crc_exp ? 0 : -EILSEQ;
+	if (crc != crc_exp) {
+		if (qls)
+			qls->crc_errors++;
+		if (debug && qls)
+			dev_warn(&qls->spi->dev,
+				 "[QLS-SA] response CRC mismatch: calc=0x%04x != exp=0x%04x (raw: %16ph)\n",
+				 crc, crc_exp, buf);
+		return -EILSEQ;
+	}
+
+	return 0;
 }
 
 static int sa_none(struct sa_device *sa, u8 *resp, int resp_len)
@@ -245,7 +290,7 @@ static int sa_none(struct sa_device *sa, u8 *resp, int resp_len)
 	return sa_send_recv(sa, SA_CMD_NONE, NULL, 0, resp, resp_len);
 }
 
-static int sa_none_blocking(struct sa_device *sa)
+static int sa_none_blocking(struct qls_priv *qls, struct sa_device *sa)
 {
 	struct sa_response resp;
 	int retry = 10;
@@ -255,7 +300,7 @@ static int sa_none_blocking(struct sa_device *sa)
 		ret = sa_send_recv(sa, SA_CMD_NONE, NULL, 0,
 				   sa->respbuf, SA_RESP_BUF_SIZE);
 		if (!ret) {
-			ret = sa_parse_response(sa->respbuf,
+			ret = sa_parse_response(qls, sa->respbuf,
 						SA_RESP_BUF_SIZE, &resp);
 			if (!ret && resp.magic == SA_RESP_MAGIC) {
 				sa->api_version = resp.fw_version;
@@ -314,7 +359,7 @@ static int __maybe_unused sa_test(struct sa_device *sa, const u8 *data, int len)
 	return spi_send(sa->spi, buf, txlen);
 }
 
-static int sa_show_pic(struct sa_device *sa, const u8 *data, int len)
+static int __maybe_unused sa_show_pic(struct sa_device *sa, const u8 *data, int len)
 {
 	u8 buf[SA_CMD_BUF_SIZE];
 	u16 crc;
@@ -384,7 +429,7 @@ static int bl_get_info(struct spi_device *spi, struct bl_info *info)
 	return 0;
 }
 
-__maybe_unused __maybe_unused __maybe_unused static int bl_restart(struct spi_device *spi)
+static int __maybe_unused bl_restart(struct spi_device *spi)
 {
 	struct bl_info info;
 	int ret;
@@ -398,12 +443,12 @@ __maybe_unused __maybe_unused __maybe_unused static int bl_restart(struct spi_de
 	return bl_send_cmd(spi, BL_CMD_RESTART);
 }
 
-__maybe_unused __maybe_unused __maybe_unused static int bl_run_app(struct spi_device *spi)
+static int __maybe_unused bl_run_app(struct spi_device *spi)
 {
 	return bl_send_cmd(spi, BL_CMD_RUN_APP);
 }
 
-__maybe_unused __maybe_unused __maybe_unused static int bl_write_fw(struct spi_device *spi, const u8 *data, int len)
+static int __maybe_unused bl_write_fw(struct spi_device *spi, const u8 *data, int len)
 {
 	struct bl_info info;
 	int ret, offset = 0;
@@ -444,60 +489,6 @@ __maybe_unused __maybe_unused __maybe_unused static int bl_write_fw(struct spi_d
 		offset += chunk;
 	}
 	return 0;
-}
-
-static const char *bl_str_state(u8 state)
-{
-	switch (state) {
-	case BL_STATE_READY:	return "ready";
-	case BL_STATE_BUSY:	return "busy";
-	case BL_STATE_BOOT:	return "boot";
-	case BL_STATE_DONE:	return "done";
-	default:		return "unknown";
-	}
-}
-
-static const char *bl_str_fw_status(u8 status)
-{
-	switch (status) {
-	case 0:	return "idle";
-	case 1:	return "writing";
-	case 2:	return "verifying";
-	case 3:	return "complete";
-	default: return "unknown";
-	}
-}
-
-static int bl_check_and_run(struct spi_device *spi)
-{
-	struct bl_info info;
-	int ret;
-
-	ret = bl_get_info(spi, &info);
-	if (ret)
-		return ret;
-
-	if (info.state == BL_STATE_READY)
-		return bl_run_app(spi);
-
-	return 0;
-}
-
-static int bl_wait_until_ready(struct spi_device *spi, int timeout_ms)
-{
-	struct bl_info info;
-	int ret, tries = timeout_ms / 10;
-
-	do {
-		ret = bl_get_info(spi, &info);
-		if (ret)
-			return ret;
-		if (info.state != BL_STATE_BUSY)
-			return 0;
-		msleep(10);
-	} while (tries-- > 0);
-
-	return -ETIMEDOUT;
 }
 
 /* ---- Framebuffer operations ---- */
@@ -606,7 +597,7 @@ static void qls_flush_timer(unsigned long data)
 
 	if (!qls->flush_pending) {
 		qls->flush_pending = true;
-		schedule_work(&qls->flush_work);
+		queue_work(system_dfl_wq, &qls->flush_work);
 	}
 }
 
@@ -632,6 +623,7 @@ static int qls_fb_sync(struct fb_info *info)
 	}
 
 	mutex_lock(&qls->sa->lock);
+	qls->sync_count++;
 
 	/* 1. Station Max Gowin FPGA: CMD_WRITE (0x10) + CMD_SHOW_PIC (0x03) */
 	gowin_buf = kmalloc(3 + total_pixels, GFP_KERNEL);
@@ -692,6 +684,7 @@ static void qls_fb_destroy(struct fb_info *info)
 #endif
 	cancel_work_sync(&qls->flush_work);
 	vfree(qls->videomemory);
+	qls->videomemory = NULL;
 }
 
 static int qls_fb_mmap(struct fb_info *info, struct vm_area_struct *vma)
@@ -699,26 +692,21 @@ static int qls_fb_mmap(struct fb_info *info, struct vm_area_struct *vma)
 	return remap_vmalloc_range(vma, info->screen_buffer, vma->vm_pgoff);
 }
 
-static void qls_draw_lines(struct qls_priv *qls)
-{
-	qls_fb_sync(qls->fb);
-}
-
 static void qls_fb_fillrect(struct fb_info *info, const struct fb_fillrect *rect)
 {
-	cfb_fillrect(info, rect);
+	sys_fillrect(info, rect);
 	qls_fb_sync(info);
 }
 
 static void qls_fb_copyarea(struct fb_info *info, const struct fb_copyarea *area)
 {
-	cfb_copyarea(info, area);
+	sys_copyarea(info, area);
 	qls_fb_sync(info);
 }
 
 static void qls_fb_imageblit(struct fb_info *info, const struct fb_image *image)
 {
-	cfb_imageblit(info, image);
+	sys_imageblit(info, image);
 	qls_fb_sync(info);
 }
 
@@ -747,6 +735,10 @@ static int qls_bl_update_status(struct backlight_device *bd)
 	u8 gowin_bright[3] = { 0x05, 0x00, 0x00 };
 
 	qls->brightness = clamp(bd->props.brightness, 0, qls->max_brightness);
+	if (debug)
+		dev_info(&qls->spi->dev,
+			 "[QLS] set backlight brightness=%d (max=%d)\n",
+			 qls->brightness, qls->max_brightness);
 
 	mutex_lock(&qls->sa->lock);
 	/* Gowin protocol: CMD_SET_BRIGHTNESS = 0x05 */
@@ -819,7 +811,8 @@ static int qls_load_firmware_update(struct qls_priv *qls)
 	ret = request_firmware(&manifest_fw, manifest_name, &qls->spi->dev);
 	if (ret) {
 		dev_warn(&qls->spi->dev,
-			 "no firmware manifest, skipping update\n");
+			 "[QLS] no firmware manifest '%s' (%d), skipping update\n",
+			 manifest_name, ret);
 		return 0;
 	}
 
@@ -832,7 +825,7 @@ static int qls_load_firmware_update(struct qls_priv *qls)
 
 	if (parsed < 3) {
 		dev_err(&qls->spi->dev,
-			"failed to parse firmware manifest\n");
+			"[QLS] failed to parse firmware manifest\n");
 		return -EINVAL;
 	}
 
@@ -842,14 +835,14 @@ static int qls_load_firmware_update(struct qls_priv *qls)
 
 	if (qls->sa->api_version < min_api) {
 		dev_err(&qls->spi->dev,
-			"SA API %d below min required %hhu\n",
+			"[QLS] SA API %d below min required %hhu\n",
 			qls->sa->api_version, min_api);
 		return -EINVAL;
 	}
 
 	if (qls->sa->api_version > max_api) {
 		dev_err(&qls->spi->dev,
-			"SA API %d above max supported %hhu\n",
+			"[QLS] SA API %d above max supported %hhu\n",
 			qls->sa->api_version, max_api);
 		return -EINVAL;
 	}
@@ -857,25 +850,26 @@ static int qls_load_firmware_update(struct qls_priv *qls)
 	ret = request_firmware(&fw, fw_name, &qls->spi->dev);
 	if (ret) {
 		dev_err(&qls->spi->dev,
-			"failed to load firmware update\n");
+			"[QLS] failed to load firmware update '%s': %d\n",
+			fw_name, ret);
 		return ret;
 	}
 
 	if (crc16 != qls_crc16(fw->data, fw->size)) {
 		dev_err(&qls->spi->dev,
-			"firmware CRC mismatch\n");
+			"[QLS] firmware CRC mismatch\n");
 		release_firmware(fw);
 		return -EILSEQ;
 	}
 
 	dev_info(&qls->spi->dev,
-		 "firmware update: version %hhu, size %zu\n",
+		 "[QLS] firmware update: version %hhu, size %zu\n",
 		 version, fw->size);
 
 	ret = bl_restart(qls->spi);
 	if (ret) {
 		dev_err(&qls->spi->dev,
-			"failed to reboot into bootloader: %d\n", ret);
+			"[QLS] failed to reboot into bootloader: %d\n", ret);
 		release_firmware(fw);
 		return ret;
 	}
@@ -885,7 +879,7 @@ static int qls_load_firmware_update(struct qls_priv *qls)
 	ret = bl_write_fw(qls->spi, fw->data, fw->size);
 	if (ret) {
 		dev_err(&qls->spi->dev,
-			"failed to write firmware: %d\n", ret);
+			"[QLS] failed to write firmware: %d\n", ret);
 		release_firmware(fw);
 		return ret;
 	}
@@ -893,23 +887,23 @@ static int qls_load_firmware_update(struct qls_priv *qls)
 	ret = bl_run_app(qls->spi);
 	if (ret) {
 		dev_err(&qls->spi->dev,
-			"failed to run new firmware: %d\n", ret);
+			"[QLS] failed to run new firmware: %d\n", ret);
 		release_firmware(fw);
 		return ret;
 	}
 
 	msleep(50);
 
-	ret = sa_none_blocking(qls->sa);
+	ret = sa_none_blocking(qls, qls->sa);
 	if (ret)
 		dev_warn(&qls->spi->dev,
-			 "SA not responsive after fw update: %d\n", ret);
+			 "[QLS] SA not responsive after fw update: %d\n", ret);
 
 	sa_set_crc_check(qls->sa, 1);
 	sa_start_boot_animation(qls->sa);
 
 	release_firmware(fw);
-	dev_info(&qls->spi->dev, "firmware update completed\n");
+	dev_info(&qls->spi->dev, "[QLS] firmware update completed\n");
 	return 0;
 }
 
@@ -1024,6 +1018,21 @@ static ssize_t flush_frame_queue_store(struct device *dev,
 	return count;
 }
 
+static ssize_t status_show(struct device *dev,
+			   struct device_attribute *attr, char *buf)
+{
+	struct qls_priv *qls = dev_get_drvdata(dev);
+
+	return scnprintf(buf, PAGE_SIZE,
+			 "res=%ux%u bpp=%u brightness=%d/%d fw=%u api=%d syncs=%lu spi_tx=%lu spi_rx=%lu spi_err=%lu crc_err=%lu\n",
+			 qls->xres, qls->yres, qls->pixel_depth * 8,
+			 qls->brightness, qls->max_brightness,
+			 qls->fw_version, qls->sa->api_version,
+			 qls->sync_count, qls->spi_tx_count,
+			 qls->spi_rx_count, qls->spi_errors,
+			 qls->crc_errors);
+}
+
 static DEVICE_ATTR_RW(next_frame_delay);
 static DEVICE_ATTR_RO(screen_fw_after_start);
 static DEVICE_ATTR_RO(screen_reset_count);
@@ -1034,6 +1043,7 @@ static DEVICE_ATTR_RO(frame_queue_overflows);
 static DEVICE_ATTR_RO(screen_fw_current);
 static DEVICE_ATTR_WO(disable_test_mode);
 static DEVICE_ATTR_WO(flush_frame_queue);
+static DEVICE_ATTR_RO(status);
 
 static struct attribute *qls_attrs[] = {
 	&dev_attr_next_frame_delay.attr,
@@ -1046,6 +1056,7 @@ static struct attribute *qls_attrs[] = {
 	&dev_attr_screen_fw_current.attr,
 	&dev_attr_disable_test_mode.attr,
 	&dev_attr_flush_frame_queue.attr,
+	&dev_attr_status.attr,
 	NULL,
 };
 
@@ -1065,6 +1076,9 @@ static int qls_probe(struct spi_device *spi)
 	struct device *hwmon_dev;
 	struct sa_response resp;
 	int ret;
+
+	dev_info(&spi->dev, "[QLS] Probing Quasar LED Screen on SPI CS=%u...\n",
+		 spi_get_chipselect(spi, 0));
 
 	qls = devm_kzalloc(&spi->dev, sizeof(*qls), GFP_KERNEL);
 	if (!qls)
@@ -1099,13 +1113,15 @@ static int qls_probe(struct spi_device *spi)
 
 	qls->reset = devm_gpiod_get(&spi->dev, "reset", GPIOD_ASIS);
 	if (IS_ERR(qls->reset)) {
-		dev_warn(&spi->dev, "reset GPIO not defined, skipping\n");
+		dev_info(&spi->dev, "[QLS] reset GPIO not defined, skipping hardware reset\n");
 		qls->reset = NULL;
 	} else {
+		dev_info(&spi->dev, "[QLS] pulsing reset GPIO...\n");
 		gpiod_set_value_cansleep(qls->reset, 1);
 		usleep_range(10000, 15000);
 		gpiod_set_value_cansleep(qls->reset, 0);
 		usleep_range(100000, 120000);
+		qls->reset_count++;
 	}
 
 	of_property_read_u32(spi->dev.of_node, "max-brightness",
@@ -1115,13 +1131,14 @@ static int qls_probe(struct spi_device *spi)
 
 	ret = sa_none(sa, sa->respbuf, SA_RESP_BUF_SIZE);
 	if (ret) {
-		dev_warn(&spi->dev, "SA not responding: %d, trying fw update\n",
+		dev_warn(&spi->dev, "[QLS] SA not responding (%d), trying fw update\n",
 			 ret);
 		qls_load_firmware_update(qls);
-		ret = sa_none_blocking(sa);
+		ret = sa_none_blocking(qls, sa);
 		if (ret) {
 			dev_err(&spi->dev,
-				"SA still not responding after update\n");
+				"[QLS] SA still not responding after update: %d\n",
+				ret);
 			return ret;
 		}
 	}
@@ -1129,9 +1146,16 @@ static int qls_probe(struct spi_device *spi)
 	sa_set_crc_check(sa, 1);
 	sa_start_boot_animation(sa);
 
-	ret = sa_parse_response(sa->respbuf, SA_RESP_BUF_SIZE, &resp);
-	if (ret == 0)
+	ret = sa_parse_response(qls, sa->respbuf, SA_RESP_BUF_SIZE, &resp);
+	if (ret == 0) {
 		sa->api_version = resp.fw_version;
+		dev_info(&spi->dev, "[QLS] SA response OK: magic=0x%02x fw_version=%u\n",
+			 resp.magic, resp.fw_version);
+	} else {
+		dev_info(&spi->dev,
+			 "[QLS] Non-SA response (%d, raw=%8ph), operating in direct Gowin/SA hybrid mode\n",
+			 ret, sa->respbuf);
+	}
 
 	qls->videomemory = vzalloc(qls->xres * qls->yres * QLS_BPP);
 	if (!qls->videomemory)
@@ -1174,7 +1198,7 @@ static int qls_probe(struct spi_device *spi)
 
 	ret = register_framebuffer(info);
 	if (ret < 0) {
-		dev_err(&spi->dev, "failed to register framebuffer: %d\n", ret);
+		dev_err(&spi->dev, "[QLS] failed to register framebuffer: %d\n", ret);
 		framebuffer_release(info);
 		vfree(qls->videomemory);
 		return ret;
@@ -1199,15 +1223,16 @@ static int qls_probe(struct spi_device *spi)
 							 &qls_hwmon_chip_info,
 							 NULL);
 	if (IS_ERR(hwmon_dev))
-		dev_warn(&spi->dev, "hwmon registration failed\n");
+		dev_warn(&spi->dev, "[QLS] hwmon registration failed\n");
 #endif
 
 	ret = sysfs_create_group(&spi->dev.kobj, &qls_attr_group);
 	if (ret)
-		dev_warn(&spi->dev, "failed to create sysfs group: %d\n", ret);
+		dev_warn(&spi->dev, "[QLS] failed to create sysfs group: %d\n", ret);
 
-	dev_info(&spi->dev, "registered framebuffer '%s', %ux%u %ubpp\n",
-		 info->fix.id, qls->xres, qls->yres, info->var.bits_per_pixel);
+	dev_info(&spi->dev, "[QLS] registered framebuffer '%s', %ux%u %ubpp (max_brightness=%d)\n",
+		 info->fix.id, qls->xres, qls->yres, info->var.bits_per_pixel,
+		 qls->max_brightness);
 
 	return 0;
 }
@@ -1228,8 +1253,11 @@ static int qls_remove(struct spi_device *spi)
 #endif
 	cancel_work_sync(&qls->flush_work);
 
-	if (qls->fb)
+	if (qls->fb) {
 		unregister_framebuffer(qls->fb);
+		framebuffer_release(qls->fb);
+		qls->fb = NULL;
+	}
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 18, 0)
 	return 0;
 #endif

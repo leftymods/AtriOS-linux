@@ -21,6 +21,7 @@
 #include <linux/mutex.h>
 #include <linux/of.h>
 #include <linux/ctype.h>
+#include <linux/sysfs.h>
 #include <sound/pcm.h>
 #include <sound/pcm_params.h>
 #include <sound/soc.h>
@@ -28,13 +29,21 @@
 
 #define TAS5825M_DRV_NAME	"tas5825m"
 
+static bool debug = true;
+module_param(debug, bool, 0644);
+MODULE_PARM_DESC(debug, "Enable verbose TAS5825M amplifier diagnostics");
+
 struct tas5825m_priv {
 	struct regmap *regmap;
 	struct i2c_client *client;
 	const char *fw_name;
+	bool fw_loaded;
+	size_t fw_size;
 	struct gpio_desc *pdn_gpio;
 	struct regulator_bulk_data supplies[2];
 	struct mutex io_lock;
+	unsigned long i2c_errors;
+	bool playing;
 };
 
 static const DECLARE_TLV_DB_SCALE(tas5825m_digital_vol_tlv, -10350, 50, 1);
@@ -48,6 +57,20 @@ static const struct snd_kcontrol_new tas5825m_controls[] = {
 	SOC_SINGLE("Master Playback Switch", 0x03, 0, 3, 0),
 	SOC_SINGLE("Master Playback Digital Mute Switch", 0x03, 3, 1, 1),
 };
+
+static int tas5825m_write_block(struct tas5825m_priv *tas, u8 reg,
+				u8 len, const u8 *vals)
+{
+	int ret = i2c_smbus_write_i2c_block_data(tas->client, reg, len, vals);
+
+	if (ret < 0) {
+		tas->i2c_errors++;
+		dev_err(&tas->client->dev,
+			"[TAS5825M] I2C block write failed at reg=0x%02x (len=%u): %d\n",
+			reg, len, ret);
+	}
+	return ret;
+}
 
 static int tas5825m_apply_settings(struct tas5825m_priv *tas, const char *data,
 				   size_t size)
@@ -64,20 +87,16 @@ static int tas5825m_apply_settings(struct tas5825m_priv *tas, const char *data,
 
 		if (c == '#' || c == '\n' || c == '\r') {
 			if (block_len > 0) {
-				i2c_smbus_write_i2c_block_data(tas->client,
-							       block[0],
-							       block_len - 1,
-							       &block[1]);
+				tas5825m_write_block(tas, block[0],
+						     block_len - 1, &block[1]);
 				block_len = 0;
 			}
 		} else if (c == 'd') {
 			unsigned int delay_ms = 0;
 
 			if (block_len > 0) {
-				i2c_smbus_write_i2c_block_data(tas->client,
-							       block[0],
-							       block_len - 1,
-							       &block[1]);
+				tas5825m_write_block(tas, block[0],
+						     block_len - 1, &block[1]);
 				block_len = 0;
 			}
 			if (sscanf(p, "d %u", &delay_ms) == 1 && delay_ms > 0)
@@ -86,10 +105,8 @@ static int tas5825m_apply_settings(struct tas5825m_priv *tas, const char *data,
 			size_t pos = 1;
 
 			if (block_len > 0) {
-				i2c_smbus_write_i2c_block_data(tas->client,
-							       block[0],
-							       block_len - 1,
-							       &block[1]);
+				tas5825m_write_block(tas, block[0],
+						     block_len - 1, &block[1]);
 				block_len = 0;
 			}
 			while (pos + 2 < len) {
@@ -128,8 +145,8 @@ static int tas5825m_apply_settings(struct tas5825m_priv *tas, const char *data,
 	}
 
 	if (block_len > 0) {
-		i2c_smbus_write_i2c_block_data(tas->client, block[0],
-					       block_len - 1, &block[1]);
+		tas5825m_write_block(tas, block[0],
+				     block_len - 1, &block[1]);
 	}
 
 	return 0;
@@ -137,12 +154,23 @@ static int tas5825m_apply_settings(struct tas5825m_priv *tas, const char *data,
 
 static int tas5825m_reset_chip(struct tas5825m_priv *tas)
 {
-	i2c_smbus_write_byte_data(tas->client, 0x00, 0x00);
+	int ret;
+
+	ret = i2c_smbus_write_byte_data(tas->client, 0x00, 0x00);
+	if (ret < 0) {
+		tas->i2c_errors++;
+		dev_err(&tas->client->dev,
+			"[TAS5825M] chip reset failed at reg 0x00 (addr=0x%02x): %d\n",
+			tas->client->addr, ret);
+		return ret;
+	}
 	i2c_smbus_write_byte_data(tas->client, 0x7f, 0x00);
 	i2c_smbus_write_byte_data(tas->client, 0x03, 0x0a);
 	msleep(5);
 	i2c_smbus_write_byte_data(tas->client, 0x01, 0x11);
 	msleep(20);
+	if (debug)
+		dev_info(&tas->client->dev, "[TAS5825M] chip reset completed\n");
 	return 0;
 }
 
@@ -151,15 +179,32 @@ static int tas5825m_load_firmware(struct tas5825m_priv *tas)
 	const struct firmware *fw;
 	int ret;
 
-	if (!tas->fw_name)
+	if (!tas->fw_name) {
+		dev_info(&tas->client->dev, "[TAS5825M] no firmware property specified\n");
 		return 0;
+	}
 
 	ret = request_firmware(&fw, tas->fw_name, &tas->client->dev);
-	if (ret)
+	if (ret) {
+		dev_warn(&tas->client->dev,
+			 "[TAS5825M] firmware '%s' not found (%d), using default regs\n",
+			 tas->fw_name, ret);
 		return 0;
+	}
 
+	tas->fw_size = fw->size;
 	ret = tas5825m_apply_settings(tas, (const char *)fw->data, fw->size);
 	release_firmware(fw);
+	if (ret == 0) {
+		tas->fw_loaded = true;
+		dev_info(&tas->client->dev,
+			 "[TAS5825M] loaded firmware '%s' (%zu bytes)\n",
+			 tas->fw_name, tas->fw_size);
+	} else {
+		dev_err(&tas->client->dev,
+			"[TAS5825M] failed to apply firmware '%s': %d\n",
+			tas->fw_name, ret);
+	}
 	return ret;
 }
 
@@ -167,6 +212,16 @@ static int tas5825m_hw_params(struct snd_pcm_substream *substream,
 			      struct snd_pcm_hw_params *params,
 			      struct snd_soc_dai *dai)
 {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 18, 0)
+	struct tas5825m_priv *tas = snd_soc_component_get_drvdata(dai->component);
+#else
+	struct tas5825m_priv *tas = snd_soc_codec_get_drvdata(dai->codec);
+#endif
+	if (debug && tas)
+		dev_info(&tas->client->dev,
+			 "[TAS5825M] hw_params: rate=%u width=%d channels=%u\n",
+			 params_rate(params), params_width(params),
+			 params_channels(params));
 	return 0;
 }
 
@@ -183,11 +238,17 @@ static int tas5825m_trigger(struct snd_pcm_substream *substream, int cmd,
 	case SNDRV_PCM_TRIGGER_START:
 	case SNDRV_PCM_TRIGGER_RESUME:
 	case SNDRV_PCM_TRIGGER_PAUSE_RELEASE:
+		tas->playing = true;
+		if (debug)
+			dev_info(&tas->client->dev, "[TAS5825M] trigger START (PLAY mode)\n");
 		regmap_update_bits(tas->regmap, 0x03, 0x03, 0x03);
 		break;
 	case SNDRV_PCM_TRIGGER_STOP:
 	case SNDRV_PCM_TRIGGER_SUSPEND:
 	case SNDRV_PCM_TRIGGER_PAUSE_PUSH:
+		tas->playing = false;
+		if (debug)
+			dev_info(&tas->client->dev, "[TAS5825M] trigger STOP (HIZ mode)\n");
 		regmap_update_bits(tas->regmap, 0x03, 0x03, 0x02);
 		break;
 	default:
@@ -254,6 +315,28 @@ static const struct snd_soc_codec_driver soc_codec_tas5825m = {
 };
 #endif
 
+static ssize_t status_show(struct device *dev,
+			   struct device_attribute *attr, char *buf)
+{
+	struct tas5825m_priv *tas = dev_get_drvdata(dev);
+	unsigned int reg03 = 0, reg4c = 0, reg70 = 0, reg71 = 0;
+
+	if (tas->regmap) {
+		regmap_read(tas->regmap, 0x03, &reg03);
+		regmap_read(tas->regmap, 0x4c, &reg4c);
+		regmap_read(tas->regmap, 0x70, &reg70);
+		regmap_read(tas->regmap, 0x71, &reg71);
+	}
+
+	return sysfs_emit(buf,
+			  "addr=0x%02x fw=%s fw_loaded=%d fw_size=%zu playing=%d ctrl=0x%02x vol=0x%02x fault1=0x%02x fault2=0x%02x i2c_errors=%lu\n",
+			  tas->client->addr,
+			  tas->fw_name ? tas->fw_name : "none",
+			  tas->fw_loaded, tas->fw_size, tas->playing,
+			  reg03, reg4c, reg70, reg71, tas->i2c_errors);
+}
+static DEVICE_ATTR_RO(status);
+
 static const struct regmap_config tas5825m_regmap = {
 	.reg_bits = 8,
 	.val_bits = 8,
@@ -272,6 +355,9 @@ static int tas5825m_probe(struct i2c_client *client,
 	struct tas5825m_priv *tas;
 	int ret;
 
+	dev_info(dev, "[TAS5825M] Probing TAS5825M amplifier at I2C 0x%02x...\n",
+		 client->addr);
+
 	tas = devm_kzalloc(dev, sizeof(*tas), GFP_KERNEL);
 	if (!tas)
 		return -ENOMEM;
@@ -289,8 +375,11 @@ static int tas5825m_probe(struct i2c_client *client,
 	tas->supplies[1].supply = "pvdd";
 	ret = devm_regulator_bulk_get(dev, ARRAY_SIZE(tas->supplies),
 				      tas->supplies);
-	if (ret == 0)
-		regulator_bulk_enable(ARRAY_SIZE(tas->supplies), tas->supplies);
+	if (ret == 0) {
+		ret = regulator_bulk_enable(ARRAY_SIZE(tas->supplies), tas->supplies);
+		if (ret)
+			dev_warn(&client->dev, "[TAS5825M] regulator_bulk_enable failed: %d\n", ret);
+	}
 
 	tas->pdn_gpio = devm_gpiod_get_optional(dev, "pdn", GPIOD_OUT_HIGH);
 	if (!IS_ERR_OR_NULL(tas->pdn_gpio)) {
@@ -301,6 +390,10 @@ static int tas5825m_probe(struct i2c_client *client,
 	}
 
 	i2c_set_clientdata(client, tas);
+	device_create_file(dev, &dev_attr_status);
+
+	dev_info(dev, "[TAS5825M] Registered component (addr=0x%02x, fw='%s')\n",
+		 client->addr, tas->fw_name ? tas->fw_name : "none");
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 18, 0)
 	return devm_snd_soc_register_component(dev, &soc_component_tas5825m,
@@ -317,6 +410,7 @@ static void tas5825m_remove(struct i2c_client *client)
 static int tas5825m_remove(struct i2c_client *client)
 #endif
 {
+	device_remove_file(&client->dev, &dev_attr_status);
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 18, 0)
 	snd_soc_unregister_codec(&client->dev);
 #endif
@@ -350,6 +444,6 @@ static struct i2c_driver tas5825m_i2c_driver = {
 };
 module_i2c_driver(tas5825m_i2c_driver);
 
-MODULE_AUTHOR("Andy Liu <andy-liu@ti.com>");
-MODULE_DESCRIPTION("TAS5825M Audio Amplifier Driver");
+MODULE_DESCRIPTION("ASoC TAS5825M driver");
+MODULE_AUTHOR("Texas Instruments");
 MODULE_LICENSE("GPL v2");
