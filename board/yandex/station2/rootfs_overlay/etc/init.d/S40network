@@ -8,13 +8,11 @@ mkdir -p /run/network /var/run/network
 case "$1" in
   start)
 	printf "Starting network: "
-	ip link set lo up 2>/dev/null || ifconfig lo 127.0.0.1 up 2>/dev/null || true
-	/sbin/ifup -a 2>/dev/null || true
+	python3 -c "import socket, struct, fcntl; s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); ifr = struct.pack('16sH', b'wlan0', 0); res = fcntl.ioctl(s.fileno(), 0x8913, ifr); flags = struct.unpack('16sH', res)[1] | 1; fcntl.ioctl(s.fileno(), 0x8914, struct.pack('16sH', b'wlan0', flags))" 2>/dev/null || true
 	echo "OK"
 	;;
   stop)
 	printf "Stopping network: "
-	/sbin/ifdown -a 2>/dev/null || true
 	echo "OK"
 	;;
   restart|reload)
