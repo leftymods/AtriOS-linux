@@ -170,6 +170,10 @@ FONT_LARGE_5X9 = {
     ],
 }
 
+# Column start positions for "HH:MM" (digits: 5px, colon: 1px, spaces: 1px):
+# Total: 5 + 1 + 5 + 1 + 1 + 1 + 5 + 1 + 5 = 25 columns
+X_POSITIONS = [0, 6, 12, 14, 20]
+
 def set_pixel(buf, x, y, brightness):
     if 0 <= x < WIDTH and 0 <= y < HEIGHT:
         val = max(0, min(255, int(brightness)))
@@ -206,7 +210,7 @@ def main():
         bt = is_bt_active()
         if now != last_rendered or bt != last_bt:
             buf = bytearray(FRAME_SIZE)
-            for char, x_start in zip(now, x_positions):
+            for char, x_start in zip(now, X_POSITIONS):
                 glyph = FONT_LARGE_5X9.get(char, [0]*9)
                 width = 1 if char == ':' else 5
                 # Center vertically: 9 rows inside 16 -> start at y = 3 (rows 3..11)
