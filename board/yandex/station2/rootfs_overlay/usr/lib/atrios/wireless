@@ -267,6 +267,9 @@ case "$CMD" in
         exit 1
       fi
     elif [ "$SUBCMD" = "scan" ]; then
+      if [ -x /usr/bin/bt-audit ]; then
+        exec /usr/bin/bt-audit
+      fi
       if [ ! -e /sys/class/bluetooth/hci0 ] && [ ! -f /tmp/atrios_bt_state ]; then
         bt_do_init
       fi

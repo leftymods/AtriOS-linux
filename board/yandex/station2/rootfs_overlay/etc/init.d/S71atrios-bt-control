@@ -3,6 +3,14 @@
 
 case "$1" in
   start)
+    # Rebind Bluetooth serdev driver if hci0 failed to load firmware during early boot
+    if [ ! -d /sys/class/bluetooth/hci0 ]; then
+      echo serial0-0 > /sys/bus/serial/drivers/hci_uart_h5/unbind 2>/dev/null || true
+      sleep 0.5
+      echo serial0-0 > /sys/bus/serial/drivers/hci_uart_h5/bind 2>/dev/null || true
+      sleep 1
+    fi
+
     echo "Starting AtriOS Bluetooth Remote Control Daemon (RFCOMM channel 1)..."
     if [ -x /usr/lib/atrios/bt-control ] && ! pgrep -f /usr/lib/atrios/bt-control >/dev/null 2>&1; then
       python3 /usr/lib/atrios/bt-control >/var/log/atrios-bt-control.log 2>&1 &
