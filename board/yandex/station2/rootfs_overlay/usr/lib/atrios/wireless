@@ -45,7 +45,7 @@ case "$CMD" in
     echo ""
     echo "[3. Zigbee (Silicon Labs EFR32 Coordinator)]:"
     ZB_DEV=""
-    for dev in /dev/ttyAML4 /dev/ttyS4; do
+    for dev in /dev/ttyAML2 /dev/ttyS2 /dev/ttyAML4 /dev/ttyS4; do
       if [ -c "$dev" ]; then
         ZB_DEV="$dev"
         break
@@ -54,11 +54,14 @@ case "$CMD" in
     if [ -n "$ZB_DEV" ]; then
       echo "  * Coordinator UART: $ZB_DEV"
     else
-      echo "  * Coordinator UART: Not found (/dev/ttyAML4 / /dev/ttyS4)"
+      echo "  * Coordinator UART: Not found"
     fi
-    if [ -d /sys/devices/platform/zigbee ]; then
-      echo "  * Driver: zigbee-control registered"
-    fi
+    for p in /sys/devices/platform/zigbee-control /sys/devices/platform/zigbee; do
+      if [ -d "$p" ]; then
+        echo "  * Driver: zigbee-control registered ($p)"
+        break
+      fi
+    done
     echo "=========================================================="
     ;;
 
@@ -311,7 +314,10 @@ case "$CMD" in
     if [ "$SUBCMD" = "reset" ]; then
       echo "Pulsing EFR32 Zigbee hardware reset pin..."
       # Use sysfs zigbee-control if available
-      P=/sys/devices/platform/zigbee/zb-reset
+      P=""
+      for p in /sys/devices/platform/zigbee-control/zb-reset /sys/devices/platform/zigbee/zb-reset; do
+        if [ -e "$p" ]; then P="$p"; break; fi
+      done
       if [ -d "$P" ]; then
         echo out > "$P/direction" 2>/dev/null
         echo 0 > "$P/value"
