@@ -1,0 +1,37 @@
+diff -uprN a/drivers/bluetooth/btrtl.c b/drivers/bluetooth/btrtl.c
+--- a/drivers/bluetooth/btrtl.c
++++ b/drivers/bluetooth/btrtl.c
+@@ -257,6 +257,15 @@ static const struct id_table ic_id_table
+ 	  .fw_name  = "rtl_bt/rtl8822cs_fw",
+ 	  .cfg_name = "rtl_bt/rtl8822cs_config",
+ 	  .hw_info  = "rtl8822cs" },
++
++	/* 8822E with UART interface */
++	{ IC_INFO(RTL_ROM_LMP_8822B, 0xe, 0xc, HCI_UART),
++	  .config_needed = true,
++	  .has_rom_version = true,
++	  .has_msft_ext = true,
++	  .fw_name  = "rtl_bt/rtl8822cs_fw",
++	  .cfg_name = "rtl_bt/rtl8822cs_config",
++	  .hw_info  = "rtl8822cs" },
+ 
+ 	/* 8822C with USB interface */
+ 	{ IC_INFO(RTL_ROM_LMP_8822B, 0xc, 0xa, HCI_USB),
+@@ -1186,9 +1195,13 @@ struct btrtl_device_info *btrtl_initiali
+ 		goto err_free;
+ 	}
+ 
+-	rc = btrtl_vendor_read_reg16(hdev, RTL_SEC_PROJ, reg_val);
+-	if (rc < 0)
+-		goto err_free;
+-	key_id = reg_val[0];
++	if (lmp_subver == RTL_ROM_LMP_8852A || lmp_subver == RTL_ROM_LMP_8851B || lmp_subver == RTL_ROM_LMP_8922A) {
++		rc = btrtl_vendor_read_reg16(hdev, RTL_SEC_PROJ, reg_val);
++		if (rc < 0)
++			goto err_free;
++		key_id = reg_val[0];
++	} else {
++		key_id = 0;
++	}
+ 	btrtl_dev->key_id = key_id;
+ 	rtl_dev_info(hdev, "%s: key id %u", __func__, key_id);
