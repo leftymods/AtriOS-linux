@@ -1,7 +1,15 @@
 diff -uprN a/drivers/bluetooth/btrtl.c b/drivers/bluetooth/btrtl.c
 --- a/drivers/bluetooth/btrtl.c
 +++ b/drivers/bluetooth/btrtl.c
-@@ -257,6 +257,15 @@ static const struct id_table ic_id_table
+@@ -69,6 +69,7 @@ enum {
+ 	CHIP_ID_8852A = 18,
+ 	CHIP_ID_8852B = 20,
+ 	CHIP_ID_8852C = 25,
++	CHIP_ID_8822E = 33,
+ 	CHIP_ID_8851B = 36,
+ 	CHIP_ID_8922A = 44,
+ };
+@@ -257,6 +258,15 @@ static const struct id_table ic_id_table
  	  .fw_name  = "rtl_bt/rtl8822cs_fw",
  	  .cfg_name = "rtl_bt/rtl8822cs_config",
  	  .hw_info  = "rtl8822cs" },
@@ -17,7 +25,15 @@ diff -uprN a/drivers/bluetooth/btrtl.c b/drivers/bluetooth/btrtl.c
  
  	/* 8822C with USB interface */
  	{ IC_INFO(RTL_ROM_LMP_8822B, 0xc, 0xa, HCI_USB),
-@@ -1186,9 +1195,13 @@ struct btrtl_device_info *btrtl_initiali
+@@ -673,6 +683,7 @@ static int btrtl_setup_rtl8723b(struct h
+ 		{ RTL_ROM_LMP_8723B, 9 },	/* 8723D */
+ 		{ RTL_ROM_LMP_8821A, 10 },	/* 8821C */
+ 		{ RTL_ROM_LMP_8822B, 13 },	/* 8822C */
++		{ RTL_ROM_LMP_8822B, 33 },	/* 8822E */
+ 		{ RTL_ROM_LMP_8761A, 14 },	/* 8761B */
+ 		{ RTL_ROM_LMP_8852A, 18 },	/* 8852A */
+ 		{ RTL_ROM_LMP_8852A, 20 },	/* 8852B */
+@@ -1186,9 +1197,13 @@ struct btrtl_device_info *btrtl_initiali
  		goto err_free;
  	}
  
@@ -35,3 +51,11 @@ diff -uprN a/drivers/bluetooth/btrtl.c b/drivers/bluetooth/btrtl.c
 +	}
  	btrtl_dev->key_id = key_id;
  	rtl_dev_info(hdev, "%s: key id %u", __func__, key_id);
+@@ -1322,6 +1337,7 @@ int btrtl_setup_realtek(struct hci_dev *
+ 	/* Enable WBS supported for the specific Realtek devices. */
+ 	switch (btrtl_dev->project_id) {
+ 	case CHIP_ID_8822C:
++	case CHIP_ID_8822E:
+ 	case CHIP_ID_8852A:
+ 	case CHIP_ID_8852B:
+ 	case CHIP_ID_8852C:
