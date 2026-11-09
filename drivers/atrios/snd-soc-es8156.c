@@ -127,10 +127,11 @@ static int es8156_set_dai_fmt(struct snd_soc_dai *dai, unsigned int fmt)
 		dev_info(&es->client->dev, "[ES8156] set_dai_fmt: fmt=0x%08x\n", fmt);
 
 	switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
+	case SND_SOC_DAIFMT_CBC_CFC:
 	case SND_SOC_DAIFMT_BC_FP:
 		regmap_update_bits(es->regmap, 0x02, 0x01, 0x01);
 		break;
-	case SND_SOC_DAIFMT_BP_FP:
+	case SND_SOC_DAIFMT_CBP_CFP:
 		regmap_update_bits(es->regmap, 0x02, 0x01, 0x00);
 		break;
 	default:
