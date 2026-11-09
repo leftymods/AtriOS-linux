@@ -171,7 +171,10 @@ case "$CMD" in
       elif [ -f /tmp/atrios_bt_state ]; then
         echo "Bluetooth controller ready ($(cat /tmp/atrios_bt_state))"
       fi
-    elif [ "$SUBCMD" = "speaker" ]; then
+    elif [ "$SUBCMD" = "visible" ] || [ "$SUBCMD" = "speaker" ]; then
+      if [ -x /usr/bin/bt-visible ]; then
+        /usr/bin/bt-visible "Yandex Station Max"
+      fi
       MODE="${3:-on}"
       if [ "$MODE" = "on" ] || [ "$MODE" = "start" ]; then
         echo "=========================================================="
