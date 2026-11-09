@@ -71,6 +71,8 @@ case "$CMD" in
         iw dev wlan0 scan 2>/dev/null | grep -E 'SSID:|signal:' | head -n 30
       elif command -v iwlist >/dev/null 2>&1; then
         iwlist wlan0 scan 2>/dev/null | grep -E 'ESSID|Quality' | head -n 30
+      elif [ -f /usr/lib/atrios/wifi_scan.py ]; then
+        python3 /usr/lib/atrios/wifi_scan.py
       fi
     elif [ "$SUBCMD" = "power" ]; then
       STATE="${3:-1}"
