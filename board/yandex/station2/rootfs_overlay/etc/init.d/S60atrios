@@ -42,11 +42,13 @@ case "$1" in
     fi
     ;;
   stop)
-    # Turn off LED ring
+    # Turn off LED ring and screen
     if [ -x /usr/bin/atrios ]; then
       /usr/bin/atrios ring off 2>/dev/null || true
+      /usr/bin/atrios screen off 2>/dev/null || true
     fi
     [ -e /dev/fb_ring ] && dd if=/dev/zero of=/dev/fb_ring bs=1 count=576 2>/dev/null || true
+    [ -e /dev/fb_screen ] && dd if=/dev/zero of=/dev/fb_screen bs=1 count=1200 2>/dev/null || true
     pkill -f /usr/lib/atrios/rotaryd 2>/dev/null; pkill -f /usr/lib/atrios/screend 2>/dev/null; true
     ;;
   *)
