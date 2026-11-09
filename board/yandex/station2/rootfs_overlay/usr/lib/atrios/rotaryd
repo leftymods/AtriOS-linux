@@ -207,9 +207,6 @@ last_volume_change_time = 0.0
 last_volume_time = 0.0
 
 
-def set_volume(pct, force_switches=False):
-    """Apply volume to ALSA master controls via fast batch mixer."""
-    fast_mixer.set_volume(pct, force_switches=force_switches)
 
 
 def apply_saved_volume():
