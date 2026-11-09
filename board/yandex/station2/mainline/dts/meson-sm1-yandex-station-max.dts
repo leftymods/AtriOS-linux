@@ -146,6 +146,14 @@
 		led-eeprom-addr = <0x55>;
 	};
 
+	dmics: audio-codec-1 {
+		#sound-dai-cells = <0>;
+		compatible = "dmic-codec";
+		num-channels = <8>;
+		wakeup-delay-ms = <50>;
+		sound-name-prefix = "MIC";
+	};
+
 	/* Mainline ASoC Sound Card */
 	sound {
 		compatible = "amlogic,axg-sound-card";
@@ -165,6 +173,8 @@
 			"TDMIN_B IN 3", "TDM_B Loopback",
 			"TODDR_A IN 1", "TDMIN_B OUT",
 			"TODDR_B IN 1", "TDMIN_B OUT",
+			"TODDR_A IN 4", "PDM Capture",
+			"TODDR_B IN 4", "PDM Capture",
 			"Headphones", "Headphone LOUT",
 			"Headphones", "Headphone ROUT";
 
@@ -245,6 +255,15 @@
 				sound-dai = <&hdmi_tx>;
 			};
 		};
+
+		/* Internal 8-Channel PDM Microphone Array */
+		dai-link-8 {
+			sound-dai = <&pdm>;
+
+			codec {
+				sound-dai = <&dmics>;
+			};
+		};
 	};
 };
 
@@ -266,6 +285,14 @@
 };
 
 &frddr_c {
+	status = "okay";
+};
+
+&pdm {
+	pinctrl-0 = <&pdm_din0_z_pins>, <&pdm_din1_z_pins>,
+		    <&pdm_din2_z_pins>, <&pdm_din3_z_pins>,
+		    <&pdm_dclk_z_pins>;
+	pinctrl-names = "default";
 	status = "okay";
 };
 
