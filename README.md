@@ -52,6 +52,52 @@
 
 ---
 
+## Аппаратные интерфейсы Станции Макс
+
+* **Фреймбуферы:**
+  * `/dev/fb0` — Фронтальный монохромный LED экран Gowin 25x16 (RGB888 1200 байт). Демон `screend` выводит крупные цифровые часы и анимации.
+  * `/dev/fb1` — Верхнее кольцо из 24 RGB-светодиодов на сдвоенном драйвере IS31FL3236A (RGB888 576 байт). Демон `rotaryd` плавно отображает уровень громкости.
+* **Беспроводные модули:**
+  * **Wi-Fi (Realtek RTL8822CS):** шина SDIO (`sd_emmc_a`), двухдиапазонный 2.4/5 ГГц, WPA2/WPA3.
+  * **Bluetooth 5.0 (Realtek RTL8822CS):** скоростной UART Serdev (`uart_A`, `/dev/ttyAML1`, 1.5 Мбод). Поддерживает A2DP Sink (режим Bluetooth-колонки) и BLE.
+  * **Zigbee (Silicon Labs EFR32 MG21):** UART (`uart_AO_B`, `/dev/ttyAML2`), протокол EZSP NCP, управление сбросом через `zigbee-control`.
+* **Аудиосистема (ASoC AML-AUGESOUND):**
+  * НЧ-усилитель (SY6045S, I2C `2-002b`) и ВЧ-усилитель (SY6045S, I2C `2-002a`) с загрузкой калибровочных DSP biquad/DRC фильтров.
+  * 8-канальный цифровой микрофонный массив (PDM контроллер, 5 линий GPIOZ, кодек `dmics`).
+  * ЦАП наушников/AUX ES8156 (`2-0008`) и 4-канальный АЦП ES7210 (`2-0040`).
+
+---
+
+## Тестирование и верификация (CI Suite)
+
+В репозиторий включен автоматизированный 5-уровневый скрипт проверки целостности всех компонентов:
+```bash
+./scripts/verify_all.sh
+```
+Скрипт проверяет:
+1. Кросс-компилятор `aarch64-linux-gnu-gcc`, `dtc` и Python окружение.
+2. Препроцессинг и компиляцию Device Tree (`meson-sm1-yandex-station-max.dtb`), включая Serdev BT, PDM, аудиокарту.
+3. Чистую компиляцию всех 13 ядерных драйверов AtriOS под Linux 7.x.
+4. Целостность DSP прошивок SY6045S и микрокода Bluetooth Realtek.
+5. Синтаксис и запуск юзерспейс демонов (`screend`, `rotaryd`, `bt-agent`, `wifi_scan.py`, init-скриптов и CLI `/usr/bin/atrios`).
+
+---
+
+## Управление через CLI (`atrios`)
+
+На работающей станции доступна единая утилита управления:
+```bash
+atrios status                      # Статус Wi-Fi, Bluetooth, Zigbee
+atrios wifi scan                   # Сканирование 2.4/5 ГГц сетей
+atrios wifi connect <SSID> <PASS>  # Подключение к Wi-Fi
+atrios bt speaker on|off           # Режим Bluetooth-колонки
+atrios screen clock|kisser|off     # Часы или анимации на экране
+atrios ring rainbow|volume N|off   # Управление LED-кольцом
+atrios zigbee ping|reset           # Диагностика EFR32 Zigbee
+```
+
+---
+
 ## Сборка образа AtriOS Nebula
 
 ### Полная сборка прошивки в один шаг:
