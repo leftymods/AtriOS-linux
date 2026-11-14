@@ -836,12 +836,12 @@ static void handle_avdtp_signal(client_t *c, const uint8_t *pkt, size_t len) {
         /* Media Transport (cat 0x01, losc 0) */
         rsp[rlen++] = 0x01;
         rsp[rlen++] = 0x00;
-        /* Media Codec SBC (cat 0x07, losc 6): Audio=0x00, SBC=0x00, all freqs/modes, min=2 max=53 */
+        /* Media Codec SBC (cat 0x07, losc 6): Audio=0x00, SBC=0x00, 48kHz native + all modes, min=2 max=53 */
         rsp[rlen++] = 0x07;
         rsp[rlen++] = 0x06;
         rsp[rlen++] = 0x00;
         rsp[rlen++] = 0x00;
-        rsp[rlen++] = 0xff;
+        rsp[rlen++] = 0x1f;
         rsp[rlen++] = 0xff;
         rsp[rlen++] = 0x02;
         rsp[rlen++] = 0x35;
@@ -978,7 +978,7 @@ static bool audio_ensure_pcm(unsigned int rate, unsigned int channels) {
         if (err >= 0) {
             err = p_snd_pcm_set_params(g_pcm, SND_PCM_FORMAT_S16_LE,
                                        SND_PCM_ACCESS_RW_INTERLEAVED,
-                                       channels, rate, 1, 100000);
+                                       channels, rate, 1, 250000);
             if (err >= 0) {
                 g_pcm_rate = rate;
                 g_pcm_channels = channels;
@@ -1001,8 +1001,9 @@ static void handle_avdtp_media(client_t *c, const uint8_t *pkt, size_t len) {
 
     uint8_t v = (pkt[0] >> 6) & 0x03;
     if (v != 2) return; /* Not RTP v2 */
-    uint8_t cc = pkt[0] & 0x0f;
+    bool pad = (pkt[0] & 0x20) != 0;
     bool ext = (pkt[0] & 0x10) != 0;
+    uint8_t cc = pkt[0] & 0x0f;
 
     size_t off = 12 + (size_t)cc * 4;
     if (ext) {
@@ -1010,10 +1011,17 @@ static void handle_avdtp_media(client_t *c, const uint8_t *pkt, size_t len) {
         uint16_t ext_len = (uint16_t)((pkt[off + 2] << 8) | pkt[off + 3]);
         off += 4 + (size_t)ext_len * 4;
     }
+    if (pad && len > off) {
+        uint8_t pad_len = pkt[len - 1];
+        if (pad_len > 0 && pad_len <= len - off) {
+            len -= pad_len;
+        }
+    }
     if (off + 1 >= len) return;
 
-    /* Skip 1-byte SBC RTP media payload header */
-    off += 1;
+    /* 1-byte SBC RTP media payload header (RFC 5215) */
+    uint8_t sbc_hdr = pkt[off++];
+    if (sbc_hdr & 0x80) return; /* skip fragmented frames */
 
     if (!g_sbc_init) {
         if (p_sbc_init(&g_sbc, 0) < 0) return;
@@ -1460,7 +1468,7 @@ int main(void) {
         }
 
         time_t now = time(NULL);
-        if (now - last_refresh >= 15) {
+        if (!g_pcm && now - last_refresh >= 15) {
             last_refresh = now;
             /* Ensure scan stays enabled without disturbing active connections */
             int dd = socket(AF_BLUETOOTH, SOCK_RAW, BTPROTO_HCI);
