@@ -836,12 +836,12 @@ static void handle_avdtp_signal(client_t *c, const uint8_t *pkt, size_t len) {
         /* Media Transport (cat 0x01, losc 0) */
         rsp[rlen++] = 0x01;
         rsp[rlen++] = 0x00;
-        /* Media Codec SBC (cat 0x07, losc 6): Audio=0x00, SBC=0x00, 48kHz native + all modes, min=2 max=53 */
+        /* Media Codec SBC (cat 0x07, losc 6): Audio=0x00, SBC=0x00, all freqs/modes, min=2 max=53 */
         rsp[rlen++] = 0x07;
         rsp[rlen++] = 0x06;
         rsp[rlen++] = 0x00;
         rsp[rlen++] = 0x00;
-        rsp[rlen++] = 0x1f;
+        rsp[rlen++] = 0xff;
         rsp[rlen++] = 0xff;
         rsp[rlen++] = 0x02;
         rsp[rlen++] = 0x35;
@@ -922,6 +922,8 @@ static bool g_sbc_init = false;
 static snd_pcm_t *g_pcm = NULL;
 static unsigned int g_pcm_rate = 0;
 static unsigned int g_pcm_channels = 0;
+static int16_t g_rs_hist[4][2];
+static double g_rs_phase = 0.0;
 
 static bool audio_load_libs(void) {
     if (p_sbc_decode && p_snd_pcm_writei) return true;
@@ -961,6 +963,8 @@ static void audio_close(void) {
         p_sbc_finish(&g_sbc);
         g_sbc_init = false;
     }
+    memset(g_rs_hist, 0, sizeof(g_rs_hist));
+    g_rs_phase = 0.0;
 }
 
 static bool audio_ensure_pcm(unsigned int rate, unsigned int channels) {
@@ -1042,12 +1046,48 @@ static void handle_avdtp_media(client_t *c, const uint8_t *pkt, size_t len) {
                                 (g_sbc.frequency == 1) ? 32000 :
                                 (g_sbc.frequency == 2) ? 44100 : 48000;
             unsigned int ch = (g_sbc.mode == 0) ? 1 : 2;
+            const uint8_t *play_buf = pcm_buf;
+            snd_pcm_uframes_t total_frames = (snd_pcm_uframes_t)(written / (ch * 2));
+
+            int16_t rs_buf[8192];
+            if (rate != 48000 && ch == 2) {
+                const int16_t *in = (const int16_t *)pcm_buf;
+                double step = (double)rate / 48000.0;
+                size_t out_frames = 0;
+                for (snd_pcm_uframes_t i = 0; i < total_frames; i++) {
+                    g_rs_hist[0][0] = g_rs_hist[1][0]; g_rs_hist[0][1] = g_rs_hist[1][1];
+                    g_rs_hist[1][0] = g_rs_hist[2][0]; g_rs_hist[1][1] = g_rs_hist[2][1];
+                    g_rs_hist[2][0] = g_rs_hist[3][0]; g_rs_hist[2][1] = g_rs_hist[3][1];
+                    g_rs_hist[3][0] = in[i * 2];     g_rs_hist[3][1] = in[i * 2 + 1];
+                    while (g_rs_phase < 1.0 && out_frames + 1 < sizeof(rs_buf) / (2 * sizeof(int16_t))) {
+                        double t = g_rs_phase;
+                        for (int c_idx = 0; c_idx < 2; c_idx++) {
+                            double y0 = g_rs_hist[0][c_idx], y1 = g_rs_hist[1][c_idx];
+                            double y2 = g_rs_hist[2][c_idx], y3 = g_rs_hist[3][c_idx];
+                            double a0 = -0.5 * y0 + 1.5 * y1 - 1.5 * y2 + 0.5 * y3;
+                            double a1 = y0 - 2.5 * y1 + 2.0 * y2 - 0.5 * y3;
+                            double a2 = -0.5 * y0 + 0.5 * y2;
+                            double a3 = y1;
+                            double s = ((a0 * t + a1) * t + a2) * t + a3;
+                            if (s > 32767.0) s = 32767.0;
+                            if (s < -32768.0) s = -32768.0;
+                            rs_buf[out_frames * 2 + c_idx] = (int16_t)s;
+                        }
+                        out_frames++;
+                        g_rs_phase += step;
+                    }
+                    g_rs_phase -= 1.0;
+                }
+                play_buf = (const uint8_t *)rs_buf;
+                total_frames = (snd_pcm_uframes_t)out_frames;
+                rate = 48000;
+            }
+
             if (!audio_ensure_pcm(rate, ch)) break;
 
-            snd_pcm_uframes_t total_frames = (snd_pcm_uframes_t)(written / (ch * 2));
             size_t byte_off = 0;
             while (total_frames > 0) {
-                snd_pcm_sframes_t n = p_snd_pcm_writei(g_pcm, pcm_buf + byte_off, total_frames);
+                snd_pcm_sframes_t n = p_snd_pcm_writei(g_pcm, play_buf + byte_off, total_frames);
                 if (n < 0) {
                     n = p_snd_pcm_recover(g_pcm, (int)n, 1);
                     if (n < 0) break;
