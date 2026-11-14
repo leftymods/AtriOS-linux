@@ -280,17 +280,19 @@ def flush_state_volume():
         volume_dirty = False
 
 
-def enforce_volume():
+def enforce_volume(allow_while_ring=False):
     """Watchdog: the state file wins over any external ALSA writer."""
     global current_volume, last_volume_time, ring_active, is_fading
-    if volume_dirty or ring_active:
+    if volume_dirty or (ring_active and not allow_while_ring):
         return
     saved = read_state_volume()
     if saved is not None and saved != current_volume:
+        prev_volume = current_volume
         current_volume = saved
         ring_active = True
         is_fading = False
         last_volume_time = time.time()
+        set_volume_i2c(current_volume, force_switches=(prev_volume == 0 or current_volume == 0))
         _render_wake.set()
         threading.Thread(target=_sync_alsa_async, args=(current_volume,), daemon=True).start()
         return
@@ -518,6 +520,11 @@ def main():
     apply_saved_volume()
     last_enforce = time.time()
     last_scan = time.time()
+    last_state_mtime = 0.0
+    try:
+        last_state_mtime = os.stat(STATE_FILE).st_mtime
+    except OSError:
+        pass
 
     threading.Thread(target=_render_loop, daemon=True).start()
 
@@ -574,6 +581,21 @@ def main():
             # Debounced state flush: write to flash 300ms after user finishes rotating the knob
             if volume_dirty and (now - last_volume_change_time > 0.3):
                 flush_state_volume()
+                try:
+                    last_state_mtime = os.stat(STATE_FILE).st_mtime
+                except OSError:
+                    pass
+
+            # Fast sync on external STATE_FILE updates (e.g. Bluetooth AVRCP SetAbsoluteVolume)
+            if not volume_dirty:
+                try:
+                    st_mtime = os.stat(STATE_FILE).st_mtime
+                    if st_mtime != last_state_mtime:
+                        last_state_mtime = st_mtime
+                        enforce_volume(allow_while_ring=True)
+                        last_enforce = now
+                except OSError:
+                    pass
 
             # Watchdog: enforce saved volume whenever idle, polling at 2s
             if not ring_active and not volume_dirty and (now - last_enforce > 2.0):
