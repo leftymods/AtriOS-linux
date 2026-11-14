@@ -94,6 +94,15 @@ def volume_to_raw(pct, zero_db_raw):
     return max(1, min(zero_db_raw, raw))
 
 
+def woofer_volume_to_raw(pct, zero_db_raw):
+    """Apply smooth low-volume bass loudness compensation (+8 dB at 1%, fading to 0 dB at 30%)."""
+    raw = volume_to_raw(pct, zero_db_raw)
+    if pct <= 0 or pct >= 30:
+        return raw
+    boost = int(round(16.0 * (1.0 - pct / 30.0)))
+    return min(zero_db_raw, raw + boost)
+
+
 def read_state_volume():
     try:
         with open(STATE_FILE, "r") as f:
@@ -140,6 +149,7 @@ def set_volume_i2c(pct, force_switches=False):
     global _last_raw_i2c
     pct = max(0, min(100, int(pct)))
     raw = volume_to_raw(pct, 255)
+    raw_wfr = woofer_volume_to_raw(pct, 255)
     raw_hp = volume_to_raw(pct, 191)
     mute_i2c = 0x08 if pct == 0 else 0x00
     mute_es = 0x00 if pct == 0 else 0x11
@@ -152,10 +162,13 @@ def set_volume_i2c(pct, force_switches=False):
                 vals = list(range(prev + step, raw, step)) + [raw]
             else:
                 vals = [raw]
+            boost = raw_wfr - raw
             for v in vals:
-                for addr in (0x2a, 0x2b):
-                    fcntl.ioctl(fd, 0x0706, addr)  # I2C_SLAVE_FORCE
-                    os.write(fd, bytes([0x07, v]))
+                fcntl.ioctl(fd, 0x0706, 0x2a)  # Tweeters
+                os.write(fd, bytes([0x07, v]))
+                vw = 0 if v == 0 else min(255, v + boost)
+                fcntl.ioctl(fd, 0x0706, 0x2b)  # Woofer
+                os.write(fd, bytes([0x07, vw]))
                 if len(vals) > 1:
                     time.sleep(0.001)
             if force_switches:
@@ -182,6 +195,7 @@ def set_volume(pct, force_switches=False):
     set_volume_i2c(pct, force_switches=force_switches)
 
     raw = volume_to_raw(pct, 255)
+    raw_wfr = woofer_volume_to_raw(pct, 255)
     sw = "0" if pct == 0 else "1"
     master_sw = "3" if pct == 0 else "0"
 
@@ -189,7 +203,7 @@ def set_volume(pct, force_switches=False):
     for card in (CARD, "0"):
         try:
             for ctl, val in (
-                ("Woofer Master Playback Volume", raw),
+                ("Woofer Master Playback Volume", raw_wfr),
                 ("Tweeters Master Playback Volume", raw),
             ):
                 subprocess.run([AMIXER, "-c", card, "cset", f"name={ctl}", str(val)],
@@ -301,7 +315,7 @@ def enforce_volume(allow_while_ring=False):
         ).start()
         return
 
-    expected = (volume_to_raw(current_volume, 255),
+    expected = (woofer_volume_to_raw(current_volume, 255),
                 volume_to_raw(current_volume, 255))
     actual = read_alsa_controls()
     if actual is None:
