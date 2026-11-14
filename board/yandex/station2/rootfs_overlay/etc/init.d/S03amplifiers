@@ -87,9 +87,34 @@ os.close(fd)
     # and would override the AtriOS user volume.  The mixer is configured
     # explicitly below, then the saved volume is applied at the end.
 
-    # 3. Direct hardware register unmute via I2C bus 2
-    # Silergy SY6045S: reg 0x06=0x00 (master unmute), reg 0x22=0x00 (unmute channels)
+    # 3. Load SY6045S firmware settings (DSP/TDM slot/crossover) and unmute via I2C bus 2
     # Tweeters (0x2a) and Woofer (0x2b)
+    if command -v python3 >/dev/null 2>&1; then
+      python3 -c '
+import fcntl, os
+def load_sy(path, addr):
+    if not os.path.exists(path):
+        return
+    fd = os.open("/dev/i2c-2", os.O_RDWR)
+    try:
+        fcntl.ioctl(fd, 0x0706, addr)  # I2C_SLAVE_FORCE
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split()
+                if len(parts) >= 2:
+                    os.write(fd, bytes([int(parts[0], 16), int(parts[1], 16)]))
+        os.write(fd, bytes([0x22, 0x00]))
+        os.write(fd, bytes([0x06, 0x00]))
+        os.write(fd, bytes([0x02, 0x00]))
+    finally:
+        os.close(fd)
+load_sy("/lib/firmware/sy6045s-tweeters-settings.txt", 0x2A)
+load_sy("/lib/firmware/sy6045s-woofer-settings.txt", 0x2B)
+' 2>/dev/null || true
+    fi
     if command -v i2cset >/dev/null 2>&1; then
       i2cset -y -f 2 0x2a 0x06 0x00 2>/dev/null || true
       i2cset -y -f 2 0x2a 0x22 0x00 2>/dev/null || true
@@ -117,12 +142,16 @@ os.close(fd)
     if command -v amixer >/dev/null 2>&1; then
       card="AMLAUGESOUND"
 
-      # Audio output routing (vendor card enum: 1 = TDMIN_B)
+      # Audio output routing (mainline axg-sound-card + vendor card fallback)
+      amixer -c "$card" cset name='FRDDR_A SINK 1 SEL' 'OUT 1' 2>/dev/null || true
+      amixer -c "$card" cset name='FRDDR_A SINK 2 SEL' 'OUT 1' 2>/dev/null || true
+      amixer -c "$card" cset name='FRDDR_A SINK 3 SEL' 'OUT 1' 2>/dev/null || true
+      amixer -c "$card" cset name='FRDDR_A SRC 1 EN Switch' on 2>/dev/null || true
       amixer -c "$card" cset name='Audio Out Sink' 1 2>/dev/null || true
       amixer -c "$card" cset name='SPK mute' 0 2>/dev/null || true
 
-      # Woofer controls (Master 255 = 0dB, Ch1/Ch2 159 [0x9F] = 0dB per sy6045s-woofer-settings.txt)
-      amixer -c "$card" cset name='Woofer Master Playback Switch' 1 2>/dev/null || true
+      # Woofer controls (Master Playback Switch: 0 = unmute, 3 = mute on SY6045S)
+      amixer -c "$card" cset name='Woofer Master Playback Switch' 0 2>/dev/null || true
       amixer -c "$card" cset name='Woofer Ch1 Playback Switch' 1 2>/dev/null || true
       amixer -c "$card" cset name='Woofer Ch1 Playback Volume' 159 2>/dev/null || true
       amixer -c "$card" cset name='Woofer Ch2 Playback Switch' 1 2>/dev/null || true
@@ -130,8 +159,8 @@ os.close(fd)
       amixer -c "$card" cset name='Woofer EQ Switch' 1 2>/dev/null || true
       amixer -c "$card" cset name='Woofer DRC Switch' 1 2>/dev/null || true
 
-      # Tweeters controls (Master 255 = 0dB, Ch1/Ch2 159 [0x9F] = 0dB per sy6045s-tweeters-settings.txt)
-      amixer -c "$card" cset name='Tweeters Master Playback Switch' 1 2>/dev/null || true
+      # Tweeters controls (Master Playback Switch: 0 = unmute, 3 = mute on SY6045S)
+      amixer -c "$card" cset name='Tweeters Master Playback Switch' 0 2>/dev/null || true
       amixer -c "$card" cset name='Tweeters Ch1 Playback Switch' 1 2>/dev/null || true
       amixer -c "$card" cset name='Tweeters Ch1 Playback Volume' 159 2>/dev/null || true
       amixer -c "$card" cset name='Tweeters Ch2 Playback Switch' 1 2>/dev/null || true
@@ -175,8 +204,8 @@ os.close(fd)
     if command -v amixer >/dev/null 2>&1; then
       card="AMLAUGESOUND"
       amixer -c "$card" cset name='SPK mute' 1 2>/dev/null || true
-      amixer -c "$card" cset name='Woofer Master Playback Switch' 0 2>/dev/null || true
-      amixer -c "$card" cset name='Tweeters Master Playback Switch' 0 2>/dev/null || true
+      amixer -c "$card" cset name='Woofer Master Playback Switch' 3 2>/dev/null || true
+      amixer -c "$card" cset name='Tweeters Master Playback Switch' 3 2>/dev/null || true
       amixer -c "$card" cset name='Headphone Headphone Switch' 0 2>/dev/null || true
     fi
 

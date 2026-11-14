@@ -19,14 +19,15 @@
 #include <linux/of.h>
 #include <linux/gpio/consumer.h>
 #include <linux/workqueue.h>
-#include <linux/timer.h>
+#include <linux/hrtimer.h>
+#include <linux/ktime.h>
 #include <linux/jiffies.h>
 #include <linux/sysfs.h>
 
 #define DRV_NAME	"rotary-volume"
 #define EXPECTED_GPIOS	2
 
-static bool debug = true;
+static bool debug = false;
 module_param(debug, bool, 0644);
 MODULE_PARM_DESC(debug, "Enable verbose quadrature transition and event logging");
 
@@ -35,10 +36,12 @@ struct rotary_volume {
 	struct gpio_descs *gpios;
 	struct input_dev *input;
 	struct work_struct work;
-	struct timer_list poll_timer;
+	struct hrtimer poll_hrtimer;
 	bool use_irq;
 	unsigned int scan_period_ms;
 	unsigned int prev_state;
+	int step_accum;
+	unsigned long last_change_jiffies;
 	u32 key_codes[EXPECTED_GPIOS];
 	unsigned long cw_events;
 	unsigned long ccw_events;
@@ -111,27 +114,55 @@ static void rotary_volume_report_event(struct rotary_volume *rv, u32 key,
 			 dir, key, rv->cw_events, rv->ccw_events);
 }
 
+/*
+ * Full Gray-code quadrature transition table: index = (prev << 2) | state.
+ * CW sequence:  3 -> 1 -> 0 -> 2 -> 3 (+1 per edge, +4 per detent)
+ * CCW sequence: 3 -> 2 -> 0 -> 1 -> 3 (-1 per edge, -4 per detent)
+ */
+static const s8 rotary_qem[16] = {
+	 0, -1, +1,  0,
+	+1,  0,  0, -1,
+	-1,  0,  0, +1,
+	 0, +1, -1,  0
+};
+
+static void rotary_process_state(struct rotary_volume *rv, unsigned int state,
+				 int v0, int v1)
+{
+	if (state != rv->prev_state) {
+		s8 delta = rotary_qem[((rv->prev_state & 0x3) << 2) | (state & 0x3)];
+
+		if (debug)
+			dev_info(rv->dev,
+				 "[ROTARY] transition %u -> %u (gpio0=%d, gpio1=%d, delta=%d, accum=%d)\n",
+				 rv->prev_state, state, v0, v1, delta, rv->step_accum + delta);
+
+		if (delta != 0) {
+			rv->step_accum += delta;
+			while (rv->step_accum >= 4) {
+				rotary_volume_report_event(rv, rv->key_codes[0], "CW");
+				rv->step_accum -= 4;
+			}
+			while (rv->step_accum <= -4) {
+				rotary_volume_report_event(rv, rv->key_codes[1], "CCW");
+				rv->step_accum += 4;
+			}
+		}
+		rv->prev_state = state;
+		rv->last_change_jiffies = jiffies;
+	} else if (rv->step_accum != 0 &&
+		   time_after(jiffies, rv->last_change_jiffies + msecs_to_jiffies(80))) {
+		rv->step_accum = 0;
+	}
+}
+
 static void rotary_volume_work(struct work_struct *work)
 {
 	struct rotary_volume *rv = container_of(work, struct rotary_volume, work);
 	int v0 = 0, v1 = 0;
 	unsigned int state = rotary_read_state_cansleep(rv, &v0, &v1);
 
-	if (debug)
-		dev_info(rv->dev, "[ROTARY-IRQ] state=%u (gpio0=%d, gpio1=%d, prev=%u)\n",
-			 state, v0, v1, rv->prev_state);
-
-	switch (state & 0x3) {
-	case 1:
-		rotary_volume_report_event(rv, rv->key_codes[0], "CW");
-		break;
-	case 2:
-		rotary_volume_report_event(rv, rv->key_codes[1], "CCW");
-		break;
-	default:
-		break;
-	}
-	rv->prev_state = state;
+	rotary_process_state(rv, state, v0, v1);
 }
 
 static irqreturn_t rotary_volume_irq(int irq, void *dev_id)
@@ -143,33 +174,15 @@ static irqreturn_t rotary_volume_irq(int irq, void *dev_id)
 	return IRQ_HANDLED;
 }
 
-static void rotary_volume_timer(struct timer_list *t)
+static enum hrtimer_restart rotary_volume_hrtimer(struct hrtimer *t)
 {
-	struct rotary_volume *rv = container_of(t, struct rotary_volume, poll_timer);
+	struct rotary_volume *rv = container_of(t, struct rotary_volume, poll_hrtimer);
 	int v0 = 0, v1 = 0;
 	unsigned int state = rotary_read_state_atomic(rv, &v0, &v1);
 
-	if (state != rv->prev_state) {
-		if (debug)
-			dev_info(rv->dev,
-				 "[ROTARY-POLL] transition %u -> %u (gpio0=%d, gpio1=%d)\n",
-				 rv->prev_state, state, v0, v1);
-		/*
-		 * Rotary encoder quadrature transition:
-		 * At rest with pull-ups, both lines are HIGH (state 3 = 11b).
-		 * CW turn drops line 0 first (transition 3 -> 1).
-		 * CCW turn drops line 1 first (transition 3 -> 2).
-		 */
-		if (rv->prev_state == 3) {
-			if (state == 1)
-				rotary_volume_report_event(rv, rv->key_codes[0], "CW");
-			else if (state == 2)
-				rotary_volume_report_event(rv, rv->key_codes[1], "CCW");
-		}
-		rv->prev_state = state;
-	}
-
-	mod_timer(&rv->poll_timer, jiffies + msecs_to_jiffies(rv->scan_period_ms));
+	rotary_process_state(rv, state, v0, v1);
+	hrtimer_forward_now(t, ms_to_ktime(rv->scan_period_ms));
+	return HRTIMER_RESTART;
 }
 
 static ssize_t status_show(struct device *dev, struct device_attribute *attr,
@@ -265,30 +278,33 @@ static int rotary_volume_probe(struct platform_device *pdev)
 	INIT_WORK(&rv->work, rotary_volume_work);
 	platform_set_drvdata(pdev, rv);
 
-	rv->scan_period_ms = 4;
+	rv->scan_period_ms = 1;
 	rv->prev_state = rotary_read_state_cansleep(rv, &v0, &v1);
+	rv->step_accum = 0;
+	rv->last_change_jiffies = jiffies;
 	dev_info(dev, "[ROTARY] GPIOs claimed: gpio0=hw:%d (val=%d), gpio1=hw:%d (val=%d), initial_state=%u, key_codes=[%u, %u]\n",
 		 desc_to_gpio(rv->gpios->desc[0]), v0,
 		 desc_to_gpio(rv->gpios->desc[1]), v1,
 		 rv->prev_state, rv->key_codes[0], rv->key_codes[1]);
 
-	timer_setup(&rv->poll_timer, rotary_volume_timer, 0);
+	hrtimer_setup(&rv->poll_hrtimer, rotary_volume_hrtimer,
+		      CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 
 	rv->use_irq = true;
 	for (i = 0; i < rv->gpios->ndescs; i++) {
 		int irq = gpiod_to_irq(rv->gpios->desc[i]);
 		if (irq < 0) {
-			dev_info(dev, "[ROTARY] gpiod_to_irq on gpio[%u] (hw:%d) returned %d -> using timer polling\n",
-				 i, desc_to_gpio(rv->gpios->desc[i]), irq);
+			dev_info(dev, "[ROTARY] gpiod_to_irq on gpio[%u] (hw:%d) returned %d -> using hrtimer polling (%ums)\n",
+				 i, desc_to_gpio(rv->gpios->desc[i]), irq, rv->scan_period_ms);
 			rv->use_irq = false;
 			break;
 		}
 		ret = devm_request_threaded_irq(dev, irq, rotary_volume_irq,
-						NULL, IRQF_TRIGGER_FALLING,
+						NULL, IRQF_TRIGGER_FALLING | IRQF_TRIGGER_RISING,
 						DRV_NAME, rv);
 		if (ret) {
-			dev_info(dev, "[ROTARY] request_irq(%d) failed (%d) -> using timer polling\n",
-				 irq, ret);
+			dev_info(dev, "[ROTARY] request_irq(%d) failed (%d) -> using hrtimer polling (%ums)\n",
+				 irq, ret, rv->scan_period_ms);
 			rv->use_irq = false;
 			break;
 		}
@@ -299,9 +315,10 @@ static int rotary_volume_probe(struct platform_device *pdev)
 		dev_warn(dev, "[ROTARY] failed to create sysfs group: %d\n", ret);
 
 	if (!rv->use_irq) {
-		dev_info(dev, "[ROTARY] Probed OK in timer polling mode (%ums)\n",
+		dev_info(dev, "[ROTARY] Probed OK in hrtimer polling mode (%ums)\n",
 			 rv->scan_period_ms);
-		mod_timer(&rv->poll_timer, jiffies + msecs_to_jiffies(rv->scan_period_ms));
+		hrtimer_start(&rv->poll_hrtimer, ms_to_ktime(rv->scan_period_ms),
+			      HRTIMER_MODE_REL);
 	} else {
 		dev_info(dev, "[ROTARY] Probed OK in hardware IRQ mode\n");
 	}
@@ -319,11 +336,7 @@ static int rotary_volume_remove(struct platform_device *pdev)
 
 	if (rv) {
 		sysfs_remove_group(&pdev->dev.kobj, &rotary_volume_attr_group);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
-		timer_delete_sync(&rv->poll_timer);
-#else
-		del_timer_sync(&rv->poll_timer);
-#endif
+		hrtimer_cancel(&rv->poll_hrtimer);
 		cancel_work_sync(&rv->work);
 	}
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 11, 0)

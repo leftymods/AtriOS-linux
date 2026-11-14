@@ -170,6 +170,26 @@ class DBusClient:
         self.sock.sendall(pkt + bytes(body))
         reply = self.read_msg()
 
+    def set_trusted(self, device_path):
+        body = bytearray()
+        body.extend(encode_str('org.bluez.Device1'))
+        pad(body, 4)
+        body.extend(encode_str('Trusted'))
+        body.extend(b'\x01b\x00')
+        pad(body, 4)
+        body.extend(struct.pack('<I', 1))
+
+        fields = [
+            (1, 'o', encode_obj(device_path)),
+            (6, 's', encode_str('org.bluez')),
+            (2, 's', encode_str('org.freedesktop.DBus.Properties')),
+            (3, 's', encode_str('Set')),
+            (8, 'g', b'\x03ssv\x00'),
+        ]
+        pkt = self.make_header(1, self.serial, fields, body_len=len(body))
+        self.serial += 1
+        self.sock.sendall(pkt + bytes(body))
+
     def loop(self):
         print("[bt-agent] Agent running and auto-accepting pairing...", flush=True)
         while True:
@@ -183,6 +203,14 @@ class DBusClient:
                     member = msg['member']
                     print(f"[bt-agent] Auto-confirming {member} from {sender}", flush=True)
                     self.send_method_return(sender, msg['serial'])
+                    body = msg.get('body', b'')
+                    if len(body) >= 5:
+                        plen = struct.unpack_from('<I', body, 0)[0]
+                        if 0 < plen <= len(body) - 4:
+                            dev_path = body[4:4+plen].decode('utf-8', errors='replace')
+                            if dev_path.startswith('/org/bluez/') and '/dev_' in dev_path:
+                                print(f"[bt-agent] Trusting {dev_path}", flush=True)
+                                self.set_trusted(dev_path)
 
 if __name__ == '__main__':
     client = DBusClient()

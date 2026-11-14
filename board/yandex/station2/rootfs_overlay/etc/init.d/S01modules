@@ -21,6 +21,7 @@ case "$1" in
     depmod -a 2>/dev/null || true
 
     # 1. Audio drivers & codecs
+    load_mod snd-soc-dmic
     load_mod snd-soc-pcm1774
     load_mod snd-soc-pcm1774-i2c
     load_mod snd-soc-es7210
