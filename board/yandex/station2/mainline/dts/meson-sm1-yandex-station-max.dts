@@ -563,23 +563,11 @@
 	};
 };
 
-&periphs_pinctrl {
-	spicc1_jtag_pins: spicc1-jtag {
-		mux {
-			groups = "GPIOH_4", "GPIOH_5", "GPIOH_7";
-			function = "gpio_periphs";
-		};
-	};
-};
-
 /* SPICC1: Gowin FPGA LED Matrix Screen Controller */
 &spicc1 {
 	status = "okay";
-	pinctrl-0 = <&spicc1_pins>;
-	pinctrl-1 = <&spicc1_jtag_pins>;
-	pinctrl-names = "default", "idle";
-	num-cs = <1>;
-	cs-gpios = <&gpio GPIOH_6 GPIO_ACTIVE_LOW>;
+	pinctrl-0 = <&spicc1_pins>, <&spicc1_ss0_pins>;
+	pinctrl-names = "default";
 	#address-cells = <1>;
 	#size-cells = <0>;
 
@@ -589,7 +577,7 @@
 		spi-max-frequency = <4000000>;
 		max-brightness = <200>;
 		reset-gpios = <&gpio GPIOX_8 GPIO_ACTIVE_LOW>;
-		jtag_reconfig-gpios = <&gpio GPIOH_8 GPIO_ACTIVE_HIGH>;
+		jtag_reconfig-gpios = <&gpio GPIOH_8 (GPIO_ACTIVE_LOW | GPIO_OPEN_DRAIN)>;
 		jtag_sel-gpios = <&gpio_ao GPIOE_2 GPIO_ACTIVE_HIGH>;
 		jtag_tck-gpios = <&gpio GPIOH_7 GPIO_ACTIVE_HIGH>;
 		jtag_tdi-gpios = <&gpio GPIOH_4 GPIO_ACTIVE_HIGH>;

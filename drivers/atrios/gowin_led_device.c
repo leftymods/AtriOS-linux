@@ -2112,6 +2112,12 @@ static int probe(struct spi_device *spi)
 		priv->reset_gpio = NULL;
 	}
 
+	/*
+	 * jtag_reconfig (RECONFIG_N on Gowin GW1N-9) is active-low open-drain.
+	 * With GPIO_ACTIVE_LOW | GPIO_OPEN_DRAIN in DTS, GPIOD_OUT_LOW initializes
+	 * the line to logical 0 (deasserted), placing the open-drain pin into High-Z
+	 * input mode so the carrier board 3.3V pull-up holds the FPGA out of reset.
+	 */
 	priv->jtag_reconfig = devm_gpiod_get_optional(dev, "jtag_reconfig",
 						       GPIOD_OUT_LOW);
 	if (IS_ERR(priv->jtag_reconfig))
