@@ -195,7 +195,7 @@ case "$CMD" in
             gdbus call --system --dest org.bluez --object-path /org/bluez/hci0 --method org.freedesktop.DBus.Properties.Set org.bluez.Adapter1 Discoverable '<true>' >/dev/null 2>&1 || true
           }
           if [ -x /usr/sbin/bt-speaker-daemon ]; then
-            if ! pgrep -x bt-speaker-daemon >/dev/null 2>&1; then
+            if ! pgrep -f /usr/sbin/bt-speaker-daemon >/dev/null 2>&1; then
               echo "Starting AtriOS Bluetooth Speaker Daemon (SDP + A2DP Sink + AVRCP)..."
               /usr/sbin/bt-speaker-daemon >/var/log/bt-speaker-daemon.log 2>&1 &
               sleep 0.5

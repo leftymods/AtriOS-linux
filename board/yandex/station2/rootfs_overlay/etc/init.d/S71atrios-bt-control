@@ -12,7 +12,7 @@ case "$1" in
     fi
 
     echo "Starting AtriOS Bluetooth Speaker Daemon (SDP + A2DP Sink + AVRCP)..."
-    if [ -x /usr/sbin/bt-speaker-daemon ] && ! pgrep -x bt-speaker-daemon >/dev/null 2>&1; then
+    if [ -x /usr/sbin/bt-speaker-daemon ] && ! pgrep -f /usr/sbin/bt-speaker-daemon >/dev/null 2>&1; then
       /usr/sbin/bt-speaker-daemon >/var/log/bt-speaker-daemon.log 2>&1 &
     fi
 
