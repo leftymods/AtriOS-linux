@@ -59,3 +59,87 @@ diff -uprN a/drivers/bluetooth/btrtl.c b/drivers/bluetooth/btrtl.c
  	case CHIP_ID_8852A:
  	case CHIP_ID_8852B:
  	case CHIP_ID_8852C:
+diff -uprN a/net/bluetooth/hci_event.c b/net/bluetooth/hci_event.c
+--- a/net/bluetooth/hci_event.c
++++ b/net/bluetooth/hci_event.c
+@@ -4657,6 +4657,14 @@ static void hci_pin_code_request_evt(str
+ 			secure = 0;
+ 
+ 		mgmt_pin_code_request(hdev, &ev->bdaddr, secure);
++	} else {
++		struct hci_cp_pin_code_reply cp;
++
++		bacpy(&cp.bdaddr, &ev->bdaddr);
++		cp.pin_len = 4;
++		memcpy(cp.pin_code, "0000", 4);
++		memset(cp.pin_code + 4, 0, sizeof(cp.pin_code) - 4);
++		hci_send_cmd(hdev, HCI_OP_PIN_CODE_REPLY, sizeof(cp), &cp);
+ 	}
+ 
+ unlock:
+@@ -4705,9 +4713,6 @@ static void hci_link_key_request_evt(str
+ 
+ 	bt_dev_dbg(hdev, "");
+ 
+-	if (!hci_dev_test_flag(hdev, HCI_MGMT))
+-		return;
+-
+ 	hci_dev_lock(hdev);
+ 
+ 	key = hci_find_link_key(hdev, &ev->bdaddr);
+@@ -4786,9 +4791,6 @@ static void hci_link_key_notify_evt(stru
+ 	set_bit(HCI_CONN_NEW_LINK_KEY, &conn->flags);
+ 	conn_set_key(conn, ev->key_type, conn->pin_length);
+ 
+-	if (!hci_dev_test_flag(hdev, HCI_MGMT))
+-		goto unlock;
+-
+ 	key = hci_add_link_key(hdev, conn, &ev->bdaddr, ev->link_key,
+ 			        ev->key_type, pin_len, &persistent);
+ 	if (!key)
+@@ -4800,7 +4802,10 @@ static void hci_link_key_notify_evt(stru
+ 	if (ev->key_type == HCI_LK_CHANGED_COMBINATION)
+ 		conn_set_key(conn, key->type, key->pin_len);
+ 
+-	mgmt_new_link_key(hdev, key, persistent);
++	if (hci_dev_test_flag(hdev, HCI_MGMT))
++		mgmt_new_link_key(hdev, key, persistent);
++	else
++		persistent = true;
+ 
+ 	/* Keep debug keys around only if the HCI_KEEP_DEBUG_KEYS flag
+ 	 * is set. If it's not set simply remove the key from the kernel
+@@ -5350,8 +5355,19 @@ static void hci_io_capa_request_evt(stru
+ 
+ 	hci_conn_hold(conn);
+ 
+-	if (!hci_dev_test_flag(hdev, HCI_MGMT))
++	if (!hci_dev_test_flag(hdev, HCI_MGMT)) {
++		struct hci_cp_io_capability_reply cp;
++
++		bacpy(&cp.bdaddr, &ev->bdaddr);
++		cp.capability = HCI_IO_NO_INPUT_OUTPUT;
++		cp.oob_data = 0x00;
++		cp.authentication = HCI_AT_GENERAL_BONDING;
++		conn->io_capability = HCI_IO_NO_INPUT_OUTPUT;
++		conn->auth_type = HCI_AT_GENERAL_BONDING;
++		hci_send_cmd(hdev, HCI_OP_IO_CAPABILITY_REPLY,
++			     sizeof(cp), &cp);
+ 		goto unlock;
++	}
+ 
+ 	/* Allow pairing if we're pairable, the initiators of the
+ 	 * pairing or if the remote is not requesting bonding.
+@@ -5436,8 +5452,11 @@ static void hci_user_confirm_request_evt
+ 
+ 	hci_dev_lock(hdev);
+ 
+-	if (!hci_dev_test_flag(hdev, HCI_MGMT))
++	if (!hci_dev_test_flag(hdev, HCI_MGMT)) {
++		hci_send_cmd(hdev, HCI_OP_USER_CONFIRM_REPLY,
++			     sizeof(ev->bdaddr), &ev->bdaddr);
+ 		goto unlock;
++	}
+ 
+ 	conn = hci_conn_hash_lookup_ba(hdev, ACL_LINK, &ev->bdaddr);
+ 	if (!conn)

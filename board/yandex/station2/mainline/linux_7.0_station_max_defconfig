@@ -1106,7 +1106,7 @@ CONFIG_PREVENT_FIRMWARE_BUILD=y
 # Firmware loader
 #
 CONFIG_FW_LOADER=y
-CONFIG_EXTRA_FIRMWARE=" sy6045s-tweeters-settings.txt sy6045s-woofer-settings.txt"
+CONFIG_EXTRA_FIRMWARE="yandex_led_screen_fpga.bin yandex_led_panel.bin rtw88/rtw8822c_fw.bin rtw88/rtw8822c_wow_fw.bin rtl_bt/rtl8822cs_fw.bin rtl_bt/rtl8822cs_config.bin sy6045s-tweeters-settings.txt sy6045s-woofer-settings.txt"
 # CONFIG_FW_LOADER_USER_HELPER is not set
 # CONFIG_FW_LOADER_COMPRESS is not set
 CONFIG_FW_CACHE=y

@@ -1,44 +1,56 @@
 diff -uprN a/drivers/net/wireless/realtek/rtw88/coex.c b/drivers/net/wireless/realtek/rtw88/coex.c
---- a/drivers/net/wireless/realtek/rtw88/coex.c	2026-11-09 12:09:52.128505868 +0300
-+++ b/drivers/net/wireless/realtek/rtw88/coex.c	2026-11-09 12:09:52.135343992 +0300
-@@ -2746,6 +2746,22 @@ static void __rtw_coex_init_hw_config(st
- 		rtw_coex_write_scbd(rtwdev, COEX_SCBD_ACTIVE | COEX_SCBD_ONOFF,
- 				    true);
- 		coex->stop_dm = true;
+--- a/drivers/net/wireless/realtek/rtw88/coex.c
++++ b/drivers/net/wireless/realtek/rtw88/coex.c
+@@ -2742,10 +2742,30 @@ static void __rtw_coex_init_hw_config(st
+ 		rtw_dbg(rtwdev, RTW_DBG_COEX, "[BTCoex], %s(): RF Off\n",
+ 			__func__);
+ 	} else if (wifi_only) {
+-		rtw_coex_set_ant_path(rtwdev, true, COEX_SET_ANT_WONLY);
++		rtw_coex_set_init(rtwdev);
++		rtw_coex_set_rfe_type(rtwdev);
++		coex->stop_dm = true;
 +		coex_stat->wl_coex_mode = COEX_WLINK_2GFREE;
 +		coex->freerun = true;
 +		rtw_coex_gnt_workaround(rtwdev, true, COEX_WLINK_2GFREE);
-+		/* Vendor Realtek ex_hal8822e_wifi_only_hw_config: */
-+		/* Byte 0x73 = 0x0e (WLAN path owner) */
-+		rtw_write8(rtwdev, 0x73, 0x0e);
-+		/* LTE indirect 0x38 = 0x7700 (GNT_WL=1, GNT_BT=0) */
-+		rtw_coex_write_indirect_reg(rtwdev, 0x38, 0xffff, 0x7700);
-+		/* LTE indirect 0xa0 = 0xffff, 0xa4 = 0xffff */
++		rtw_coex_set_ant_path(rtwdev, true, COEX_SET_ANT_2G_FREERUN);
+ 		rtw_coex_write_scbd(rtwdev, COEX_SCBD_ACTIVE | COEX_SCBD_ONOFF,
+ 				    true);
+-		coex->stop_dm = true;
++		/* Simultaneous WL + BT coexistence on RTL8822CS:
++		 * 0x73 = 0x04 (WL path control without forcing GNT_BT low)
++		 * indirect 0x38 = 0xff00 (GNT_WL=SW_HIGH, GNT_BT=SW_HIGH)
++		 * COEX_TABLE0/1 = 0xffffffff (allow both WL and BT traffic)
++		 */
++		rtw_write8(rtwdev, 0x73, 0x04);
++		rtw_coex_write_indirect_reg(rtwdev, 0x38, 0xffff, 0xff00);
 +		rtw_coex_write_indirect_reg(rtwdev, 0xa0, 0xffff, 0xffff);
 +		rtw_coex_write_indirect_reg(rtwdev, 0xa4, 0xffff, 0xffff);
-+		/* 100% WLAN priority in arbitration tables */
-+		rtw_write32(rtwdev, REG_BT_COEX_TABLE0, 0xaaaaaaaa);
-+		rtw_write32(rtwdev, REG_BT_COEX_TABLE1, 0xaaaaaaaa);
-+		pr_info("[RTW88] wifi_only hardware configured (0x73=0x0e, 0x38=0x7700, tbl=0xaaaaaaaa)\n");
++		rtw_write32(rtwdev, REG_BT_COEX_TABLE0, 0xffffffff);
++		rtw_write32(rtwdev, REG_BT_COEX_TABLE1, 0xffffffff);
++		rtw_write32(rtwdev, REG_BT_COEX_BRK_TABLE, 0xf0ffffff);
++		rtw_write8(rtwdev, REG_BT_COEX_TABLE_H, 0x03);
++		pr_info("[RTW88] wl+bt coexistence hardware configured (0x73=0x04, 0x38=0xff00, tbl=0xffffffff)\n");
 +		return;
  	} else {
  		rtw_coex_set_ant_path(rtwdev, true, COEX_SET_ANT_INIT);
  		rtw_coex_write_scbd(rtwdev, COEX_SCBD_ACTIVE | COEX_SCBD_ONOFF,
-@@ -2777,8 +2793,11 @@ void rtw_coex_power_on_setting(struct rt
+@@ -2777,8 +2797,13 @@ void rtw_coex_power_on_setting(struct rt
  	rtw_coex_monitor_bt_enable(rtwdev);
  	rtw_coex_set_rfe_type(rtwdev);
  
 -	/* set antenna path to BT */
 -	rtw_coex_set_ant_path(rtwdev, true, COEX_SET_ANT_POWERON);
-+	/* set antenna path to BT or WONLY */
-+	if (!rtwdev->efuse.btcoex)
-+		rtw_coex_set_ant_path(rtwdev, true, COEX_SET_ANT_WONLY);
-+	else
++	/* set antenna path to BT or WL+BT freerun */
++	if (!rtwdev->efuse.btcoex) {
++		table_case = 0;
++		rtw_coex_set_ant_path(rtwdev, true, COEX_SET_ANT_2G_FREERUN);
++	} else {
 +		rtw_coex_set_ant_path(rtwdev, true, COEX_SET_ANT_POWERON);
++	}
  
  	rtw_coex_table(rtwdev, true, table_case);
  	/* red x issue */
-@@ -2821,8 +2840,8 @@ void rtw_coex_ips_notify(struct rtw_dev
+@@ -2821,8 +2846,8 @@ void rtw_coex_ips_notify(struct rtw_dev
  		rtw_dbg(rtwdev, RTW_DBG_COEX, "[BTCoex], IPS LEAVE notify\n");
  
  		rtw_coex_write_scbd(rtwdev, COEX_SCBD_ACTIVE | COEX_SCBD_ONOFF, true);

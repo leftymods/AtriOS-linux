@@ -1,5 +1,5 @@
 #!/bin/sh
-# /etc/init.d/S71atrios-bt-control - Bluetooth RFCOMM Remote Control Daemon
+# /etc/init.d/S71atrios-bt-control - Bluetooth Speaker & RFCOMM Remote Control Daemons
 
 case "$1" in
   start)
@@ -11,13 +11,19 @@ case "$1" in
       sleep 1
     fi
 
+    echo "Starting AtriOS Bluetooth Speaker Daemon (SDP + A2DP Sink + AVRCP)..."
+    if [ -x /usr/sbin/bt-speaker-daemon ] && ! pgrep -x bt-speaker-daemon >/dev/null 2>&1; then
+      /usr/sbin/bt-speaker-daemon >/var/log/bt-speaker-daemon.log 2>&1 &
+    fi
+
     echo "Starting AtriOS Bluetooth Remote Control Daemon (RFCOMM channel 1)..."
     if [ -x /usr/lib/atrios/bt-control ] && ! pgrep -f /usr/lib/atrios/bt-control >/dev/null 2>&1; then
       python3 /usr/lib/atrios/bt-control >/var/log/atrios-bt-control.log 2>&1 &
     fi
     ;;
   stop)
-    echo "Stopping AtriOS Bluetooth Remote Control Daemon..."
+    echo "Stopping AtriOS Bluetooth Daemons..."
+    killall bt-speaker-daemon 2>/dev/null || true
     pkill -f /usr/lib/atrios/bt-control 2>/dev/null || true
     ;;
   restart)

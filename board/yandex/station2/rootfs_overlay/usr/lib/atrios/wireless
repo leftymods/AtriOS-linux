@@ -194,53 +194,37 @@ case "$CMD" in
             gdbus call --system --dest org.bluez --object-path /org/bluez/hci0 --method org.freedesktop.DBus.Properties.Set org.bluez.Adapter1 Pairable '<true>' >/dev/null 2>&1 || true
             gdbus call --system --dest org.bluez --object-path /org/bluez/hci0 --method org.freedesktop.DBus.Properties.Set org.bluez.Adapter1 Discoverable '<true>' >/dev/null 2>&1 || true
           }
-          if [ -x /usr/lib/atrios/bt-agent ] && ! pgrep -f /usr/lib/atrios/bt-agent >/dev/null 2>&1; then
-            echo "Starting BlueZ auto-pairing agent..."
-            python3 /usr/lib/atrios/bt-agent &
-            sleep 0.5
-          fi
-          if ! pidof bluetoothd >/dev/null 2>&1; then
-            echo "Starting BlueZ bluetoothd daemon..."
-            /usr/libexec/bluetooth/bluetoothd -C &
-            sleep 1
-          fi
-          command -v sdptool >/dev/null 2>&1 && {
-            sdptool add SP >/dev/null 2>&1 || true
-            sdptool add A2SNK >/dev/null 2>&1 || true
-            sdptool add AVRCT >/dev/null 2>&1 || true
-          }
-          hciconfig hci0 up 2>/dev/null || true
-          hciconfig hci0 class 0x240414 2>/dev/null || true
-          hciconfig hci0 name "Yandex Station Max" 2>/dev/null || true
-          hciconfig hci0 piscan 2>/dev/null || true
-          hciconfig hci0 sspmode 1 2>/dev/null || true
-          hciconfig hci0 noauth 2>/dev/null || true
-          command -v gdbus >/dev/null 2>&1 && {
-            gdbus call --system --dest org.bluez --object-path /org/bluez/hci0 --method org.freedesktop.DBus.Properties.Set org.bluez.Adapter1 Pairable '<true>' >/dev/null 2>&1 || true
-            gdbus call --system --dest org.bluez --object-path /org/bluez/hci0 --method org.freedesktop.DBus.Properties.Set org.bluez.Adapter1 Discoverable '<true>' >/dev/null 2>&1 || true
-          }
-          if [ -x /usr/lib/atrios/bt-agent ] && ! pgrep -f /usr/lib/atrios/bt-agent >/dev/null 2>&1; then
-            echo "Starting BlueZ auto-pairing agent..."
-            python3 /usr/lib/atrios/bt-agent &
-            sleep 0.5
+          if [ -x /usr/sbin/bt-speaker-daemon ]; then
+            if ! pgrep -x bt-speaker-daemon >/dev/null 2>&1; then
+              echo "Starting AtriOS Bluetooth Speaker Daemon (SDP + A2DP Sink + AVRCP)..."
+              /usr/sbin/bt-speaker-daemon >/var/log/bt-speaker-daemon.log 2>&1 &
+              sleep 0.5
+            fi
+          else
+            if [ -x /usr/lib/atrios/bt-agent ] && ! pgrep -f /usr/lib/atrios/bt-agent >/dev/null 2>&1; then
+              echo "Starting BlueZ auto-pairing agent..."
+              python3 /usr/lib/atrios/bt-agent 2>/dev/null &
+              sleep 0.5
+            fi
+            if [ -x /usr/libexec/bluetooth/bluetoothd ] && ! pgrep -x bluetoothd >/dev/null 2>&1; then
+              echo "Starting BlueZ bluetoothd daemon..."
+              /usr/libexec/bluetooth/bluetoothd -C 2>/dev/null &
+              sleep 1
+            fi
+            if [ -x /usr/bin/bluealsa ] && ! pgrep -x bluealsa >/dev/null 2>&1; then
+              echo "Starting BlueALSA A2DP audio engine..."
+              /usr/bin/bluealsa -p a2dp-sink --a2dp-volume -i hci0 2>/dev/null &
+              sleep 0.5
+            fi
+            if [ -x /usr/bin/bluealsa-aplay ] && ! pgrep -x bluealsa-aplay >/dev/null 2>&1; then
+              echo "Starting BlueALSA audio playback bridge..."
+              /usr/bin/bluealsa-aplay -v -D playback_plug -M none >/tmp/bluealsa-aplay.log 2>&1 &
+              sleep 0.5
+            fi
           fi
           if [ -x /etc/init.d/S03amplifiers ]; then
             echo "Initializing audio amplifiers and hardware mixer..."
             /etc/init.d/S03amplifiers start >/dev/null 2>&1 || true
-          fi
-          if [ -x /usr/bin/bluealsa ] && ! pgrep -x bluealsa >/dev/null 2>&1; then
-            echo "Starting BlueALSA A2DP audio engine..."
-            /usr/bin/bluealsa -p a2dp-sink --a2dp-volume -i hci0 &
-            sleep 0.5
-          fi
-          if [ -x /usr/bin/bluealsa-aplay ] && ! pgrep -x bluealsa-aplay >/dev/null 2>&1; then
-            echo "Starting BlueALSA audio playback bridge..."
-            /usr/bin/bluealsa-aplay -v -D playback_plug -M none >/tmp/bluealsa-aplay.log 2>&1 &
-            sleep 0.5
-          fi
-          if [ -x /usr/lib/atrios/bt-volume-sync ] && ! pgrep -f /usr/lib/atrios/bt-volume-sync >/dev/null 2>&1; then
-            echo "Starting Bluetooth volume synchronization daemon..."
-            python3 /usr/lib/atrios/bt-volume-sync &
           fi
           if [ -x /usr/lib/atrios/bt-control ] && ! pgrep -f /usr/lib/atrios/bt-control >/dev/null 2>&1; then
             echo "Starting Bluetooth Remote Control daemon..."
@@ -256,7 +240,7 @@ case "$CMD" in
         fi
       elif [ "$MODE" = "off" ] || [ "$MODE" = "stop" ]; then
         echo "Stopping Bluetooth Speaker Mode..."
-        killall bt-volume-sync bluealsa-aplay bluealsa bt-agent 2>/dev/null || true
+        killall bt-speaker-daemon bt-volume-sync bluealsa-aplay bluealsa bt-agent 2>/dev/null || true
         if command -v hciconfig >/dev/null 2>&1; then
           hciconfig hci0 noscan 2>/dev/null || true
         fi
