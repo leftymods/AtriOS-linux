@@ -289,9 +289,9 @@
 };
 
 &pdm {
-	pinctrl-0 = <&pdm_din0_z_pins>, <&pdm_din1_z_pins>,
-		    <&pdm_din2_z_pins>, <&pdm_din3_z_pins>,
-		    <&pdm_dclk_z_pins>;
+	pinctrl-0 = <&pdm_din0_c_pins>, <&pdm_din1_c_pins>,
+		    <&pdm_din2_c_pins>, <&pdm_din3_c_pins>,
+		    <&pdm_dclk_c_pins>;
 	pinctrl-names = "default";
 	status = "okay";
 };
