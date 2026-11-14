@@ -28,6 +28,16 @@
 #include <bluetooth/hci_lib.h>
 #include <bluetooth/l2cap.h>
 
+#include <sbc/sbc.h>
+#include <dlfcn.h>
+
+typedef struct _snd_pcm snd_pcm_t;
+typedef long snd_pcm_sframes_t;
+typedef unsigned long snd_pcm_uframes_t;
+#define SND_PCM_STREAM_PLAYBACK 0
+#define SND_PCM_ACCESS_RW_INTERLEAVED 3
+#define SND_PCM_FORMAT_S16_LE 2
+
 #ifndef BT_SECURITY
 #define BT_SECURITY 4
 struct bt_security {
@@ -637,11 +647,16 @@ static client_t *find_avdtp_signal_by_peer(const bdaddr_t *peer) {
     return NULL;
 }
 
+static void audio_close(void);
+
 static void close_client(client_t *c) {
     if (!c || !c->active) return;
     printf("[bt-speaker] Disconnected %s (kind=%d, media_pkts=%llu)\n",
            c->peer_str, (int)c->kind, (unsigned long long)c->media_pkts);
     fflush(stdout);
+    if (c->kind == CONN_AVDTP_MEDIA) {
+        audio_close();
+    }
     close(c->fd);
     c->active = false;
     c->fd = -1;
@@ -869,6 +884,9 @@ static void handle_avdtp_signal(client_t *c, const uint8_t *pkt, size_t len) {
         if (sig_id == 0x08 || sig_id == 0x0A) {
             c->avdtp_open_sent = false;
         }
+        if (sig_id == 0x08 || sig_id == 0x09 || sig_id == 0x0A) {
+            audio_close();
+        }
         break;
 
     default:
@@ -878,6 +896,160 @@ static void handle_avdtp_signal(client_t *c, const uint8_t *pkt, size_t len) {
     }
 
     send(c->fd, rsp, rlen, 0);
+}
+
+/* =========================================================================
+ * SBC Decoder & ALSA Playback (A2DP Media Sink via dlopen)
+ * ========================================================================= */
+
+static void *g_sbc_dl = NULL;
+static void *g_alsa_dl = NULL;
+static int (*p_sbc_init)(sbc_t *, unsigned long) = NULL;
+static ssize_t (*p_sbc_decode)(sbc_t *, const void *, size_t, void *, size_t, size_t *) = NULL;
+static void (*p_sbc_finish)(sbc_t *) = NULL;
+
+static int (*p_snd_pcm_open)(snd_pcm_t **, const char *, int, int) = NULL;
+static int (*p_snd_pcm_close)(snd_pcm_t *) = NULL;
+static int (*p_snd_pcm_set_params)(snd_pcm_t *, int, int, unsigned int, unsigned int, int, unsigned int) = NULL;
+static snd_pcm_sframes_t (*p_snd_pcm_writei)(snd_pcm_t *, const void *, snd_pcm_uframes_t) = NULL;
+static int (*p_snd_pcm_recover)(snd_pcm_t *, int, int) = NULL;
+static int (*p_snd_pcm_drain)(snd_pcm_t *) = NULL;
+static int (*p_snd_pcm_drop)(snd_pcm_t *) = NULL;
+static const char *(*p_snd_strerror)(int) = NULL;
+
+static sbc_t g_sbc;
+static bool g_sbc_init = false;
+static snd_pcm_t *g_pcm = NULL;
+static unsigned int g_pcm_rate = 0;
+static unsigned int g_pcm_channels = 0;
+
+static bool audio_load_libs(void) {
+    if (p_sbc_decode && p_snd_pcm_writei) return true;
+    if (!g_sbc_dl) g_sbc_dl = dlopen("libsbc.so.1", RTLD_LAZY);
+    if (!g_alsa_dl) g_alsa_dl = dlopen("libasound.so.2", RTLD_LAZY);
+    if (!g_sbc_dl || !g_alsa_dl) {
+        fprintf(stderr, "[bt-speaker] dlopen failed: sbc=%p alsa=%p (%s)\n",
+                g_sbc_dl, g_alsa_dl, dlerror());
+        return false;
+    }
+    p_sbc_init = dlsym(g_sbc_dl, "sbc_init");
+    p_sbc_decode = dlsym(g_sbc_dl, "sbc_decode");
+    p_sbc_finish = dlsym(g_sbc_dl, "sbc_finish");
+    p_snd_pcm_open = dlsym(g_alsa_dl, "snd_pcm_open");
+    p_snd_pcm_close = dlsym(g_alsa_dl, "snd_pcm_close");
+    p_snd_pcm_set_params = dlsym(g_alsa_dl, "snd_pcm_set_params");
+    p_snd_pcm_writei = dlsym(g_alsa_dl, "snd_pcm_writei");
+    p_snd_pcm_recover = dlsym(g_alsa_dl, "snd_pcm_recover");
+    p_snd_pcm_drain = dlsym(g_alsa_dl, "snd_pcm_drain");
+    p_snd_pcm_drop = dlsym(g_alsa_dl, "snd_pcm_drop");
+    p_snd_strerror = dlsym(g_alsa_dl, "snd_strerror");
+    return (p_sbc_init && p_sbc_decode && p_sbc_finish &&
+            p_snd_pcm_open && p_snd_pcm_close && p_snd_pcm_set_params &&
+            p_snd_pcm_writei && p_snd_pcm_recover && p_snd_pcm_drain &&
+            p_snd_pcm_drop && p_snd_strerror);
+}
+
+static void audio_close(void) {
+    if (g_pcm && p_snd_pcm_drop && p_snd_pcm_close) {
+        p_snd_pcm_drop(g_pcm);
+        p_snd_pcm_close(g_pcm);
+        g_pcm = NULL;
+        g_pcm_rate = 0;
+        g_pcm_channels = 0;
+    }
+    if (g_sbc_init && p_sbc_finish) {
+        p_sbc_finish(&g_sbc);
+        g_sbc_init = false;
+    }
+}
+
+static bool audio_ensure_pcm(unsigned int rate, unsigned int channels) {
+    if (!audio_load_libs()) return false;
+    if (g_pcm && g_pcm_rate == rate && g_pcm_channels == channels) return true;
+    if (g_pcm) {
+        p_snd_pcm_drain(g_pcm);
+        p_snd_pcm_close(g_pcm);
+        g_pcm = NULL;
+    }
+    const char *devs[] = { "default", "plughw:0,0" };
+    int err = -1;
+    for (size_t i = 0; i < sizeof(devs) / sizeof(devs[0]); i++) {
+        err = p_snd_pcm_open(&g_pcm, devs[i], SND_PCM_STREAM_PLAYBACK, 0);
+        if (err >= 0) {
+            err = p_snd_pcm_set_params(g_pcm, SND_PCM_FORMAT_S16_LE,
+                                       SND_PCM_ACCESS_RW_INTERLEAVED,
+                                       channels, rate, 1, 100000);
+            if (err >= 0) {
+                g_pcm_rate = rate;
+                g_pcm_channels = channels;
+                printf("[bt-speaker] ALSA opened '%s' (%u Hz, %u ch)\n",
+                       devs[i], rate, channels);
+                fflush(stdout);
+                return true;
+            }
+            p_snd_pcm_close(g_pcm);
+            g_pcm = NULL;
+        }
+    }
+    fprintf(stderr, "[bt-speaker] ALSA open/setup failed: %s\n", p_snd_strerror(err));
+    return false;
+}
+
+static void handle_avdtp_media(client_t *c, const uint8_t *pkt, size_t len) {
+    c->media_pkts++;
+    if (len < 14 || !audio_load_libs()) return;
+
+    uint8_t v = (pkt[0] >> 6) & 0x03;
+    if (v != 2) return; /* Not RTP v2 */
+    uint8_t cc = pkt[0] & 0x0f;
+    bool ext = (pkt[0] & 0x10) != 0;
+
+    size_t off = 12 + (size_t)cc * 4;
+    if (ext) {
+        if (off + 4 > len) return;
+        uint16_t ext_len = (uint16_t)((pkt[off + 2] << 8) | pkt[off + 3]);
+        off += 4 + (size_t)ext_len * 4;
+    }
+    if (off + 1 >= len) return;
+
+    /* Skip 1-byte SBC RTP media payload header */
+    off += 1;
+
+    if (!g_sbc_init) {
+        if (p_sbc_init(&g_sbc, 0) < 0) return;
+        g_sbc.endian = SBC_LE;
+        g_sbc_init = true;
+    }
+
+    uint8_t pcm_buf[8192];
+    while (off < len) {
+        size_t written = 0;
+        ssize_t consumed = p_sbc_decode(&g_sbc, pkt + off, len - off,
+                                        pcm_buf, sizeof(pcm_buf), &written);
+        if (consumed <= 0) break;
+        off += (size_t)consumed;
+
+        if (written > 0) {
+            unsigned int rate = (g_sbc.frequency == 0) ? 16000 :
+                                (g_sbc.frequency == 1) ? 32000 :
+                                (g_sbc.frequency == 2) ? 44100 : 48000;
+            unsigned int ch = (g_sbc.mode == 0) ? 1 : 2;
+            if (!audio_ensure_pcm(rate, ch)) break;
+
+            snd_pcm_uframes_t total_frames = (snd_pcm_uframes_t)(written / (ch * 2));
+            size_t byte_off = 0;
+            while (total_frames > 0) {
+                snd_pcm_sframes_t n = p_snd_pcm_writei(g_pcm, pcm_buf + byte_off, total_frames);
+                if (n < 0) {
+                    n = p_snd_pcm_recover(g_pcm, (int)n, 1);
+                    if (n < 0) break;
+                    continue;
+                }
+                total_frames -= (snd_pcm_uframes_t)n;
+                byte_off += (size_t)n * ch * 2;
+            }
+        }
+    }
 }
 
 /* =========================================================================
@@ -1219,7 +1391,7 @@ int main(void) {
             }
         }
 
-        int ret = poll(pfds, nfds, 100);
+        int ret = poll(pfds, nfds, 30);
         if (ret < 0) {
             if (errno == EINTR) continue;
             break;
@@ -1282,7 +1454,7 @@ int main(void) {
                 }
                 if (c->kind == CONN_SDP) handle_sdp_pdu(c, buf, (size_t)n);
                 else if (c->kind == CONN_AVDTP_SIGNAL) handle_avdtp_signal(c, buf, (size_t)n);
-                else if (c->kind == CONN_AVDTP_MEDIA) c->media_pkts++;
+                else if (c->kind == CONN_AVDTP_MEDIA) handle_avdtp_media(c, buf, (size_t)n);
                 else if (c->kind == CONN_AVCTP) handle_avctp(c, buf, (size_t)n);
             }
         }

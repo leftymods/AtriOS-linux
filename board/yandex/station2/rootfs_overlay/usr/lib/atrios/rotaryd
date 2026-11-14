@@ -249,9 +249,9 @@ def apply_saved_volume():
     set_volume(current_volume, force_switches=True)
 
 
-def _sync_alsa_async(pct):
+def _sync_alsa_async(pct, force_switches=False):
     with _alsa_lock:
-        set_volume(pct)
+        set_volume(pct, force_switches=force_switches)
 
 
 _render_wake = threading.Event()
@@ -294,7 +294,11 @@ def enforce_volume(allow_while_ring=False):
         last_volume_time = time.time()
         set_volume_i2c(current_volume, force_switches=(prev_volume == 0 or current_volume == 0))
         _render_wake.set()
-        threading.Thread(target=_sync_alsa_async, args=(current_volume,), daemon=True).start()
+        threading.Thread(
+            target=_sync_alsa_async,
+            args=(current_volume, prev_volume == 0 or current_volume == 0),
+            daemon=True,
+        ).start()
         return
 
     expected = (volume_to_raw(current_volume, 255),
@@ -520,6 +524,7 @@ def main():
     apply_saved_volume()
     last_enforce = time.time()
     last_scan = time.time()
+    last_flush = time.time()
     last_state_mtime = 0.0
     try:
         last_state_mtime = os.stat(STATE_FILE).st_mtime
@@ -531,7 +536,7 @@ def main():
     try:
         while True:
             fds_to_watch = list(open_fds.keys())
-            rlist, _, _ = select.select(fds_to_watch, [], [], 0.2) if fds_to_watch else ([], [], 0.2)
+            rlist, _, _ = select.select(fds_to_watch, [], [], 0.05) if fds_to_watch else ([], [], 0.05)
             now = time.time()
 
             for fd in rlist:
@@ -578,9 +583,10 @@ def main():
                 except Exception:
                     pass
 
-            # Debounced state flush: write to flash 300ms after user finishes rotating the knob
-            if volume_dirty and (now - last_volume_change_time > 0.3):
+            # Fast state flush: write every 80ms while rotating for real-time BT sync
+            if volume_dirty and (now - last_flush > 0.08):
                 flush_state_volume()
+                last_flush = now
                 try:
                     last_state_mtime = os.stat(STATE_FILE).st_mtime
                 except OSError:
