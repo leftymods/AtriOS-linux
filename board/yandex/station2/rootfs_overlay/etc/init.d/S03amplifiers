@@ -157,7 +157,7 @@ load_sy("/lib/firmware/sy6045s-woofer-settings.txt", 0x2B)
       amixer -c "$card" cset name='Woofer Ch2 Playback Switch' 1 2>/dev/null || true
       amixer -c "$card" cset name='Woofer Ch2 Playback Volume' 159 2>/dev/null || true
       amixer -c "$card" cset name='Woofer EQ Switch' 1 2>/dev/null || true
-      amixer -c "$card" cset name='Woofer DRC Switch' 1 2>/dev/null || true
+      amixer -c "$card" cset name='Woofer DRC Switch' 0 2>/dev/null || true
 
       # Tweeters controls (Master Playback Switch: 0 = unmute, 3 = mute on SY6045S)
       amixer -c "$card" cset name='Tweeters Master Playback Switch' 0 2>/dev/null || true
@@ -166,7 +166,7 @@ load_sy("/lib/firmware/sy6045s-woofer-settings.txt", 0x2B)
       amixer -c "$card" cset name='Tweeters Ch2 Playback Switch' 1 2>/dev/null || true
       amixer -c "$card" cset name='Tweeters Ch2 Playback Volume' 159 2>/dev/null || true
       amixer -c "$card" cset name='Tweeters EQ Switch' 1 2>/dev/null || true
-      amixer -c "$card" cset name='Tweeters DRC Switch' 1 2>/dev/null || true
+      amixer -c "$card" cset name='Tweeters DRC Switch' 0 2>/dev/null || true
 
       # Everest ES8156 Headphone DAC controls (nominal volume 193 per stock mixer_paths_3.xml)
       amixer -c "$card" cset name='Headphone Headphone Switch' 1 2>/dev/null || true
