@@ -370,15 +370,12 @@ def clear_ring():
     global ring_active, is_fading
     ring_active = False
     is_fading = False
-    if mic_muted:
-        show_mute_ring()
-    else:
-        set_ring_frame(b"\x00" * (NUM_LEDS * 3))
+    set_ring_frame(b"\x00" * (NUM_LEDS * 3))
 
 
-def toggle_software_mic_mute():
+def set_software_mic_mute(muted):
     global mic_muted
-    mic_muted = not mic_muted
+    mic_muted = bool(muted)
 
     alsa_cmd = "mute" if mic_muted else "unmute"
     alsa_vol = "0%" if mic_muted else "100%"
@@ -403,11 +400,6 @@ def toggle_software_mic_mute():
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except Exception:
             pass
-
-    if mic_muted:
-        show_mute_ring()
-    else:
-        clear_ring()
 
 
 def ensure_input_nodes():
@@ -470,7 +462,7 @@ def _render_loop():
         now = time.time()
         target = current_volume
         lvt = last_volume_time
-        active = (not mic_muted and (lvt > 0 or abs(display_volume - target) > 0.05))
+        active = (lvt > 0 or abs(display_volume - target) > 0.05)
         if not active:
             last_drawn = None
             _render_wake.wait(timeout=0.5)
@@ -551,8 +543,9 @@ def main():
                             elif ev_code == KEY_PAGEDOWN and ev_value == 1:
                                 net_vol_step += VOLUME_STEP
                             # Top Button 2: Dedicated Physical Microphone Mute
-                            elif ev_code == KEY_MICMUTE and ev_value == (0 if MIC_MUTE_ACTIVE_LOW else 1):
-                                toggle_software_mic_mute()
+                            elif ev_code == KEY_MICMUTE and ev_value in (0, 1):
+                                pressed = (ev_value == 0) if MIC_MUTE_ACTIVE_LOW else (ev_value == 1)
+                                set_software_mic_mute(pressed)
                             # Top Button 1: Assistant / Play-Pause
                             elif ev_code in (KEY_VOICECOMMAND, KEY_POWER):
                                 if ev_value == 1:
