@@ -609,6 +609,17 @@ def main():
                                         pass
                                     else:
                                         try:
+                                            with open("/var/run/atrios/ai_trigger", "w") as tf:
+                                                tf.write(str(time.time()))
+                                        except Exception:
+                                            pass
+                                        try:
+                                            if os.path.exists("/var/run/atrios/atriai.pid"):
+                                                with open("/var/run/atrios/atriai.pid") as pf:
+                                                    os.kill(int(pf.read().strip()), signal.SIGUSR1)
+                                        except Exception:
+                                            pass
+                                        try:
                                             subprocess.run(["playerctl", "play-pause"],
                                                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                                         except Exception:

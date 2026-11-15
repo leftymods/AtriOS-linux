@@ -24,21 +24,57 @@ import time
 import urllib.parse
 
 SR = 16000
+CAP_SR = 48000
+CAP_CH = 2
 FRAME_SAMPLES = 512
 FRAME_BYTES = FRAME_SAMPLES * 2
+CAP_FRAME_BYTES = FRAME_SAMPLES * 3 * CAP_CH * 4  # 48kHz 2ch S32_LE -> 16kHz 1ch S16_LE
 CONFIG_FILE = "/var/lib/atrios/ai.json"
 STATUS_FILE = "/var/run/atrios/ai_status.json"
 BUTTONS_FILE = "/var/run/atrios/buttons.json"
+TRIGGER_FILE = "/var/run/atrios/ai_trigger"
 PID_FILE = "/var/run/atrios/atriai.pid"
 
 DEFAULT_CONFIG = {
     "enabled": False,
     "server": "ws://192.168.1.106:8090/voice",
     "wake_word": "Atri,Алиса",
-    "vad_threshold": 650,
+    "vad_threshold": 180,
     "silence_ms": 600,
     "min_speech_ms": 400,
 }
+
+_button_triggered = False
+
+
+def _on_sigusr1(signum, frame):
+    global _button_triggered
+    _button_triggered = True
+
+
+signal.signal(signal.SIGUSR1, _on_sigusr1)
+
+
+def consume_button_trigger():
+    global _button_triggered
+    hit = _button_triggered
+    _button_triggered = False
+    try:
+        if os.path.exists(TRIGGER_FILE):
+            os.unlink(TRIGGER_FILE)
+            hit = True
+    except Exception:
+        pass
+    return hit
+
+
+def downsample_48k_s32_stereo_to_16k_s16_mono(raw_bytes):
+    n_i32 = len(raw_bytes) // 4
+    if n_i32 < 6:
+        return b""
+    samples = struct.unpack(f"<{n_i32}i", raw_bytes[:n_i32 * 4])
+    mono16 = [max(-32768, min(32767, s >> 16)) for s in samples[::6]]
+    return struct.pack(f"<{len(mono16)}h", *mono16)
 
 ATRI_WAKE_ALIASES = (
     "atri",
@@ -364,15 +400,17 @@ def run_daemon():
         proc = None
         try:
             proc = subprocess.Popen(
-                ["arecord", "-q", "-t", "raw", "-f", "S16_LE", "-r", str(SR), "-c", "1"],
+                ["arecord", "-q", "-D", "hw:0,3", "-t", "raw", "-f", "S32_LE", "-r", str(CAP_SR), "-c", str(CAP_CH)],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
             )
             buf = bytearray()
             speaking = False
+            force_active = False
+            wait_speech_ms = 0.0
             silence_ms = 0.0
             frame_ms = (FRAME_SAMPLES / SR) * 1000.0
-            vad_thr = float(cfg.get("vad_threshold", 650))
+            vad_thr = float(cfg.get("vad_threshold", 180))
             max_sil = float(cfg.get("silence_ms", 600))
             min_bytes = int(SR * 2 * (float(cfg.get("min_speech_ms", 400)) / 1000.0))
 
@@ -380,9 +418,17 @@ def run_daemon():
             while True:
                 if is_mic_muted() or not load_config().get("enabled", False):
                     break
-                chunk = proc.stdout.read(FRAME_BYTES)
-                if not chunk or len(chunk) < FRAME_BYTES:
+                if consume_button_trigger() and not force_active:
+                    force_active = True
+                    wait_speech_ms = 0.0
+                    set_vad_visual("vad")
+                    print("[atriai] funcbutton pressed -> listening without wake word", flush=True)
+                raw = proc.stdout.read(CAP_FRAME_BYTES)
+                if not raw or len(raw) < CAP_FRAME_BYTES:
+                    print("[atriai] arecord stream ended, retrying...", flush=True)
+                    time.sleep(1.0)
                     break
+                chunk = downsample_48k_s32_stereo_to_16k_s16_mono(raw)
                 rms = pcm16_rms(chunk)
                 if rms >= vad_thr:
                     if not speaking:
@@ -395,6 +441,11 @@ def run_daemon():
                     silence_ms += frame_ms
                     if silence_ms >= max_sil:
                         break
+                elif force_active:
+                    buf.extend(chunk)
+                    wait_speech_ms += frame_ms
+                    if wait_speech_ms >= 3500.0:
+                        break
 
             try:
                 proc.terminate()
@@ -406,14 +457,15 @@ def run_daemon():
                 write_status("thinking")
                 set_vad_visual("thinking")
                 try:
-                    asr, ans = send_phrase_to_server(cfg["server"], bytes(buf), wake_word=cfg.get("wake_word", ""))
+                    ww = "" if force_active else cfg.get("wake_word", "")
+                    asr, ans = send_phrase_to_server(cfg["server"], bytes(buf), wake_word=ww)
                     write_status("listening", last_asr=asr, last_answer=ans)
                 except Exception as e:
                     write_status("error", error=str(e))
                     set_vad_visual("idle")
                     print(f"[atriai] server error: {e}", flush=True)
                     time.sleep(2.0)
-            elif speaking:
+            elif speaking or force_active:
                 set_vad_visual("idle")
         except Exception as e:
             write_status("error", error=str(e))
