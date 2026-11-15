@@ -66,15 +66,15 @@ apply_volume() {
 
     # 1. ALSA hardware mixer controls (all speaker channels + headphone DAC)
     # Note: Ch1/Ch2 are hardware channel trims (0.5 dB/step, 159 = 0 dB).
-    # Woofer defaults to +8.0 dB (175, or /var/lib/atrios/bass), Tweeters -2.0 dB (155).
-    bass_db=8
+    # Woofer defaults to +13.0 dB (185, or /var/lib/atrios/bass), Tweeters -4.0 dB (151).
+    bass_db=13
     if [ -f "$STATE_DIR/bass" ]; then
         b_val=$(cat "$STATE_DIR/bass" 2>/dev/null | tr -cd '0-9')
         [ -n "$b_val" ] && bass_db="$b_val"
     fi
     [ "$bass_db" -gt 20 ] 2>/dev/null && bass_db=20
     woofer_trim=$((159 + bass_db * 2))
-    tweeter_trim=155
+    tweeter_trim=151
 
     for c in "$CARD" 0; do
         amixer -c "$c" cset name='FRDDR_A SINK 1 SEL' 'OUT 1' 2>/dev/null || true
