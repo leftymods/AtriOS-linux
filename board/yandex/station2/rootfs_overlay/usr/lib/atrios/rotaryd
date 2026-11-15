@@ -217,7 +217,7 @@ def set_volume(pct, force_switches=False):
     raw = volume_to_raw(pct, 255)
     raw_wfr = woofer_volume_to_raw(pct, 255)
     sw = "0" if pct == 0 else "1"
-    master_sw = "3" if pct == 0 else "0"
+    master_sw = "0" if pct == 0 else "3"
 
     # 1. ALSA Hardware Controls
     for card in (CARD, "0"):

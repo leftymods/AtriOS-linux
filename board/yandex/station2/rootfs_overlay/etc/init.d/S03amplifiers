@@ -104,8 +104,10 @@ def load_sy(path, addr):
                 if not line or line.startswith("#"):
                     continue
                 parts = line.split()
-                if len(parts) >= 2:
-                    os.write(fd, bytes([int(parts[0], 16), int(parts[1], 16)]))
+                if parts[0].lower() == "w" and len(parts) >= 4:
+                    os.write(fd, bytes(int(x, 16) for x in parts[2:]))
+                elif len(parts) >= 2 and parts[0].lower() not in ("w", "d", "r"):
+                    os.write(fd, bytes(int(x, 16) for x in parts))
         os.write(fd, bytes([0x22, 0x00]))
         os.write(fd, bytes([0x06, 0x00]))
         os.write(fd, bytes([0x02, 0x00]))
