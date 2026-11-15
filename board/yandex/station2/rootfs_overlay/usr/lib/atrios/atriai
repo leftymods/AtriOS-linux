@@ -437,11 +437,7 @@ def send_phrase_to_server(server_url, pcm_bytes, wake_word=""):
                     print(f"[atriai] asr: {last_asr}", flush=True)
                     if not last_asr.strip():
                         break
-                    if cancelled:
-        set_vad_visual("idle")
-        return "", ""
-
-    if wake_word and not matches_wake_word(last_asr, wake_word):
+                    if wake_word and not matches_wake_word(last_asr, wake_word):
                         break
                     if wake_word:
                         set_vad_visual("thinking")
