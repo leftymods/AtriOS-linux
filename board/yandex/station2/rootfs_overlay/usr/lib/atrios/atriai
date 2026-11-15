@@ -74,7 +74,7 @@ def downsample_48k_s32_stereo_to_16k_s16_mono(raw_bytes):
     if n_i32 < 6:
         return b""
     samples = struct.unpack(f"<{n_i32}i", raw_bytes[:n_i32 * 4])
-    mono16 = [max(-32768, min(32767, s >> 16)) for s in samples[::6]]
+    mono16 = [max(-32768, min(32767, s >> 11)) for s in samples[::6]]
     return struct.pack(f"<{len(mono16)}h", *mono16)
 
 ATRI_WAKE_ALIASES = (
@@ -289,7 +289,7 @@ def set_vad_visual(phase):
     screen_cmd = None
     if phase == "vad":
         ring_cmd = ["/usr/bin/atrios", "ring", "amber", "15"]
-        screen_cmd = ["/usr/bin/atrios", "screen", "eyes", "wide"]
+        screen_cmd = ["/usr/bin/atrios", "screen", "eyes", "open"]
     elif phase == "thinking":
         ring_cmd = ["/usr/bin/atrios", "ring", "amber", "20"]
         screen_cmd = ["/usr/bin/atrios", "screen", "eyes", "open"]
@@ -440,7 +440,7 @@ def run_daemon():
                     force_active = True
                     wait_speech_ms = 0.0
                     set_vad_visual("vad")
-                    print("[atriai] funcbutton pressed -> listening without wake word (3s timeout)", flush=True)
+                    print("[atriai] funcbutton pressed -> listening without wake word (5s timeout)", flush=True)
                 raw = proc.stdout.read(CAP_FRAME_BYTES)
                 if not raw or len(raw) < CAP_FRAME_BYTES:
                     print("[atriai] arecord stream ended, retrying...", flush=True)
@@ -473,8 +473,8 @@ def run_daemon():
                     pre_roll.append(chunk)
                     if force_active:
                         wait_speech_ms += frame_ms
-                        if wait_speech_ms >= 3000.0:
-                            print("[atriai] funcbutton timeout (3s without speech) -> clock", flush=True)
+                        if wait_speech_ms >= 5000.0:
+                            print("[atriai] funcbutton timeout (5s without speech) -> clock", flush=True)
                             break
 
             try:
