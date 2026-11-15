@@ -10,7 +10,7 @@
 
 | Board ID | Платформа | Семейство / SoC | Конфиг сборки | Статус |
 |---|---|---|---|---|
-| `station-max` | **AtriStation Max (`nebula`)** / Yandex Station Max | `amlogic-meson64` / Amlogic S905X3 (`sm1`) | `config/boards/station-max.conf` | Полная поддержка |
+| `station-max` | **AtriStation Max** / Yandex Station Max | `amlogic-meson64` / Amlogic S905X3 (`sm1`) | `config/boards/station-max.conf` | Полная поддержка |
 | `yndxsttion53` | Yandex Station Max (`yndxsttion53`) | `amlogic-meson64` / Amlogic S905X3 (`sm1`) | `config/boards/yndxsttion53.conf` | Профиль сборки |
 | `template` | Шаблон для новой колонки (`new-board`) | Настраивается (`amlogic-meson64` и др.) | `config/boards/template.conf` | Шаблон расширения |
 

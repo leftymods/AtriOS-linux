@@ -19,7 +19,7 @@ for compat in $DT_COMPAT; do
             DEVICE_ID="station-max"
             DEVICE_NAME="AtriStation Max"
             DEVICE_REV="rev1.0"
-            DEVICE_CODENAME="nebula"
+            DEVICE_CODENAME="station-max"
             DEVICE_SOC="Amlogic S905X3 (SM1)"
             DEVICE_FEATURES="screen ring als zigbee rotary"
             DEVICE_ACCENT="cyan"
