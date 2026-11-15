@@ -1,0 +1,145 @@
+#!/bin/sh
+# /usr/sbin/atrios-reset - Factory reset: remove user-installed packages, accounts, Wi-Fi/BT credentials and AtriOS state
+
+BASE_PKGS="/etc/atrios-base-packages.list"
+DEFAULT_WPA="/etc/atrios-defaults/wpa_supplicant.conf"
+
+AUTO_YES=0
+DO_REBOOT=1
+KEEP_WIFI=0
+
+for arg in "$@"; do
+    case "$arg" in
+        -y|--yes)       AUTO_YES=1 ;;
+        --no-reboot)    DO_REBOOT=0 ;;
+        --keep-wifi)    KEEP_WIFI=1 ;;
+        -h|--help)
+            cat << 'EOF'
+Usage: atrios-reset [--yes] [--no-reboot] [--keep-wifi]
+  --yes         Skip interactive confirmation
+  --no-reboot   Do not reboot after reset completes
+  --keep-wifi   Preserve Wi-Fi configuration
+EOF
+            exit 0
+            ;;
+        *)
+            echo "atrios-reset: unknown option '$arg'" >&2
+            exit 1
+            ;;
+    esac
+done
+
+if [ "$(id -u)" -ne 0 ]; then
+    echo "atrios-reset: must be run as root" >&2
+    exit 1
+fi
+
+if [ "$AUTO_YES" -ne 1 ]; then
+    printf "WARNING: This will delete all user-installed packages, accounts, Wi-Fi/BT pairings and settings.\n"
+    printf "Step 1/2 - Type YES to continue: "
+    read -r ans1
+    [ "$ans1" = "YES" ] || { echo "Aborted."; exit 1; }
+
+    printf "Step 2/2 - Final confirmation! Type RESET to wipe and reset the speaker: "
+    read -r ans2
+    [ "$ans2" = "RESET" ] || { echo "Aborted."; exit 1; }
+fi
+
+echo "[AtriOS-Reset] Starting factory reset..."
+
+# 1. Visual cue if atrios ring is available
+if [ -x /usr/bin/atrios ]; then
+    /usr/bin/atrios ring off >/dev/null 2>&1 || true
+    /usr/bin/atrios screen off >/dev/null 2>&1 || true
+fi
+
+# 2. Stop user/network services before wiping state
+for svc in S71atrios-bt-control S60atrios S50pipewire; do
+    [ -x "/etc/init.d/$svc" ] && "/etc/init.d/$svc" stop >/dev/null 2>&1 || true
+done
+killall wpa_supplicant bluetoothd bluealsa bluealsa-aplay 2>/dev/null || true
+
+# 3. Remove all user-installed dpkg/apt packages compared to baseline
+if [ -f "$BASE_PKGS" ] && command -v dpkg-query >/dev/null 2>&1; then
+    CUR_PKGS=$(mktemp /tmp/atrios_cur_pkgs.XXXXXX)
+    dpkg-query -W -f='${Package}\n' 2>/dev/null | sort -u > "$CUR_PKGS"
+    EXTRA_PKGS=$(comm -23 "$CUR_PKGS" "$BASE_PKGS" | tr '\n' ' ')
+    rm -f "$CUR_PKGS"
+
+    if [ -n "$(echo "$EXTRA_PKGS" | tr -d ' ')" ]; then
+        echo "[AtriOS-Reset] Purging user packages: $EXTRA_PKGS"
+        if command -v apt-get >/dev/null 2>&1; then
+            DEBIAN_FRONTEND=noninteractive apt-get purge -y --allow-remove-essential=false $EXTRA_PKGS 2>&1 || \
+                dpkg --purge --force-depends $EXTRA_PKGS 2>&1 || true
+            DEBIAN_FRONTEND=noninteractive apt-get autoremove --purge -y 2>&1 || true
+            apt-get clean 2>/dev/null || true
+        else
+            dpkg --purge --force-depends $EXTRA_PKGS 2>&1 || true
+        fi
+    else
+        echo "[AtriOS-Reset] No extra dpkg packages to remove."
+    fi
+fi
+
+# Clean apt caches & lists
+rm -rf /var/cache/apt/archives/*.deb /var/cache/apt/archives/partial/* /var/lib/apt/lists/* 2>/dev/null || true
+
+# Remove user-installed Python packages in /usr/local and /root/.local
+rm -rf /root/.local/lib/python* /root/.local/bin/* /usr/local/lib/python*/dist-packages/* /usr/local/lib/python*/site-packages/* 2>/dev/null || true
+
+# 4. Remove all human user accounts (UID >= 1000, excluding nobody/65534)
+if [ -r /etc/passwd ]; then
+    USER_LIST=$(awk -F: '$3 >= 1000 && $3 != 65534 {print $1}' /etc/passwd)
+    for u in $USER_LIST; do
+        echo "[AtriOS-Reset] Removing user account: $u"
+        if command -v userdel >/dev/null 2>&1; then
+            userdel -rf "$u" 2>/dev/null || userdel -r "$u" 2>/dev/null || deluser --remove-home "$u" 2>/dev/null || true
+        elif command -v deluser >/dev/null 2>&1; then
+            deluser --remove-home "$u" 2>/dev/null || true
+        fi
+        rm -rf "/home/$u" 2>/dev/null || true
+    done
+fi
+# Clean any leftover directories under /home
+for d in /home/*; do
+    [ -e "$d" ] && rm -rf "$d" 2>/dev/null || true
+done
+
+# Reset root user state, shell histories, ssh/dropbear keys & caches
+rm -rf /root/.ssh /root/.cache /root/.local/share /root/.config/fish/fish_variables \
+       /root/.ash_history /root/.bash_history /root/.python_history \
+       /etc/dropbear/*_host_key /etc/ssh/ssh_host_* 2>/dev/null || true
+
+# 5. Reset Wi-Fi credentials
+if [ "$KEEP_WIFI" -eq 0 ]; then
+    echo "[AtriOS-Reset] Resetting Wi-Fi configuration..."
+    ip link set wlan0 down 2>/dev/null || true
+    rm -f /etc/wpa_supplicant/wpa.conf 2>/dev/null || true
+    if [ -f "$DEFAULT_WPA" ]; then
+        cp -f "$DEFAULT_WPA" /etc/wpa_supplicant.conf
+        mkdir -p /etc/wpa_supplicant
+        cp -f "$DEFAULT_WPA" /etc/wpa_supplicant/wpa_supplicant.conf
+    else
+        cat > /etc/wpa_supplicant.conf << 'EOF'
+ctrl_interface=/var/run/wpa_supplicant
+update_config=1
+EOF
+        mkdir -p /etc/wpa_supplicant
+        cp -f /etc/wpa_supplicant.conf /etc/wpa_supplicant/wpa_supplicant.conf
+    fi
+fi
+
+# 6. Reset Bluetooth pairings & AtriOS runtime state
+echo "[AtriOS-Reset] Clearing Bluetooth pairings and AtriOS state..."
+rm -rf /var/lib/bluetooth/* /var/lib/atrios/* /var/log/*.log /tmp/* /var/tmp/* 2>/dev/null || true
+mkdir -p /var/lib/atrios /var/log
+
+sync
+echo "[AtriOS-Reset] Factory reset complete."
+
+if [ "$DO_REBOOT" -eq 1 ]; then
+    echo "[AtriOS-Reset] Rebooting..."
+    sleep 1
+    reboot
+fi
+exit 0

@@ -1,10 +1,8 @@
 #!/bin/sh
 # /etc/init.d/S01modules - Load Amlogic & Station 2 hardware modules in dependency order
-# Compatible with both Mainline Linux (7.0+) and Legacy Kernel (4.9.113)
 
 KVER=$(uname -r)
 MOD_DIR="/lib/modules/$KVER"
-[ -d "$MOD_DIR" ] || MOD_DIR="/lib/modules/4.9.113"
 
 load_mod() {
   mod="$1"
@@ -31,8 +29,8 @@ case "$1" in
 
     # 2. Rotary knob & sensors
     load_mod rotary-volume
-        load_mod gpio_keypad
-        load_mod quasar_pcba_ids
+    load_mod gpio_keypad
+    load_mod quasar_pcba_ids
     load_mod ltr308als01
 
     # 3. Displays: Gowin 25x16 screen & IS31FL32xx LED ring
@@ -44,15 +42,7 @@ case "$1" in
       [ -f "$t" ] && echo led_ring_fb > "$t" 2>/dev/null || true
     done
 
-    # Disable fbcon cursor/console on screen framebuffer to prevent screen clipping
-    for vt in /sys/class/vtconsole/vtcon*; do
-      if [ -f "$vt/name" ] && grep -q "frame buffer" "$vt/name" 2>/dev/null; then
-        echo 0 > "$vt/bind" 2>/dev/null || true
-      fi
-    done
-    echo 0 > /sys/class/graphics/fbcon/cursor_blink 2>/dev/null || true
-
-    # 4. Wireless (Realtek RTL8822CS/ES) - Power up SDIO & BT reset GPIO
+    # 4. Wireless (Realtek RTL8822CS) - Power up SDIO & BT reset GPIO
     if [ -x /usr/lib/atrios/wifi-power ]; then
       /usr/lib/atrios/wifi-power 1 2>/dev/null || true
     elif [ -c /dev/wifi_power ]; then
@@ -73,21 +63,12 @@ case "$1" in
     load_mod rtw88_core
     load_mod rtw88_8822c
     load_mod rtw88_8822cs
-    load_mod 88x2es
     load_mod hci_uart
     load_mod btbcm
     load_mod btrtl
 
-    # 5. Zigbee & Board ID modules
+    # 5. Zigbee
     load_mod zigbee-control
-    load_mod quasar_pcba_ids
-
-    # 6. Legacy VPU & Video decoders (if running 4.9.113)
-    if echo "$KVER" | grep -q "4.9"; then
-      for m in media_clock firmware decoder_common stream_input vpu encoder amvdec_h265 amvdec_h264 amvdec_vp9; do
-        load_mod "$m"
-      done
-    fi
 
     # Unblock rfkill and bring up wlan0
     rfkill unblock all 2>/dev/null || true

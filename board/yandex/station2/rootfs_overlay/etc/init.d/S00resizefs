@@ -1,0 +1,114 @@
+#!/bin/sh
+# /etc/init.d/S00resizefs - Auto-expand rootfs partition on first boot
+
+RESERVE_SECTORS=2097152  # Default 1 GiB reserve for other boards
+if [ -r /usr/lib/atrios/device-detect ]; then
+  . /usr/lib/atrios/device-detect
+fi
+
+# Station Max uses the entire eMMC without reserve
+case "$DEVICE_ID" in
+  station-max)
+    RESERVE_SECTORS=0
+    ;;
+esac
+
+case "$1" in
+  start)
+    ROOT_MAJ_MIN=$(awk '$5 == "/" {print $3; exit}' /proc/self/mountinfo 2>/dev/null)
+    [ -n "$ROOT_MAJ_MIN" ] && [ -e "/sys/dev/block/$ROOT_MAJ_MIN" ] || exit 0
+
+    SYS_PART=$(readlink -f "/sys/dev/block/$ROOT_MAJ_MIN" 2>/dev/null)
+    PART_NAME=$(basename "$SYS_PART")
+    ROOT_DEV="/dev/$PART_NAME"
+    [ -b "$ROOT_DEV" ] || exit 0
+    [ -r "$SYS_PART/start" ] && [ -r "$SYS_PART/size" ] && [ -r "$SYS_PART/partition" ] || exit 0
+
+    PART_NUM=$(cat "$SYS_PART/partition" 2>/dev/null)
+    CUR_START=$(cat "$SYS_PART/start" 2>/dev/null)
+    CUR_SIZE=$(cat "$SYS_PART/size" 2>/dev/null)
+    DISK_NAME=$(basename "$(readlink -f "$SYS_PART/..")")
+    DISK_DEV="/dev/$DISK_NAME"
+    TOTAL_SECTORS=$(cat "/sys/block/$DISK_NAME/size" 2>/dev/null)
+
+    [ -b "$DISK_DEV" ] && [ -n "$TOTAL_SECTORS" ] && [ -n "$CUR_SIZE" ] || exit 0
+    [ "$PART_NUM" -ge 1 ] 2>/dev/null && [ "$PART_NUM" -le 4 ] 2>/dev/null || exit 0
+
+    # Target size = total - start - 1 GiB reserve, aligned down to 1 MiB (2048 sectors)
+    AVAIL_END=$((TOTAL_SECTORS - RESERVE_SECTORS))
+    [ "$AVAIL_END" -gt "$CUR_START" ] || exit 0
+    TARGET_SIZE=$((((AVAIL_END - CUR_START) / 2048) * 2048))
+
+    # Skip if already expanded (within 2 MiB tolerance)
+    if [ "$TARGET_SIZE" -le $((CUR_SIZE + 4096)) ]; then
+      exit 0
+    fi
+
+    echo "[AtriOS] Expanding $ROOT_DEV from $CUR_SIZE to $TARGET_SIZE sectors (reserve=$RESERVE_SECTORS on $DISK_DEV)..."
+
+    command -v python3 >/dev/null 2>&1 || exit 0
+    python3 - "$DISK_DEV" "$PART_NUM" "$CUR_START" "$CUR_SIZE" "$TARGET_SIZE" << 'PYEOF' || exit 1
+import os, struct, sys
+
+disk_dev = sys.argv[1]
+part_num = int(sys.argv[2])
+cur_start = int(sys.argv[3])
+cur_size = int(sys.argv[4])
+target_size = int(sys.argv[5])
+
+fd = os.open(disk_dev, os.O_RDWR | os.O_SYNC)
+try:
+    mbr = bytearray(os.read(fd, 512))
+    if len(mbr) != 512 or mbr[510] != 0x55 or mbr[511] != 0xAA:
+        sys.exit(1)
+
+    off = 0x1BE + (part_num - 1) * 16
+    ptype = mbr[off + 4]
+    mbr_start, mbr_size = struct.unpack_from("<II", mbr, off + 8)
+    if ptype == 0 or mbr_start != cur_start or mbr_size != cur_size:
+        sys.exit(1)
+
+    # Check no later partition overlaps the expanded range
+    target_end = cur_start + target_size
+    for idx in range(4):
+        if idx == part_num - 1:
+            continue
+        o = 0x1BE + idx * 16
+        if mbr[o + 4] != 0:
+            s, sz = struct.unpack_from("<II", mbr, o + 8)
+            if s >= cur_start and s < target_end:
+                sys.exit(1)
+
+    # Update partition size in MBR (keep start LBA and disk signature/PARTUUID intact)
+    struct.pack_into("<I", mbr, off + 12, target_size)
+    # Set EndCHS to LBA-only marker (FE FF FF)
+    mbr[off + 5] = 0xFE
+    mbr[off + 6] = 0xFF
+    mbr[off + 7] = 0xFF
+
+    os.lseek(fd, 0, os.SEEK_SET)
+    os.write(fd, bytes(mbr))
+    os.fsync(fd)
+finally:
+    os.close(fd)
+PYEOF
+
+    sync
+    if command -v resizepart >/dev/null 2>&1; then
+      resizepart "$DISK_DEV" "$PART_NUM" "$TARGET_SIZE" || exit 1
+    else
+      partprobe "$DISK_DEV" 2>/dev/null || true
+    fi
+
+    if command -v resize2fs >/dev/null 2>&1; then
+      resize2fs "$ROOT_DEV"
+    fi
+    ;;
+  stop|restart)
+    ;;
+  *)
+    echo "Usage: $0 {start|stop|restart}"
+    exit 1
+    ;;
+esac
+exit 0

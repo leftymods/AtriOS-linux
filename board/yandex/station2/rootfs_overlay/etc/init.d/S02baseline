@@ -1,0 +1,29 @@
+#!/bin/sh
+# /etc/init.d/S02baseline - Record baseline package list and clean defaults on first boot
+
+BASE_PKGS="/etc/atrios-base-packages.list"
+DEFAULTS_DIR="/etc/atrios-defaults"
+
+case "$1" in
+  start)
+    if [ ! -f "$BASE_PKGS" ] && command -v dpkg-query >/dev/null 2>&1; then
+      mkdir -p "$(dirname "$BASE_PKGS")"
+      dpkg-query -W -f='${Package}\n' 2>/dev/null | sort -u > "$BASE_PKGS"
+    fi
+
+    if [ ! -f "$DEFAULTS_DIR/wpa_supplicant.conf" ]; then
+      mkdir -p "$DEFAULTS_DIR"
+      cat > "$DEFAULTS_DIR/wpa_supplicant.conf" << 'EOF'
+ctrl_interface=/var/run/wpa_supplicant
+update_config=1
+EOF
+    fi
+    ;;
+  stop|restart)
+    ;;
+  *)
+    echo "Usage: $0 {start|stop|restart}"
+    exit 1
+    ;;
+esac
+exit 0

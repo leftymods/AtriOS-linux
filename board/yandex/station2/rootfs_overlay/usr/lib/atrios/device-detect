@@ -1,0 +1,55 @@
+#!/bin/sh
+# /usr/lib/atrios/device-detect - Identify AtriOS speaker hardware from Device Tree / overrides
+
+DT_COMPAT=$(tr '\0' ' ' </proc/device-tree/compatible 2>/dev/null)
+DT_MODEL=$(tr -d '\0' </proc/device-tree/model 2>/dev/null)
+
+DEVICE_ID="unknown"
+DEVICE_NAME=""
+DEVICE_REV=""
+DEVICE_CODENAME=""
+DEVICE_SOC=""
+DEVICE_FEATURES=""
+DEVICE_ACCENT="cyan"
+
+# Match known boards by Device Tree compatible string
+for compat in $DT_COMPAT; do
+    case "$compat" in
+        leftymods,station-max|yandex,station-max|yandex,station2)
+            DEVICE_ID="station-max"
+            DEVICE_NAME="AtriStation Max"
+            DEVICE_REV="rev1.0"
+            DEVICE_CODENAME="nebula"
+            DEVICE_SOC="Amlogic S905X3 (SM1)"
+            DEVICE_FEATURES="screen ring als zigbee rotary"
+            DEVICE_ACCENT="cyan"
+            break
+            ;;
+        # Add new speaker models below:
+        # vendor,new-speaker)
+        #     DEVICE_ID="new-speaker"
+        #     DEVICE_NAME="AtriStation Mini"
+        #     DEVICE_REV="rev1.0"
+        #     DEVICE_CODENAME="..."
+        #     DEVICE_SOC="..."
+        #     DEVICE_FEATURES="ring als"
+        #     DEVICE_ACCENT="magenta"
+        #     break
+        #     ;;
+    esac
+done
+
+# SoC fallback from last compatible entry if not set by profile
+if [ -z "$DEVICE_SOC" ] && [ -n "$DT_COMPAT" ]; then
+    DEVICE_SOC=$(echo "$DT_COMPAT" | awk '{print $NF}')
+fi
+
+# Model fallback from Device Tree if unknown board
+if [ -z "$DEVICE_NAME" ]; then
+    DEVICE_NAME="${DT_MODEL:-AtriOS Device}"
+fi
+
+# Allow per-device manual overrides
+if [ -r /etc/atrios-device ]; then
+    . /etc/atrios-device
+fi

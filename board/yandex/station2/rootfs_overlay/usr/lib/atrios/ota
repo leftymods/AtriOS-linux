@@ -1,0 +1,298 @@
+#!/usr/bin/env python3
+"""
+atrios-ota - AtriOS OTA & SWUpdate Firmware Manager
+Supports:
+  atrios ota status
+  atrios ota install <bundle.tar.gz | image.swu | http(s)://url> [--reboot]
+  atrios ota rollback [--reboot]
+"""
+
+import hashlib
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+import urllib.request
+
+BOOT_PART = "/dev/mmcblk1p1"
+BOOT_DIR = "/boot"
+STATE_FILE = "/var/lib/atrios/ota_status.json"
+VERSION_FILE = "/etc/atrios-version"
+
+
+def get_device_info():
+    info = {"id": "unknown", "name": "AtriOS Device", "rev": "", "codename": ""}
+    if os.path.exists("/usr/lib/atrios/device-detect"):
+        try:
+            out = subprocess.check_output(
+                ["/bin/sh", "-c", ". /usr/lib/atrios/device-detect && printf '%s\\n%s\\n%s\\n%s' \"$DEVICE_ID\" \"$DEVICE_NAME\" \"$DEVICE_REV\" \"$DEVICE_CODENAME\""],
+                text=True,
+            )
+            lines = out.split("\n")
+            if len(lines) >= 4:
+                info["id"], info["name"], info["rev"], info["codename"] = lines[:4]
+        except Exception:
+            pass
+    return info
+
+
+def sha256_file(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def mount_boot_part():
+    mnt = tempfile.mkdtemp(prefix="atrios_boot_")
+    subprocess.check_call(["mount", BOOT_PART, mnt])
+    return mnt
+
+
+def umount_boot_part(mnt):
+    if mnt and os.path.ismount(mnt):
+        subprocess.call(["sync"])
+        subprocess.call(["umount", mnt])
+    if mnt and os.path.isdir(mnt):
+        try:
+            os.rmdir(mnt)
+        except OSError:
+            pass
+
+
+def cmd_status():
+    dev = get_device_info()
+    kernel = os.uname().release
+    ver = "1.0"
+    if os.path.exists(VERSION_FILE):
+        with open(VERSION_FILE, "r", encoding="utf-8", errors="ignore") as f:
+            ver = f.read().strip() or ver
+    swupdate_bin = shutil.which("swupdate")
+
+    print(f"Device:    {dev['name']} {dev['rev']} ({dev['codename']}) [id={dev['id']}]")
+    print(f"Version:   {ver}")
+    print(f"Kernel:    {kernel}")
+    print(f"SWUpdate:  {swupdate_bin if swupdate_bin else 'built-in atrios-ota (tar.gz/manifest)'}")
+
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE, "r", encoding="utf-8") as f:
+                st = json.load(f)
+            print(f"Last OTA:  {st.get('version', '?')} ({st.get('status', '?')}) at {st.get('source', '?')}")
+        except Exception:
+            pass
+
+    if os.path.exists(BOOT_PART):
+        mnt = None
+        try:
+            mnt = mount_boot_part()
+            baks = [fn for fn in sorted(os.listdir(mnt)) if fn.endswith(".bak")]
+            print(f"Rollback:  {'available (' + ', '.join(baks) + ')' if baks else 'no .bak on ' + BOOT_PART}")
+        except Exception as e:
+            print(f"Rollback:  unable to inspect {BOOT_PART} ({e})")
+        finally:
+            umount_boot_part(mnt)
+
+
+def save_state(version, status, source):
+    os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
+    with open(STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump({"version": version, "status": status, "source": source}, f, indent=2)
+
+
+def backup_and_copy(src, dst):
+    if os.path.exists(dst):
+        shutil.copy2(dst, dst + ".bak")
+    shutil.copy2(src, dst)
+
+
+def install_bundle_tar(pkg_path, source_label, do_reboot=False):
+    dev = get_device_info()
+    work = tempfile.mkdtemp(prefix="atrios_ota_")
+    mnt = None
+    try:
+        print(f"[AtriOS-OTA] Extracting {pkg_path}...")
+        with tarfile.open(pkg_path, "r:*") as tf:
+            tf.extractall(work)
+
+        manifest_path = os.path.join(work, "manifest.json")
+        if not os.path.exists(manifest_path):
+            raise RuntimeError("Invalid OTA bundle: missing manifest.json")
+
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            manifest = json.load(f)
+
+        target_dev = manifest.get("device_id")
+        if target_dev and dev["id"] != "unknown" and target_dev != dev["id"]:
+            raise RuntimeError(f"Device mismatch: bundle is for '{target_dev}', this board is '{dev['id']}'")
+
+        version = manifest.get("version", "unknown")
+        files = manifest.get("files", {})
+
+        # Verify all SHA-256 checksums before touching flash
+        for key, entry in files.items():
+            rel = entry.get("path") if isinstance(entry, dict) else entry
+            expected_sha = entry.get("sha256") if isinstance(entry, dict) else None
+            fpath = os.path.join(work, rel)
+            if not os.path.exists(fpath):
+                raise RuntimeError(f"Missing payload file '{rel}' for '{key}'")
+            if expected_sha:
+                actual_sha = sha256_file(fpath)
+                if actual_sha.lower() != expected_sha.lower():
+                    raise RuntimeError(f"SHA-256 mismatch for '{rel}': {actual_sha} != {expected_sha}")
+        print(f"[AtriOS-OTA] Verified bundle v{version} (checksums OK).")
+
+        # Apply kernel / DTB to /boot and mmcblk1p1
+        if "kernel" in files or "dtb" in files:
+            if os.path.exists(BOOT_PART):
+                mnt = mount_boot_part()
+
+            if "kernel" in files:
+                k_rel = files["kernel"]["path"] if isinstance(files["kernel"], dict) else files["kernel"]
+                k_src = os.path.join(work, k_rel)
+                print("[AtriOS-OTA] Updating kernel Image...")
+                backup_and_copy(k_src, os.path.join(BOOT_DIR, "Image"))
+                if mnt:
+                    backup_and_copy(k_src, os.path.join(mnt, "Image"))
+
+            if "dtb" in files:
+                d_rel = files["dtb"]["path"] if isinstance(files["dtb"], dict) else files["dtb"]
+                d_src = os.path.join(work, d_rel)
+                dtb_name = manifest.get("dtb_name", "meson-sm1-yandex-station-max.dtb")
+                print(f"[AtriOS-OTA] Updating DTB ({dtb_name})...")
+                backup_and_copy(d_src, os.path.join(BOOT_DIR, dtb_name))
+                if mnt:
+                    backup_and_copy(d_src, os.path.join(mnt, dtb_name))
+                    if os.path.exists(os.path.join(mnt, "dtb.img")):
+                        backup_and_copy(d_src, os.path.join(mnt, "dtb.img"))
+
+        # Apply rootfs overlay tar if present
+        if "rootfs" in files:
+            r_rel = files["rootfs"]["path"] if isinstance(files["rootfs"], dict) else files["rootfs"]
+            r_src = os.path.join(work, r_rel)
+            print("[AtriOS-OTA] Applying rootfs update...")
+            with tarfile.open(r_src, "r:*") as rtf:
+                rtf.extractall("/")
+            subprocess.call(["depmod", "-a"])
+
+        # Install .deb packages if listed
+        for deb_entry in manifest.get("debs", []):
+            d_rel = deb_entry["path"] if isinstance(deb_entry, dict) else deb_entry
+            d_sha = deb_entry.get("sha256") if isinstance(deb_entry, dict) else None
+            d_path = os.path.join(work, d_rel)
+            if not os.path.exists(d_path):
+                raise RuntimeError(f"Missing deb '{d_rel}'")
+            if d_sha and sha256_file(d_path).lower() != d_sha.lower():
+                raise RuntimeError(f"SHA-256 mismatch for deb '{d_rel}'")
+            print(f"[AtriOS-OTA] Installing package {d_rel}...")
+            subprocess.check_call(["dpkg", "-i", d_path])
+
+        with open(VERSION_FILE, "w", encoding="utf-8") as f:
+            f.write(version + "\n")
+        save_state(version, "ok", source_label)
+        subprocess.call(["sync"])
+        print(f"[AtriOS-OTA] Update to v{version} completed successfully.")
+
+        if do_reboot:
+            print("[AtriOS-OTA] Rebooting...")
+            subprocess.call(["reboot"])
+    finally:
+        umount_boot_part(mnt)
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def cmd_install(target, do_reboot=False):
+    tmp_dl = None
+    pkg_path = target
+    try:
+        if target.startswith("http://") or target.startswith("https://"):
+            suffix = ".swu" if target.endswith(".swu") else ".tar.gz"
+            fd, tmp_dl = tempfile.mkstemp(prefix="atrios_dl_", suffix=suffix)
+            os.close(fd)
+            print(f"[AtriOS-OTA] Downloading {target}...")
+            urllib.request.urlretrieve(target, tmp_dl)
+            pkg_path = tmp_dl
+
+        if not os.path.exists(pkg_path):
+            raise RuntimeError(f"File not found: {pkg_path}")
+
+        if pkg_path.endswith(".swu"):
+            swu = shutil.which("swupdate")
+            if not swu:
+                raise RuntimeError("'.swu' image given, but 'swupdate' binary is not installed; use '.tar.gz' OTA bundle or install swupdate")
+            print(f"[AtriOS-OTA] Running swupdate -i {pkg_path}...")
+            subprocess.check_call([swu, "-v", "-i", pkg_path])
+            save_state("swupdate", "ok", target)
+            subprocess.call(["sync"])
+            if do_reboot:
+                subprocess.call(["reboot"])
+        else:
+            install_bundle_tar(pkg_path, target, do_reboot=do_reboot)
+    finally:
+        if tmp_dl and os.path.exists(tmp_dl):
+            os.remove(tmp_dl)
+
+
+def cmd_rollback(do_reboot=False):
+    mnt = None
+    restored = []
+    try:
+        for fn in os.listdir(BOOT_DIR):
+            if fn.endswith(".bak"):
+                orig = fn[:-4]
+                shutil.copy2(os.path.join(BOOT_DIR, fn), os.path.join(BOOT_DIR, orig))
+                restored.append(f"/boot/{orig}")
+
+        if os.path.exists(BOOT_PART):
+            mnt = mount_boot_part()
+            for fn in os.listdir(mnt):
+                if fn.endswith(".bak"):
+                    orig = fn[:-4]
+                    shutil.copy2(os.path.join(mnt, fn), os.path.join(mnt, orig))
+                    restored.append(f"{BOOT_PART}:{orig}")
+
+        subprocess.call(["sync"])
+        if not restored:
+            print("[AtriOS-OTA] No .bak backups found for rollback.")
+            return 1
+        print("[AtriOS-OTA] Rolled back:", ", ".join(restored))
+        if do_reboot:
+            subprocess.call(["reboot"])
+        return 0
+    finally:
+        umount_boot_part(mnt)
+
+
+def main():
+    args = sys.argv[1:]
+    do_reboot = "--reboot" in args
+    args = [a for a in args if a != "--reboot"]
+
+    if not args or args[0] in ("-h", "--help", "help"):
+        print(__doc__.strip())
+        return 0
+
+    sub = args[0]
+    if sub == "status":
+        cmd_status()
+        return 0
+    if sub == "install" and len(args) >= 2:
+        cmd_install(args[1], do_reboot=do_reboot)
+        return 0
+    if sub == "rollback":
+        return cmd_rollback(do_reboot=do_reboot)
+
+    print(__doc__.strip(), file=sys.stderr)
+    return 1
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception as exc:
+        print(f"[AtriOS-OTA] ERROR: {exc}", file=sys.stderr)
+        sys.exit(1)

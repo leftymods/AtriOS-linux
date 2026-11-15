@@ -18,7 +18,6 @@ case "$1" in
       elif command -v pipewire-media-session >/dev/null 2>&1; then
         pipewire-media-session >/dev/null 2>&1 &
       fi
-      (sleep 2 && /etc/init.d/S03amplifiers start >/dev/null 2>&1) &
     fi
     ;;
   stop)
