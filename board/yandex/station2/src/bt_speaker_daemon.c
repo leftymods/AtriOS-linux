@@ -107,6 +107,101 @@ static int hci_cmd_sync(int dd, uint16_t opcode, const void *param, uint8_t plen
     return -1;
 }
 
+#define BT_PAIRED_FILE "/var/lib/atrios/bt_paired"
+#define BT_PAIR_UNTIL_FILE "/var/run/atrios-bt-pair-until"
+
+static void bt_read_device_name(char *buf, size_t len) {
+    snprintf(buf, len, "AtriStation Max");
+    FILE *f = fopen("/etc/atrios-device", "r");
+    if (!f) return;
+    char line[256];
+    while (fgets(line, sizeof(line), f)) {
+        if (strncmp(line, "DEVICE_NAME=", 12) == 0) {
+            char *v = line + 12;
+            size_t n = strlen(v);
+            while (n > 0 && (v[n - 1] == '\n' || v[n - 1] == '\r' || v[n - 1] == '"' || v[n - 1] == '\'')) {
+                v[--n] = '\0';
+            }
+            if (*v == '"' || *v == '\'') v++;
+            if (*v) snprintf(buf, len, "%s", v);
+            break;
+        }
+    }
+    fclose(f);
+}
+
+static bool bt_has_paired_devices(void) {
+    FILE *f = fopen(BT_PAIRED_FILE, "r");
+    if (!f) return false;
+    char line[128];
+    bool found = false;
+    while (fgets(line, sizeof(line), f)) {
+        if (strlen(line) >= 17 && strchr(line, ':')) {
+            found = true;
+            break;
+        }
+    }
+    fclose(f);
+    return found;
+}
+
+static bool bt_pairing_window_active(void) {
+    FILE *f = fopen(BT_PAIR_UNTIL_FILE, "r");
+    if (!f) return false;
+    long long until_ts = 0;
+    bool ok = (fscanf(f, "%lld", &until_ts) == 1);
+    fclose(f);
+    if (!ok) return false;
+    if ((long long)time(NULL) < until_ts) return true;
+    unlink(BT_PAIR_UNTIL_FILE);
+    return false;
+}
+
+static uint8_t bt_desired_scan_mode(void) {
+    if (bt_pairing_window_active() || !bt_has_paired_devices()) {
+        return 0x03; /* Inquiry Scan + Page Scan (discoverable) */
+    }
+    return 0x02; /* Page Scan only (hidden identifier, connectable by paired devices) */
+}
+
+static void bt_record_paired_device(const char *bdaddr) {
+    if (!bdaddr || strlen(bdaddr) < 17) return;
+    mkdir("/var/lib/atrios", 0755);
+    FILE *f = fopen(BT_PAIRED_FILE, "r");
+    if (f) {
+        char line[128];
+        while (fgets(line, sizeof(line), f)) {
+            if (strncasecmp(line, bdaddr, 17) == 0) {
+                fclose(f);
+                unlink(BT_PAIR_UNTIL_FILE);
+                return;
+            }
+        }
+        fclose(f);
+    }
+    f = fopen(BT_PAIRED_FILE, "a");
+    if (f) {
+        fprintf(f, "%s\n", bdaddr);
+        fclose(f);
+    }
+    unlink(BT_PAIR_UNTIL_FILE);
+}
+
+static void bt_apply_scan_mode(uint8_t scan) {
+    int dd = socket(AF_BLUETOOTH, SOCK_RAW, BTPROTO_HCI);
+    if (dd < 0) return;
+    struct sockaddr_hci sa = { .hci_family = AF_BLUETOOTH, .hci_dev = 0 };
+    if (bind(dd, (struct sockaddr *)&sa, sizeof(sa)) == 0) {
+        struct hci_filter flt;
+        hci_filter_clear(&flt);
+        hci_filter_set_ptype(HCI_EVENT_PKT, &flt);
+        hci_filter_set_event(EVT_CMD_COMPLETE, &flt);
+        setsockopt(dd, SOL_HCI, HCI_FILTER, &flt, sizeof(flt));
+        hci_cmd_sync(dd, 0x0c1a, &scan, 1);
+    }
+    close(dd);
+}
+
 static int ensure_hci0_configured(bool verbose) {
     int ctl = socket(AF_BLUETOOTH, SOCK_RAW, BTPROTO_HCI);
     if (ctl < 0) {
@@ -144,9 +239,11 @@ static int ensure_hci0_configured(bool verbose) {
     setsockopt(dd, SOL_HCI, HCI_FILTER, &flt, sizeof(flt));
 
     /* 1. Write Local Name */
+    char dev_name[64];
+    bt_read_device_name(dev_name, sizeof(dev_name));
     uint8_t name[248];
     memset(name, 0, sizeof(name));
-    strncpy((char *)name, "Yandex Station Max", sizeof(name) - 1);
+    strncpy((char *)name, dev_name, sizeof(name) - 1);
     hci_cmd_sync(dd, 0x0c13, name, sizeof(name));
 
     /* 2. Write Class of Device: 0x240414 (Audio + Rendering, Loudspeaker) */
@@ -170,7 +267,6 @@ static int ensure_hci0_configured(bool verbose) {
     memset(eir, 0, sizeof(eir));
     eir[0] = 0; /* FEC not required */
     size_t pos = 1;
-    const char *dev_name = "Yandex Station Max";
     uint8_t nlen = (uint8_t)strlen(dev_name);
     eir[pos++] = 1 + nlen;
     eir[pos++] = 0x09; /* Complete Local Name */
@@ -208,8 +304,8 @@ static int ensure_hci0_configured(bool verbose) {
     uint8_t ist = 0x01;
     hci_cmd_sync(dd, 0x0c43, &ist, 1);
 
-    /* 11. Write Scan Enable = 3 (Inquiry Scan + Page Scan) */
-    uint8_t scan = 0x03;
+    /* 11. Write Scan Enable: hide Inquiry Scan (0x02) when paired devices exist */
+    uint8_t scan = bt_desired_scan_mode();
     int st = hci_cmd_sync(dd, 0x0c1a, &scan, 1);
 
     /* 12. Disable connectable LE advertising if any stale adv is active so phones connect BR/EDR */
@@ -217,7 +313,7 @@ static int ensure_hci0_configured(bool verbose) {
     hci_cmd_sync(dd, 0x200a, &adv_off, 1);
 
     if (verbose) {
-        printf("[bt-speaker] hci0 configured (Name='Yandex Station Max', CoD=0x240414, SSP=1, PISCAN=0x03, Interlaced=1, st=%d)\n", st);
+        printf("[bt-speaker] hci0 configured (Name='%s', CoD=0x240414, SSP=1, SCAN=0x%02x, Interlaced=1, st=%d)\n", dev_name, scan, st);
         fflush(stdout);
     }
     close(dd);
@@ -1335,6 +1431,10 @@ static void handle_hci_event(int fd) {
             printf("[bt-hci] EVT_CONN_COMPLETE status=0x%02x handle=0x%04x peer=%s type=0x%02x enc=%u\n",
                    p[0], handle, bstr, p[9], p[10]);
             fflush(stdout);
+            if (p[0] == 0x00 && p[10] != 0) {
+                bt_record_paired_device(bstr);
+                bt_apply_scan_mode(bt_desired_scan_mode());
+            }
         }
         break;
     case 0x05: /* Disconnection Complete */
@@ -1369,9 +1469,17 @@ static void handle_hci_event(int fd) {
             if (evt == 0x36 && plen >= 7) {
                 fmt_bdaddr((const bdaddr_t *)(p + 1), bstr);
                 printf("[bt-hci] EVT_SSP_COMPLETE status=0x%02x peer=%s\n", p[0], bstr);
+                if (p[0] == 0x00) {
+                    bt_record_paired_device(bstr);
+                    bt_apply_scan_mode(bt_desired_scan_mode());
+                }
             } else {
                 fmt_bdaddr((const bdaddr_t *)p, bstr);
                 printf("[bt-hci] EVT=0x%02x peer=%s\n", evt, bstr);
+                if (evt == 0x18) {
+                    bt_record_paired_device(bstr);
+                    bt_apply_scan_mode(bt_desired_scan_mode());
+                }
             }
             fflush(stdout);
         }
@@ -1510,21 +1618,8 @@ int main(void) {
         time_t now = time(NULL);
         if (!g_pcm && now - last_refresh >= 15) {
             last_refresh = now;
-            /* Ensure scan stays enabled without disturbing active connections */
-            int dd = socket(AF_BLUETOOTH, SOCK_RAW, BTPROTO_HCI);
-            if (dd >= 0) {
-                struct sockaddr_hci sa = { .hci_family = AF_BLUETOOTH, .hci_dev = 0 };
-                if (bind(dd, (struct sockaddr *)&sa, sizeof(sa)) == 0) {
-                    struct hci_filter flt;
-                    hci_filter_clear(&flt);
-                    hci_filter_set_ptype(HCI_EVENT_PKT, &flt);
-                    hci_filter_set_event(EVT_CMD_COMPLETE, &flt);
-                    setsockopt(dd, SOL_HCI, HCI_FILTER, &flt, sizeof(flt));
-                    uint8_t scan = 0x03;
-                    hci_cmd_sync(dd, 0x0c1a, &scan, 1);
-                }
-                close(dd);
-            }
+            /* Refresh scan mode without disturbing active connections */
+            bt_apply_scan_mode(bt_desired_scan_mode());
         }
     }
 

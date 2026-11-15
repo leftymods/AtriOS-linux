@@ -1,0 +1,576 @@
+#!/usr/bin/env python3
+"""
+AtriOS Nebula Material 3 Web App & Control API (/usr/lib/atrios/webui)
+Serves a Material 3 (Material You) companion web application on port 8080.
+"""
+
+import glob
+import http.server
+import json
+import os
+import re
+import socketserver
+import subprocess
+import sys
+import time
+import urllib.parse
+
+PORT = int(os.environ.get("ATRIOS_WEB_PORT", "8080"))
+VOLUME_FILE = "/var/lib/atrios/volume"
+BT_PAIRED_FILE = "/var/lib/atrios/bt_paired"
+BT_PAIR_UNTIL_FILE = "/var/run/atrios-bt-pair-until"
+DEVICE_FILE = "/etc/atrios-device"
+
+
+def read_device_meta():
+    meta = {"name": "AtriStation Max", "codename": "station-max", "rev": "rev1.0", "os": "AtriOS Nebula"}
+    try:
+        if os.path.exists(DEVICE_FILE):
+            with open(DEVICE_FILE, "r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("DEVICE_NAME="):
+                        meta["name"] = line.split("=", 1)[1].strip().strip('"').strip("'") or meta["name"]
+                    elif line.startswith("DEVICE_CODENAME="):
+                        meta["codename"] = line.split("=", 1)[1].strip().strip('"').strip("'") or meta["codename"]
+                    elif line.startswith("DEVICE_REV="):
+                        meta["rev"] = line.split("=", 1)[1].strip().strip('"').strip("'") or meta["rev"]
+    except Exception:
+        pass
+    return meta
+
+
+def read_cpu_temp():
+    try:
+        with open("/sys/class/thermal/thermal_zone0/temp", "r") as f:
+            return round(int(f.read().strip()) / 1000.0, 1)
+    except Exception:
+        return 0.0
+
+
+def read_uptime():
+    try:
+        with open("/proc/uptime", "r") as f:
+            return int(float(f.readline().split()[0]))
+    except Exception:
+        return 0
+
+
+def read_mem():
+    try:
+        total, avail = 0, 0
+        with open("/proc/meminfo", "r") as f:
+            for line in f:
+                if line.startswith("MemTotal:"):
+                    total = int(line.split()[1]) // 1024
+                elif line.startswith("MemAvailable:"):
+                    avail = int(line.split()[1]) // 1024
+        return {"total_mb": total, "free_mb": avail, "used_mb": max(0, total - avail)}
+    except Exception:
+        return {"total_mb": 0, "free_mb": 0, "used_mb": 0}
+
+
+def read_lux():
+    try:
+        for path in glob.glob("/sys/bus/iio/devices/iio:device*/in_illuminance_raw") + glob.glob("/sys/bus/iio/devices/iio:device*/in_illuminance_input"):
+            with open(path, "r") as f:
+                return int(float(f.read().strip()))
+    except Exception:
+        pass
+    return None
+
+
+def read_volume():
+    try:
+        if os.path.exists(VOLUME_FILE):
+            with open(VOLUME_FILE, "r") as f:
+                return max(0, min(100, int(f.read().strip())))
+    except Exception:
+        pass
+    return 60
+
+
+def read_wifi():
+    ip, ssid = "", ""
+    try:
+        out = subprocess.check_output(["ip", "-4", "addr", "show", "wlan0"], timeout=2).decode("utf-8", "ignore")
+        for line in out.splitlines():
+            line = line.strip()
+            if line.startswith("inet "):
+                ip = line.split()[1].split("/")[0]
+                break
+    except Exception:
+        pass
+    try:
+        out = subprocess.check_output(["iw", "dev", "wlan0", "link"], timeout=2).decode("utf-8", "ignore")
+        for line in out.splitlines():
+            line = line.strip()
+            if line.startswith("SSID:"):
+                ssid = line.split(":", 1)[1].strip()
+                break
+    except Exception:
+        pass
+    return {"ip": ip, "ssid": ssid, "connected": bool(ip)}
+
+
+def read_paired_devices():
+    devs = []
+    try:
+        if os.path.exists(BT_PAIRED_FILE):
+            with open(BT_PAIRED_FILE, "r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    mac = line.strip()
+                    if re.match(r"^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$", mac):
+                        devs.append(mac.upper())
+    except Exception:
+        pass
+    return devs
+
+
+def read_bt_status():
+    paired = read_paired_devices()
+    pair_remaining = 0
+    try:
+        if os.path.exists(BT_PAIR_UNTIL_FILE):
+            with open(BT_PAIR_UNTIL_FILE, "r") as f:
+                until_ts = int(f.read().strip())
+            rem = until_ts - int(time.time())
+            if rem > 0:
+                pair_remaining = rem
+    except Exception:
+        pass
+
+    discoverable = False
+    hci_up = False
+    try:
+        out = subprocess.check_output(["hciconfig", "hci0"], timeout=2).decode("utf-8", "ignore")
+        hci_up = "UP RUNNING" in out
+        discoverable = "ISCAN" in out
+    except Exception:
+        pass
+
+    hidden = bool(paired) and not discoverable and pair_remaining == 0
+    return {
+        "up": hci_up,
+        "discoverable": discoverable,
+        "hidden": hidden,
+        "paired_devices": paired,
+        "pair_remaining_sec": pair_remaining,
+    }
+
+
+def build_status():
+    vol = read_volume()
+    return {
+        "device": read_device_meta(),
+        "system": {
+            "cpu_temp": read_cpu_temp(),
+            "uptime_sec": read_uptime(),
+            "memory": read_mem(),
+            "lux": read_lux(),
+        },
+        "audio": {"volume": vol, "mute": vol == 0},
+        "wifi": read_wifi(),
+        "bluetooth": read_bt_status(),
+    }
+
+
+def run_atrios(args, bg=False):
+    cmd = ["/usr/bin/atrios"] + args
+    if bg:
+        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    else:
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=8)
+
+
+HTML_PAGE = r"""<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#6750A4">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>AtriOS Nebula — Управление</title>
+<style>
+:root {
+  --md-primary: #6750A4;
+  --md-on-primary: #FFFFFF;
+  --md-primary-container: #EADDFF;
+  --md-on-primary-container: #21005D;
+  --md-secondary-container: #E8DEF8;
+  --md-on-secondary-container: #1D192B;
+  --md-tertiary-container: #FFD8E4;
+  --md-on-tertiary-container: #31111D;
+  --md-error: #B3261E;
+  --md-error-container: #F9DEDC;
+  --md-on-error-container: #410E0B;
+  --md-surface: #FEF7FF;
+  --md-surface-container-low: #F7F2FA;
+  --md-surface-container: #F3EDF7;
+  --md-surface-container-high: #ECE6F0;
+  --md-on-surface: #1D1B20;
+  --md-on-surface-variant: #49454F;
+  --md-outline: #79747E;
+  --md-outline-variant: #CAC4D0;
+}
+[data-theme="dark"] {
+  --md-primary: #D0BCFF;
+  --md-on-primary: #381E72;
+  --md-primary-container: #4F378B;
+  --md-on-primary-container: #EADDFF;
+  --md-secondary-container: #4A4458;
+  --md-on-secondary-container: #E8DEF8;
+  --md-tertiary-container: #633B48;
+  --md-on-tertiary-container: #FFD8E4;
+  --md-error: #F2B8B5;
+  --md-error-container: #8C1D18;
+  --md-on-error-container: #F9DEDC;
+  --md-surface: #141218;
+  --md-surface-container-low: #1D1B20;
+  --md-surface-container: #211F26;
+  --md-surface-container-high: #2B2930;
+  --md-on-surface: #E6E0E9;
+  --md-on-surface-variant: #CAC4D0;
+  --md-outline: #938F99;
+  --md-outline-variant: #49454F;
+}
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+body {
+  margin: 0;
+  font-family: 'Roboto', system-ui, -apple-system, sans-serif;
+  background: var(--md-surface);
+  color: var(--md-on-surface);
+  transition: background .25s ease, color .25s ease;
+}
+.app-bar {
+  position: sticky; top: 0; z-index: 10;
+  background: var(--md-surface);
+  border-bottom: 1px solid var(--md-outline-variant);
+  padding: 14px 20px;
+  display: flex; align-items: center; justify-content: space-between;
+}
+.app-title { display: flex; flex-direction: column; gap: 2px; }
+.app-title h1 { margin: 0; font-size: 20px; font-weight: 600; letter-spacing: -.01em; }
+.app-title span { font-size: 12px; color: var(--md-on-surface-variant); }
+.icon-btn {
+  border: none; background: var(--md-surface-container-high); color: var(--md-on-surface);
+  width: 40px; height: 40px; border-radius: 9999px; cursor: pointer;
+  display: grid; place-items: center; font-size: 18px;
+}
+.container {
+  max-width: 960px; margin: 0 auto; padding: 16px;
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px;
+}
+.card {
+  background: var(--md-surface-container);
+  border-radius: 24px; padding: 20px;
+  display: flex; flex-direction: column; gap: 14px;
+}
+.card.hero {
+  background: var(--md-primary-container);
+  color: var(--md-on-primary-container);
+}
+.card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.card-title { font-size: 16px; font-weight: 600; margin: 0; }
+.badge {
+  font-size: 12px; font-weight: 500; padding: 4px 10px; border-radius: 9999px;
+  background: var(--md-secondary-container); color: var(--md-on-secondary-container);
+}
+.badge.hidden { background: var(--md-primary-container); color: var(--md-on-primary-container); }
+.badge.open { background: var(--md-tertiary-container); color: var(--md-on-tertiary-container); }
+.stats-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+.stat {
+  background: rgba(255,255,255,0.22); border-radius: 16px; padding: 10px 12px;
+}
+[data-theme="dark"] .stat { background: rgba(0,0,0,0.2); }
+.stat .lbl { font-size: 11px; opacity: .8; }
+.stat .val { font-size: 16px; font-weight: 600; margin-top: 2px; }
+.slider-row { display: flex; align-items: center; gap: 12px; }
+input[type="range"] {
+  flex: 1; accent-color: var(--md-primary); height: 8px; cursor: pointer;
+}
+.chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip {
+  border: 1px solid var(--md-outline-variant);
+  background: var(--md-surface-container-low);
+  color: var(--md-on-surface);
+  padding: 8px 14px; border-radius: 12px; font-size: 13px; font-weight: 500;
+  cursor: pointer; transition: all .15s ease;
+}
+.chip:hover { background: var(--md-surface-container-high); }
+.chip.active {
+  background: var(--md-secondary-container); color: var(--md-on-secondary-container);
+  border-color: transparent;
+}
+.btn-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.btn {
+  border: none; border-radius: 9999px; padding: 10px 18px; font-size: 14px; font-weight: 500;
+  cursor: pointer; transition: opacity .15s ease;
+}
+.btn:active { opacity: .8; }
+.btn.filled { background: var(--md-primary); color: var(--md-on-primary); }
+.btn.tonal { background: var(--md-secondary-container); color: var(--md-on-secondary-container); }
+.btn.danger { background: var(--md-error-container); color: var(--md-on-error-container); }
+.field {
+  width: 100%; border: 1px solid var(--md-outline); background: var(--md-surface-container-low);
+  color: var(--md-on-surface); border-radius: 14px; padding: 10px 14px; font-size: 14px;
+}
+.paired-list { display: flex; flex-direction: column; gap: 8px; }
+.paired-item {
+  display: flex; align-items: center; justify-content: space-between;
+  background: var(--md-surface-container-low); padding: 8px 12px; border-radius: 14px;
+  font-family: ui-monospace, monospace; font-size: 13px;
+}
+.muted { font-size: 13px; color: var(--md-on-surface-variant); line-height: 1.4; }
+.snackbar {
+  position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%) translateY(90px);
+  background: var(--md-on-surface); color: var(--md-surface);
+  padding: 12px 20px; border-radius: 14px; font-size: 14px; font-weight: 500;
+  transition: transform .25s ease; z-index: 50; box-shadow: 0 6px 20px rgba(0,0,0,.25);
+}
+.snackbar.show { transform: translateX(-50%) translateY(0); }
+</style>
+</head>
+<body>
+<header class="app-bar">
+  <div class="app-title">
+    <h1 id="devName">AtriStation Max</h1>
+    <span id="devSub">AtriOS Nebula</span>
+  </div>
+  <button class="icon-btn" id="themeBtn" title="Сменить тему">&#9728;</button>
+</header>
+
+<main class="container">
+  <section class="card hero">
+    <div class="card-head">
+      <h2 class="card-title">Состояние колонки</h2>
+      <span class="badge" id="wifiBadge">Wi-Fi</span>
+    </div>
+    <div class="stats-grid">
+      <div class="stat"><div class="lbl">Температура CPU</div><div class="val" id="cpuTemp">--</div></div>
+      <div class="stat"><div class="lbl">Память</div><div class="val" id="ramInfo">--</div></div>
+      <div class="stat"><div class="lbl">Освещённость</div><div class="val" id="luxVal">--</div></div>
+      <div class="stat"><div class="lbl">Uptime</div><div class="val" id="uptimeVal">--</div></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <h2 class="card-title">Аудио и громкость</h2>
+      <span class="badge" id="volBadge">60%</span>
+    </div>
+    <div class="slider-row">
+      <input type="range" id="volSlider" min="0" max="100" value="60">
+    </div>
+    <div class="btn-row">
+      <button class="btn tonal" onclick="setMute()">Без звука</button>
+      <button class="btn tonal" onclick="apiPost('/api/system/test',{},'Тестовый сигнал')">Тест звука</button>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <h2 class="card-title">LED-экран (25×16) и кольцо</h2>
+    </div>
+    <div class="chips">
+      <button class="chip" onclick="setScreen('clock')">Часы</button>
+      <button class="chip" onclick="setScreen('kisser')">Kisser</button>
+      <button class="chip" onclick="setScreen('eyes','happy')">Глаза (радость)</button>
+      <button class="chip" onclick="setScreen('eyes','love')">Глаза (любовь)</button>
+      <button class="chip" onclick="setScreen('off')">Выкл. экран</button>
+    </div>
+    <div class="slider-row">
+      <input class="field" id="tickerInput" placeholder="Бегущая строка...">
+      <button class="btn filled" onclick="sendTicker()">OK</button>
+    </div>
+    <div class="chips">
+      <button class="chip" onclick="setRing('rainbow')">Кольцо: Радуга</button>
+      <button class="chip" onclick="setRing('volume')">Кольцо: Громкость</button>
+      <button class="chip" onclick="setRing('off')">Кольцо: Выкл</button>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <h2 class="card-title">Bluetooth и приватность</h2>
+      <span class="badge" id="btBadge">--</span>
+    </div>
+    <p class="muted" id="btHint">Загрузка...</p>
+    <div class="paired-list" id="pairedList"></div>
+    <div class="btn-row">
+      <button class="btn filled" onclick="apiPost('/api/bt/pair',{seconds:60},'Открыто сопряжение на 60 с')">Разрешить сопряжение (60 с)</button>
+      <button class="btn tonal" onclick="apiPost('/api/bt/hide',{},'Идентификатор скрыт')">Скрыть сейчас</button>
+      <button class="btn danger" onclick="apiPost('/api/bt/unpair',{mac:'all'},'Все устройства удалены')">Сбросить пары</button>
+    </div>
+  </section>
+</main>
+
+<div class="snackbar" id="snack"></div>
+
+<script>
+const root = document.documentElement;
+if (window.matchMedia('(prefers-color-scheme: dark)').matches) root.setAttribute('data-theme','dark');
+document.getElementById('themeBtn').onclick = () => {
+  root.setAttribute('data-theme', root.getAttribute('data-theme') === 'dark' ? 'light' : 'dark');
+};
+
+function toast(msg) {
+  const el = document.getElementById('snack');
+  el.textContent = msg; el.classList.add('show');
+  setTimeout(() => el.classList.remove('show'), 2400);
+}
+
+async function apiPost(url, body, okMsg) {
+  try {
+    const r = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+    if (r.ok) { if (okMsg) toast(okMsg); setTimeout(refresh, 250); }
+  } catch (e) { toast('Ошибка связи с колонкой'); }
+}
+
+function setScreen(mode, state) { apiPost('/api/screen', {mode, state}, 'Экран: ' + mode); }
+function setRing(mode) { apiPost('/api/ring', {mode}, 'Кольцо: ' + mode); }
+function sendTicker() {
+  const t = document.getElementById('tickerInput').value.trim();
+  if (t) apiPost('/api/screen', {mode:'ticker', text:t}, 'Текст отправлен');
+}
+function setMute() { apiPost('/api/volume', {volume:0}, 'Звук выключен'); }
+
+const slider = document.getElementById('volSlider');
+let volTimer = null;
+slider.oninput = () => {
+  document.getElementById('volBadge').textContent = slider.value + '%';
+  clearTimeout(volTimer);
+  volTimer = setTimeout(() => apiPost('/api/volume', {volume: Number(slider.value)}), 120);
+};
+
+async function refresh() {
+  try {
+    const r = await fetch('/api/status');
+    const d = await r.json();
+    document.getElementById('devName').textContent = d.device.name;
+    document.getElementById('devSub').textContent = `${d.device.os} · ${d.device.codename}`;
+    document.getElementById('cpuTemp').textContent = d.system.cpu_temp + ' °C';
+    document.getElementById('ramInfo').textContent = `${d.system.memory.used_mb}/${d.system.memory.total_mb} МБ`;
+    document.getElementById('luxVal').textContent = d.system.lux !== null ? d.system.lux + ' lux' : '—';
+    const up = d.system.uptime_sec;
+    document.getElementById('uptimeVal').textContent = `${Math.floor(up/3600)}ч ${Math.floor((up%3600)/60)}м`;
+    document.getElementById('wifiBadge').textContent = d.wifi.connected ? `${d.wifi.ssid || 'Wi-Fi'} (${d.wifi.ip})` : 'Wi-Fi откл.';
+    slider.value = d.audio.volume;
+    document.getElementById('volBadge').textContent = d.audio.volume + '%';
+
+    const bt = d.bluetooth;
+    const badge = document.getElementById('btBadge');
+    const hint = document.getElementById('btHint');
+    if (bt.hidden) {
+      badge.textContent = 'Скрыта (PSCAN)'; badge.className = 'badge hidden';
+      hint.textContent = 'Есть сопряжённые устройства: идентификатор колонки скрыт от поиска, чужие устройства не могут подключиться.';
+    } else if (bt.pair_remaining_sec > 0) {
+      badge.textContent = `Видима (${bt.pair_remaining_sec} с)`; badge.className = 'badge open';
+      hint.textContent = 'Окно сопряжения активно. После подключения нового устройства идентификатор снова скроется.';
+    } else {
+      badge.textContent = bt.discoverable ? 'Видима (PISCAN)' : 'Выкл.'; badge.className = 'badge open';
+      hint.textContent = 'Сопряжённых устройств нет — колонка видна для первичного подключения.';
+    }
+    const list = document.getElementById('pairedList');
+    list.innerHTML = bt.paired_devices.length
+      ? bt.paired_devices.map(m => `<div class="paired-item"><span>${m}</span><button class="chip" onclick="apiPost('/api/bt/unpair',{mac:'${m}'},'Удалено ${m}')">Удалить</button></div>`).join('')
+      : '<div class="muted">Нет сопряжённых устройств</div>';
+  } catch (e) {}
+}
+refresh();
+setInterval(refresh, 4000);
+</script>
+</body>
+</html>
+"""
+
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, format, *args):
+        pass
+
+    def _send_json(self, code, obj):
+        data = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _read_json(self):
+        n = int(self.headers.get("Content-Length", "0") or 0)
+        if n <= 0:
+            return {}
+        try:
+            return json.loads(self.rfile.read(n).decode("utf-8", "ignore"))
+        except Exception:
+            return {}
+
+    def do_GET(self):
+        path = urllib.parse.urlparse(self.path).path
+        if path in ("/", "/index.html"):
+            body = HTML_PAGE.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        elif path == "/api/status":
+            self._send_json(200, build_status())
+        else:
+            self._send_json(404, {"error": "not found"})
+
+    def do_POST(self):
+        path = urllib.parse.urlparse(self.path).path
+        data = self._read_json()
+        if path == "/api/volume":
+            vol = max(0, min(100, int(data.get("volume", 60))))
+            run_atrios(["volume", str(vol)], bg=True)
+            self._send_json(200, {"ok": True, "volume": vol})
+        elif path == "/api/screen":
+            mode = str(data.get("mode", "clock"))
+            if mode == "ticker":
+                run_atrios(["screen", "ticker", str(data.get("text", "AtriOS"))], bg=True)
+            elif mode == "eyes":
+                run_atrios(["screen", "eyes", str(data.get("state", "happy"))], bg=True)
+            elif mode in ("clock", "kisser", "off"):
+                run_atrios(["screen", mode], bg=True)
+            self._send_json(200, {"ok": True})
+        elif path == "/api/ring":
+            mode = str(data.get("mode", "off"))
+            if mode == "volume":
+                run_atrios(["ring", "volume", str(read_volume())], bg=True)
+            elif mode in ("rainbow", "off"):
+                run_atrios(["ring", mode], bg=True)
+            self._send_json(200, {"ok": True})
+        elif path == "/api/bt/pair":
+            secs = max(10, min(300, int(data.get("seconds", 60))))
+            run_atrios(["bt", "pair", str(secs)])
+            self._send_json(200, {"ok": True, "seconds": secs})
+        elif path == "/api/bt/hide":
+            run_atrios(["bt", "hide"])
+            self._send_json(200, {"ok": True})
+        elif path == "/api/bt/unpair":
+            mac = str(data.get("mac", "all"))
+            run_atrios(["bt", "unpair", mac])
+            self._send_json(200, {"ok": True})
+        elif path == "/api/system/test":
+            run_atrios(["test"], bg=True)
+            self._send_json(200, {"ok": True})
+        elif path == "/api/system/reboot":
+            subprocess.Popen(["reboot"])
+            self._send_json(200, {"ok": True})
+        else:
+            self._send_json(404, {"error": "not found"})
+
+
+class ReusableTCPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+
+if __name__ == "__main__":
+    srv = ReusableTCPServer(("0.0.0.0", PORT), Handler)
+    print(f"[atrios-webui] Material 3 Web App listening on :{PORT}", flush=True)
+    srv.serve_forever()

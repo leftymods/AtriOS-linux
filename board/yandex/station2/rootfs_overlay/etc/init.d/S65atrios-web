@@ -1,0 +1,46 @@
+#!/bin/sh
+# /etc/init.d/S65atrios-web - Material 3 Companion Web App & Control API (port 8080)
+
+PIDFILE="/var/run/atrios-webui.pid"
+
+case "$1" in
+  start)
+    echo "[AtriOS] Starting Material 3 Web Control App (port 8080)..."
+    mkdir -p /var/run /var/log 2>/dev/null || true
+    if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null; then
+      echo "[AtriOS] Web Control App already running."
+      exit 0
+    fi
+    if [ -x /usr/lib/atrios/webui ] || [ -f /usr/lib/atrios/webui ]; then
+      python3 /usr/lib/atrios/webui >/var/log/atrios-webui.log 2>&1 &
+      echo "$!" > "$PIDFILE"
+    fi
+    ;;
+  stop)
+    echo "[AtriOS] Stopping Material 3 Web Control App..."
+    if [ -f "$PIDFILE" ]; then
+      kill "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null || true
+      rm -f "$PIDFILE"
+    fi
+    pkill -f /usr/lib/atrios/webui 2>/dev/null || true
+    ;;
+  restart)
+    "$0" stop
+    sleep 1
+    "$0" start
+    ;;
+  status)
+    if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null; then
+      IP=$(ip -4 addr show wlan0 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1 | head -n1)
+      echo "Material 3 Web App: running (PID $(cat "$PIDFILE")) -> http://${IP:-<speaker-ip>}:8080"
+    else
+      echo "Material 3 Web App: stopped"
+      exit 1
+    fi
+    ;;
+  *)
+    echo "Usage: $0 {start|stop|restart|status}"
+    exit 1
+    ;;
+esac
+exit 0

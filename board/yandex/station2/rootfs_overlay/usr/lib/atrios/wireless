@@ -142,9 +142,18 @@ case "$CMD" in
         done
         if command -v hciconfig >/dev/null 2>&1 && hciconfig hci0 >/dev/null 2>&1; then
           hciconfig hci0 up 2>/dev/null || true
-          hciconfig hci0 name "Yandex Station Max" 2>/dev/null || true
+          DEV_NAME="AtriStation Max"
+          if [ -f /etc/atrios-device ]; then
+            . /etc/atrios-device 2>/dev/null || true
+            [ -n "$DEVICE_NAME" ] && DEV_NAME="$DEVICE_NAME"
+          fi
+          hciconfig hci0 name "$DEV_NAME" 2>/dev/null || true
           hciconfig hci0 class 0x240414 2>/dev/null || true
-          hciconfig hci0 piscan 2>/dev/null || true
+          if [ -s /var/lib/atrios/bt_paired ]; then
+            hciconfig hci0 pscan 2>/dev/null || true
+          else
+            hciconfig hci0 piscan 2>/dev/null || true
+          fi
         fi
       # 2. Controller in H5 mode (BT_RC == 2) - Try vendor rtk_hciattach if available
       elif [ "$BT_RC" -eq 2 ] && [ -x /usr/bin/rtk_hciattach ]; then
@@ -252,6 +261,44 @@ case "$CMD" in
       else
         echo "Error: /usr/lib/atrios/rtk-bt-init not found"
         exit 1
+      fi
+    elif [ "$SUBCMD" = "pair" ]; then
+      SECS="${3:-60}"
+      UNTIL=$(( $(date +%s) + SECS ))
+      mkdir -p /var/run
+      echo "$UNTIL" > /var/run/atrios-bt-pair-until
+      hciconfig hci0 piscan 2>/dev/null || true
+      echo "Bluetooth discoverable for ${SECS}s (pairing window open)."
+    elif [ "$SUBCMD" = "hide" ]; then
+      rm -f /var/run/atrios-bt-pair-until
+      if [ -s /var/lib/atrios/bt_paired ]; then
+        hciconfig hci0 pscan 2>/dev/null || true
+        echo "Bluetooth identifier hidden (Page Scan only; paired devices can still connect)."
+      else
+        echo "No paired devices yet; keeping discoverable so you can pair."
+      fi
+    elif [ "$SUBCMD" = "paired" ]; then
+      if [ -s /var/lib/atrios/bt_paired ]; then
+        cat /var/lib/atrios/bt_paired
+      else
+        echo "(none)"
+      fi
+    elif [ "$SUBCMD" = "unpair" ]; then
+      TARGET="${3:-all}"
+      if [ "$TARGET" = "all" ]; then
+        rm -f /var/lib/atrios/bt_paired /var/run/atrios-bt-pair-until
+        hciconfig hci0 piscan 2>/dev/null || true
+        echo "All paired devices cleared; speaker is discoverable again."
+      else
+        if [ -f /var/lib/atrios/bt_paired ]; then
+          grep -ivF "$TARGET" /var/lib/atrios/bt_paired > /var/lib/atrios/bt_paired.tmp 2>/dev/null || true
+          mv /var/lib/atrios/bt_paired.tmp /var/lib/atrios/bt_paired
+        fi
+        if [ ! -s /var/lib/atrios/bt_paired ]; then
+          rm -f /var/lib/atrios/bt_paired
+          hciconfig hci0 piscan 2>/dev/null || true
+        fi
+        echo "Removed $TARGET from paired list."
       fi
     elif [ "$SUBCMD" = "scan" ]; then
       if [ -x /usr/bin/bt-audit ]; then
