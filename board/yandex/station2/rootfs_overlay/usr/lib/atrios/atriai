@@ -9,6 +9,7 @@ Pure Python 3 stdlib implementation of the leftymods/AtriAI column protocol:
 """
 
 import base64
+from collections import deque
 import hashlib
 import json
 import math
@@ -39,7 +40,7 @@ DEFAULT_CONFIG = {
     "enabled": False,
     "server": "ws://192.168.1.106:8090/voice",
     "wake_word": "Atri,Алиса",
-    "vad_threshold": 180,
+    "vad_threshold": 420,
     "silence_ms": 600,
     "min_speech_ms": 400,
 }
@@ -287,10 +288,10 @@ def set_vad_visual(phase):
     ring_cmd = None
     screen_cmd = None
     if phase == "vad":
-        ring_cmd = ["/usr/bin/atrios", "ring", "blue"]
+        ring_cmd = ["/usr/bin/atrios", "ring", "amber", "15"]
         screen_cmd = ["/usr/bin/atrios", "screen", "eyes", "wide"]
     elif phase == "thinking":
-        ring_cmd = ["/usr/bin/atrios", "ring", "amber"]
+        ring_cmd = ["/usr/bin/atrios", "ring", "amber", "20"]
         screen_cmd = ["/usr/bin/atrios", "screen", "eyes", "open"]
     elif phase == "speaking":
         ring_cmd = ["/usr/bin/atrios", "ring", "green"]
@@ -311,14 +312,20 @@ def set_vad_visual(phase):
                 pass
 
 
-def play_wav_bytes(wav_bytes):
-    if not wav_bytes:
+def play_audio_bytes(audio_bytes, sample_rate=48000):
+    if not audio_bytes:
         return
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tf:
-        tf.write(wav_bytes)
+    is_wav = audio_bytes[:4] == b"RIFF"
+    suffix = ".wav" if is_wav else ".pcm"
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tf:
+        tf.write(audio_bytes)
         path = tf.name
     try:
-        subprocess.run(["aplay", "-q", path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if is_wav:
+            cmd = ["aplay", "-q", path]
+        else:
+            cmd = ["aplay", "-q", "-t", "raw", "-f", "S16_LE", "-r", str(int(sample_rate)), "-c", "1", path]
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     finally:
         try:
             os.unlink(path)
@@ -331,6 +338,7 @@ def send_phrase_to_server(server_url, pcm_bytes, wake_word=""):
     last_asr = ""
     last_answer = ""
     audio = bytearray()
+    audio_sr = 48000
     try:
         start_msg = {"type": "start", "sample_rate": SR, "format": "pcm16", "lang": "ru"}
         if wake_word:
@@ -349,9 +357,17 @@ def send_phrase_to_server(server_url, pcm_bytes, wake_word=""):
                 if kind == "asr":
                     last_asr = ev.get("text", "")
                     print(f"[atriai] asr: {last_asr}", flush=True)
+                    if not last_asr.strip():
+                        break
+                    if wake_word and not matches_wake_word(last_asr, wake_word):
+                        break
                 elif kind == "answer":
                     last_answer = ev.get("text", "")
                     print(f"[atriai] answer: {last_answer}", flush=True)
+                    if not last_asr.strip():
+                        break
+                elif kind == "audio_start":
+                    audio_sr = int(ev.get("sample_rate", 48000))
                 elif kind == "audio_end":
                     break
             elif opcode == 0x2:
@@ -367,7 +383,7 @@ def send_phrase_to_server(server_url, pcm_bytes, wake_word=""):
     if audio:
         write_status("speaking", last_asr=last_asr, last_answer=last_answer)
         set_vad_visual("speaking")
-        play_wav_bytes(bytes(audio))
+        play_audio_bytes(bytes(audio), sample_rate=audio_sr)
     set_vad_visual("idle")
     return last_asr, last_answer
 
@@ -405,12 +421,14 @@ def run_daemon():
                 stderr=subprocess.DEVNULL,
             )
             buf = bytearray()
+            pre_roll = deque(maxlen=10)
             speaking = False
+            speech_hits = 0
             force_active = False
             wait_speech_ms = 0.0
             silence_ms = 0.0
             frame_ms = (FRAME_SAMPLES / SR) * 1000.0
-            vad_thr = float(cfg.get("vad_threshold", 180))
+            vad_thr = float(cfg.get("vad_threshold", 420))
             max_sil = float(cfg.get("silence_ms", 600))
             min_bytes = int(SR * 2 * (float(cfg.get("min_speech_ms", 400)) / 1000.0))
 
@@ -418,11 +436,11 @@ def run_daemon():
             while True:
                 if is_mic_muted() or not load_config().get("enabled", False):
                     break
-                if consume_button_trigger() and not force_active:
+                if consume_button_trigger():
                     force_active = True
                     wait_speech_ms = 0.0
                     set_vad_visual("vad")
-                    print("[atriai] funcbutton pressed -> listening without wake word", flush=True)
+                    print("[atriai] funcbutton pressed -> listening without wake word (3s timeout)", flush=True)
                 raw = proc.stdout.read(CAP_FRAME_BYTES)
                 if not raw or len(raw) < CAP_FRAME_BYTES:
                     print("[atriai] arecord stream ended, retrying...", flush=True)
@@ -431,21 +449,33 @@ def run_daemon():
                 chunk = downsample_48k_s32_stereo_to_16k_s16_mono(raw)
                 rms = pcm16_rms(chunk)
                 if rms >= vad_thr:
-                    if not speaking:
-                        set_vad_visual("vad")
-                    speaking = True
-                    silence_ms = 0.0
-                    buf.extend(chunk)
+                    speech_hits += 1
+                    if not speaking and speech_hits >= 2:
+                        speaking = True
+                        for prev in pre_roll:
+                            buf.extend(prev)
+                        pre_roll.clear()
+                        if not force_active:
+                            set_vad_visual("vad")
+                    if speaking:
+                        silence_ms = 0.0
+                        buf.extend(chunk)
+                    else:
+                        pre_roll.append(chunk)
                 elif speaking:
+                    speech_hits = 0
                     buf.extend(chunk)
                     silence_ms += frame_ms
                     if silence_ms >= max_sil:
                         break
-                elif force_active:
-                    buf.extend(chunk)
-                    wait_speech_ms += frame_ms
-                    if wait_speech_ms >= 3500.0:
-                        break
+                else:
+                    speech_hits = 0
+                    pre_roll.append(chunk)
+                    if force_active:
+                        wait_speech_ms += frame_ms
+                        if wait_speech_ms >= 3000.0:
+                            print("[atriai] funcbutton timeout (3s without speech) -> clock", flush=True)
+                            break
 
             try:
                 proc.terminate()
@@ -453,7 +483,7 @@ def run_daemon():
             except Exception:
                 pass
 
-            if len(buf) >= min_bytes:
+            if speaking and len(buf) >= min_bytes:
                 write_status("thinking")
                 set_vad_visual("thinking")
                 try:
