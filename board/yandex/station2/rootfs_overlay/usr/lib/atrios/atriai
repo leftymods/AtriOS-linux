@@ -34,7 +34,7 @@ PID_FILE = "/var/run/atrios/atriai.pid"
 DEFAULT_CONFIG = {
     "enabled": False,
     "server": "ws://192.168.1.106:8090/voice",
-    "wake_word": "Atri",
+    "wake_word": "Atri,Алиса",
     "vad_threshold": 650,
     "silence_ms": 600,
     "min_speech_ms": 400,
@@ -51,6 +51,14 @@ ATRI_WAKE_ALIASES = (
     "о три",
 )
 
+ALICE_WAKE_ALIASES = (
+    "алиса",
+    "алису",
+    "алисе",
+    "алисой",
+    "alice",
+)
+
 
 def matches_wake_word(text, wake_word):
     ww = (wake_word or "").strip().lower()
@@ -64,6 +72,8 @@ def matches_wake_word(text, wake_word):
     candidates = set(tokens)
     if "atri" in candidates or "атри" in candidates:
         candidates.update(ATRI_WAKE_ALIASES)
+    if "алиса" in candidates or "alice" in candidates:
+        candidates.update(ALICE_WAKE_ALIASES)
     return any(c in norm for c in candidates)
 
 
