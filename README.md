@@ -10,8 +10,7 @@
 
 | Board ID | Платформа | Семейство / SoC | Конфиг сборки | Статус |
 |---|---|---|---|---|
-| `station-max` | **AtriStation Max** / Yandex Station Max | `amlogic-meson64` / Amlogic S905X3 (`sm1`) | `config/boards/station-max.conf` | Полная поддержка |
-| `yndxsttion53` | Yandex Station Max (`yndxsttion53`) | `amlogic-meson64` / Amlogic S905X3 (`sm1`) | `config/boards/yndxsttion53.conf` | Профиль сборки |
+| `station-max` (`yndxsttion53`) | **AtriStation Max** (Яндекс Станция Макс 53) | `amlogic-meson64` / Amlogic S905X3 (`sm1`) | `config/boards/station-max.conf` (`yndxsttion53.conf`) | Полная поддержка |
 | `template` | Шаблон для новой колонки (`new-board`) | Настраивается (`amlogic-meson64` и др.) | `config/boards/template.conf` | Шаблон расширения |
 
 ### Добавление новой колонки во фреймворк
@@ -26,30 +25,12 @@
 ### 1. Конфигурация и сборка (`config/`, `scripts/`)
 * **Профили семейств и плат:** `config/families/*.conf` и `config/boards/*.conf` задают архитектуру, SoC, загрузчик, DTS и rootfs overlay для каждого устройства.
 * **Mainline U-Boot:** скрипт сборки и FIP-подписи `scripts/build_mainline_uboot.sh` с поддержкой USB OTG, `fastboot` и `aml_burn`.
-* **Mainline Linux (`AtriOS-aml`):** единое дерево ядра Linux 7.x с внешним набором драйверов `drivers/atrios/`.
+* **Mainline Linux (`AtriOS-aml`):** единое дерево ядра Linux 7.x с внешним набором драйверов `drivers/atrios/` (подробный статус по платам — в [DRIVERS.md](DRIVERS.md)).
 
 ### 2. Userspace и сервисы (`rootfs_overlay`)
 * **Init-система:** `S00resizefs` (авторасширение rootfs с учётом профиля платы), `S01modules`, `S02baseline` (снимок базовых пакетов и шаблонов), `S03amplifiers`, `S40network`, `S50pipewire`, `S60atrios`, `S71atrios-bt-control`.
 * **Аудио и беспроводной стек:** PipeWire + WirePlumber, BlueZ 5 + BlueALSA, `bt-speaker-daemon`, `wpa_supplicant`, ALSA.
 * **Автоопределение и диагностика:** `/usr/lib/atrios/device-detect`, `/usr/bin/fastfetch` (динамически считывает SoC, фреймбуферы и звуковые карты).
-
-### 3. Библиотека драйверов (`drivers/atrios/`)
-
-| Модуль | Назначение | Интерфейс |
-|---|---|---|
-| `gowin_led_device.ko` | Контроллер LED-матрицы FPGA Gowin GW1N-9 (SPI + JTAG/MMIO Flash) | SPI + GPIO / MMIO |
-| `quasar_led_screen.ko` | Драйвер кадрового буфера LED-матрицы | SPI / fbdev |
-| `quasar_led_ring.ko` | Верхнее RGB LED-кольцо | LED trigger / fbdev |
-| `quasar_pcba_ids.ko` | Чтение заводских идентификаторов плат из EEPROM (SV2/SV1) | I2C (`24c02`) |
-| `rotary-volume.ko` | Энкодер регулятора громкости | GPIO interrupts |
-| `gpio_keypad.ko` | Аппаратные кнопки управления | Polled GPIO |
-| `zigbee-control.ko` | Управление сбросом и bootloader модуля Zigbee EFR32 | GPIO |
-| `ltr308als01.ko` | Датчик внешней освещённости | I2C / IIO |
-| `leds-is31fl32xx.ko` | LED-контроллер IS31FL3236A | I2C |
-| `snd-soc-sy6045s.ko` | Усилитель НЧ/ВЧ с DSP biquad-фильтрами | I2C / I2S |
-| `snd-soc-es8156.ko` | Аудио ЦАП линейного выхода / наушников | I2C / I2S |
-| `snd-soc-es7210.ko` | 4-канальный АЦП микрофонного массива | I2C / TDM |
-| `snd-soc-tas5825m.ko` | Усилитель TAS5825M | I2C / I2S |
 
 ---
 
