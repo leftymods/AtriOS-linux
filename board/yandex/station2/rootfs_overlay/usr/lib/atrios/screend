@@ -205,7 +205,12 @@ def send_frame(buf):
 def main():
     last_rendered = ""
     last_bt = None
+    last_tz = None
     while True:
+        cur_tz = os.path.realpath("/etc/localtime") if os.path.exists("/etc/localtime") else None
+        if cur_tz != last_tz:
+            time.tzset()
+            last_tz = cur_tz
         now = time.strftime("%H:%M")
         bt = is_bt_active()
         if now != last_rendered or bt != last_bt:
