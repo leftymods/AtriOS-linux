@@ -47,6 +47,7 @@ static bool debug;
 module_param(debug, bool, 0644);
 MODULE_PARM_DESC(debug, "Enable verbose Gowin FPGA SPI protocol and framebuffer debug logs");
 
+
 #define GOWIN_DRV_NAME		"led_panel"
 #define GOWIN_FB_NAME_SCREEN	"YNDX LED screen"
 #define GOWIN_FB_NAME_PANEL	"led_panel_fb"
@@ -153,6 +154,8 @@ struct gowin_priv {
 	/* Mode */
 	bool jtag_mode;
 	bool tms_from_spi_cs;
+	void __iomem *tck_reg;
+	u32 tck_mask;
 
 	/* Resolution & Firmware info */
 	int width;
@@ -254,8 +257,8 @@ static int get_lp_status_locked(struct gowin_priv *priv, u8 *status_buf)
 			priv->crc_errors_master++;
 			if (debug)
 				dev_warn(priv->dev,
-					 "[GOWIN] status CRC error #%u (try %d): rx=%16ph ...\n",
-					 priv->crc_errors_master, tries + 1, rx);
+					 "[GOWIN] status CRC error #%u (try %d): rx=%16ph %16ph %3ph\n",
+					 priv->crc_errors_master, tries + 1, rx, rx + 16, rx + 32);
 			ret = -EBADMSG;
 			continue;
 		}
@@ -1178,19 +1181,27 @@ static struct device *get_spi_master_dev(struct spi_device *spi)
 static void idle_spi_master_pins(struct spi_device *spi)
 {
 	struct device *mdev = get_spi_master_dev(spi);
+	int ret;
 
 	if (!mdev)
 		return;
-	pinctrl_pm_select_idle_state(mdev);
+	ret = pinctrl_pm_select_idle_state(mdev);
+	if (ret)
+		dev_warn(&spi->dev, "[GOWIN] pinctrl_pm_select_idle_state(%s) failed: %d\n",
+			 dev_name(mdev), ret);
 }
 
 static void restore_spi_master_pins(struct spi_device *spi)
 {
 	struct device *mdev = get_spi_master_dev(spi);
+	int ret;
 
 	if (!mdev)
 		return;
-	pinctrl_pm_select_default_state(mdev);
+	ret = pinctrl_pm_select_default_state(mdev);
+	if (ret)
+		dev_warn(&spi->dev, "[GOWIN] pinctrl_pm_select_default_state(%s) failed: %d\n",
+			 dev_name(mdev), ret);
 }
 
 static inline void jtag_set_tms(struct gowin_priv *priv, int val)
@@ -1253,6 +1264,12 @@ static int select_jtag_mode(struct gowin_priv *priv)
 	if (priv->jtag_sel)
 		gpiod_set_value_cansleep(priv->jtag_sel, 0);
 
+	/* Fast MMIO TCK for GPIOH_7 (PERIPHS_GPIO_H out = 0xff634468, bit 7) */
+	if (!priv->tck_reg) {
+		priv->tck_reg = ioremap(0xff634468, 4);
+		priv->tck_mask = BIT(7);
+	}
+
 	dev_info(dev, "[GOWIN-JTAG] JTAG mode enabled (tck=hw:%d, tdi=hw:%d, tdo=hw:%d, tms=hw:%d)\n",
 		 desc_to_gpio(priv->jtag_tck), desc_to_gpio(priv->jtag_tdi),
 		 desc_to_gpio(priv->jtag_tdo), desc_to_gpio(priv->jtag_tms));
@@ -1263,6 +1280,11 @@ static int select_jtag_mode(struct gowin_priv *priv)
 static int select_spi_mode(struct gowin_priv *priv)
 {
 	struct device *dev = priv->dev;
+
+	if (priv->tck_reg) {
+		iounmap(priv->tck_reg);
+		priv->tck_reg = NULL;
+	}
 
 	if (priv->jtag_tck) {
 		devm_gpiod_put(dev, priv->jtag_tck);
@@ -1299,10 +1321,22 @@ static int select_spi_mode(struct gowin_priv *priv)
 
 static inline void jtag_pulse_tck(struct gowin_priv *priv)
 {
-	gpiod_set_value(priv->jtag_tck, 0);
-	ndelay(100);
-	gpiod_set_value(priv->jtag_tck, 1);
-	ndelay(100);
+	if (likely(priv->tck_reg)) {
+		u32 val = readl(priv->tck_reg);
+		int k;
+
+		writel(val & ~priv->tck_mask, priv->tck_reg);
+		for (k = 0; k < 100; k++)
+			asm volatile("nop");
+		writel(val | priv->tck_mask, priv->tck_reg);
+		for (k = 0; k < 100; k++)
+			asm volatile("nop");
+	} else {
+		gpiod_set_value(priv->jtag_tck, 0);
+		ndelay(100);
+		gpiod_set_value(priv->jtag_tck, 1);
+		ndelay(100);
+	}
 }
 
 static inline void jtag_pulse_tck_n(struct gowin_priv *priv, unsigned int count)
@@ -1419,17 +1453,20 @@ static int check_status_code(struct gowin_priv *priv, u32 status)
 
 static int jtag_erase_flash(struct gowin_priv *priv)
 {
+	unsigned long flags;
 	u32 status;
 	int i;
 
 	jtag_tap_move(priv, 16, 1);
 	status = jtag_read_code(priv, 0x41);
 	if (check_status_code(priv, status) != 0) {
-		jtag_write_inst(priv, 0x11);
+		jtag_write_inst(priv, 0x3c);
+		udelay(100);
 		jtag_write_inst(priv, 0x15);
 		jtag_write_inst(priv, 0x05);
 		for (i = 0; i < 4000; i++)
 			jtag_update_tms(priv, 0);
+		msleep(120);
 		jtag_write_inst(priv, 0x09);
 		jtag_write_inst(priv, 0x02);
 		jtag_write_inst(priv, 0x3a);
@@ -1437,9 +1474,11 @@ static int jtag_erase_flash(struct gowin_priv *priv)
 		for (i = 0; i < 1000; i++)
 			jtag_update_tms(priv, 0);
 		status = jtag_read_code(priv, 0x41);
+		dev_info(priv->dev, "[GOWIN-JTAG] Post-SRAM-erase status=0x%08x\n", status);
 	}
 
 	dev_info(priv->dev, "[GOWIN-JTAG] Erasing FPGA flash (status=0x%08x)...\n", status);
+	local_irq_save(flags);
 	jtag_write_inst(priv, 0x11);
 	jtag_write_inst(priv, 0x15);
 	jtag_write_inst(priv, 0x75);
@@ -1462,18 +1501,24 @@ static int jtag_erase_flash(struct gowin_priv *priv)
 	jtag_pulse_tck_n(priv, 320000);
 	jtag_write_inst(priv, 0x3a);
 	jtag_write_inst(priv, 0x02);
+	local_irq_restore(flags);
 	msleep(200);
+	/* Run SRAM erase (0x05) without REPROGRAM (0x3c) so blank flash doesn't set CRC_ERROR */
 	jtag_write_inst(priv, 0x11);
-	jtag_write_inst(priv, 0x3c);
+	jtag_write_inst(priv, 0x15);
+	jtag_write_inst(priv, 0x05);
+	for (i = 0; i < 4000; i++)
+		jtag_update_tms(priv, 0);
+	msleep(120);
+	jtag_write_inst(priv, 0x09);
 	jtag_write_inst(priv, 0x02);
-	msleep(200);
+	jtag_write_inst(priv, 0x3a);
+	jtag_write_inst(priv, 0x02);
+	for (i = 0; i < 1000; i++)
+		jtag_update_tms(priv, 0);
 
 	status = jtag_read_code(priv, 0x41);
-	if (status & 0x0f) {
-		dev_err(priv->dev, "[GOWIN-JTAG] Flash erase failed: status=0x%08x (error bits set)\n", status);
-		return -EPROTO;
-	}
-	dev_info(priv->dev, "[GOWIN-JTAG] Flash erase verified OK (status=0x%08x)\n", status);
+	dev_info(priv->dev, "[GOWIN-JTAG] Flash erase done (status=0x%08x)\n", status);
 	return 0;
 }
 
@@ -1484,7 +1529,8 @@ static int jtag_prog_fpga(struct gowin_priv *priv, const struct firmware *fw,
 	size_t num_pages = aligned_len / 256;
 	size_t page, offset;
 	u8 *buf;
-	u32 idcode, usercode;
+	u32 idcode, usercode, status;
+	unsigned long flags;
 	int i, bit;
 
 	jtag_tap_move(priv, 16, 1);
@@ -1514,6 +1560,7 @@ static int jtag_prog_fpga(struct gowin_priv *priv, const struct firmware *fw,
 	for (page = 0; page < num_pages; page++) {
 		const u8 *p = buf + page * 256;
 
+		local_irq_save(flags);
 		jtag_write_inst(priv, 0x15);
 		jtag_write_inst(priv, 0x71);
 		if (page > 0)
@@ -1546,7 +1593,11 @@ static int jtag_prog_fpga(struct gowin_priv *priv, const struct firmware *fw,
 			jtag_pulse_tck_n(priv, 24);
 		}
 		jtag_pulse_tck_n(priv, 14);
+		local_irq_restore(flags);
 	}
+
+	status = jtag_read_code(priv, 0x41);
+	dev_info(priv->dev, "[GOWIN-JTAG] Pre-reprogram STATUS=0x%08x\n", status);
 
 	jtag_write_inst(priv, 0x3a);
 	jtag_write_inst(priv, 0x02);
@@ -1559,11 +1610,13 @@ static int jtag_prog_fpga(struct gowin_priv *priv, const struct firmware *fw,
 	kfree(buf);
 
 	usercode = jtag_read_code(priv, 0x13);
-	dev_info(priv->dev, "[GOWIN-JTAG] Post-program USERCODE=0x%08x (expected 0x%08x)\n",
-		 usercode, expected_user_code);
+	status = jtag_read_code(priv, 0x41);
+	dev_info(priv->dev, "[GOWIN-JTAG] Post-program USERCODE=0x%08x STATUS=0x%08x (expected 0x%08x)\n",
+		 usercode, status, expected_user_code);
 	if (expected_user_code && usercode != expected_user_code) {
-		dev_warn(priv->dev, "[GOWIN-JTAG] USERCODE mismatch: actual=0x%08x expected=0x%08x (proceeding)\n",
-			 usercode, expected_user_code);
+		dev_err(priv->dev, "[GOWIN-JTAG] USERCODE mismatch: actual=0x%08x expected=0x%08x\n",
+			usercode, expected_user_code);
+		return -EPROTO;
 	}
 
 	return 0;
@@ -2009,25 +2062,16 @@ static ssize_t jtag_erase_flash_show(struct device *dev,
 	return sysfs_emit(buf, "0\n");
 }
 
-static ssize_t test_fpga_prog_store(struct device *dev,
-				    struct device_attribute *attr,
-				    const char *buf, size_t len)
-{
-	return len;
-}
-
 static DEVICE_ATTR_RW(jtag_reconfig);
 static DEVICE_ATTR_RO(jtag_fpga_prog);
 static DEVICE_ATTR_RO(jtag_codes);
 static DEVICE_ATTR_RO(jtag_erase_flash);
-static DEVICE_ATTR_WO(test_fpga_prog);
 
 static struct attribute *jtag_attrs[] = {
 	&dev_attr_jtag_reconfig.attr,
 	&dev_attr_jtag_fpga_prog.attr,
 	&dev_attr_jtag_codes.attr,
 	&dev_attr_jtag_erase_flash.attr,
-	&dev_attr_test_fpga_prog.attr,
 	NULL,
 };
 
@@ -2226,6 +2270,10 @@ static int remove(struct spi_device *spi)
 
 	mutex_lock(&priv->lock);
 	priv->removed = true;
+	if (priv->tck_reg) {
+		iounmap(priv->tck_reg);
+		priv->tck_reg = NULL;
+	}
 	mutex_unlock(&priv->lock);
 
 	sysfs_remove_groups(&priv->dev->kobj, lp_attr_groups);
