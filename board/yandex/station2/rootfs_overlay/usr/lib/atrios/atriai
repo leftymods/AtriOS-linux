@@ -35,6 +35,8 @@ STATUS_FILE = "/var/run/atrios/ai_status.json"
 BUTTONS_FILE = "/var/run/atrios/buttons.json"
 TRIGGER_FILE = "/var/run/atrios/ai_trigger"
 PID_FILE = "/var/run/atrios/atriai.pid"
+SCREEN_MODE_FILE = "/var/run/atrios/screen_mode"
+RING_OVERRIDE_FILE = "/var/run/atrios/ring_override"
 
 DEFAULT_CONFIG = {
     "enabled": False,
@@ -46,6 +48,10 @@ DEFAULT_CONFIG = {
 }
 
 _button_triggered = False
+_current_phase = "idle"
+_current_ring_tag = "off"
+_current_screen_tag = "clock"
+_ring_proc = None
 
 
 def _on_sigusr1(signum, frame):
@@ -53,7 +59,13 @@ def _on_sigusr1(signum, frame):
     _button_triggered = True
 
 
+def _on_sigusr2(signum, frame):
+    if _current_phase != "idle":
+        set_vad_visual(_current_phase, force=True)
+
+
 signal.signal(signal.SIGUSR1, _on_sigusr1)
+signal.signal(signal.SIGUSR2, _on_sigusr2)
 
 
 def consume_button_trigger():
@@ -283,33 +295,69 @@ class SimpleWebSocket:
             pass
 
 
-def set_vad_visual(phase):
-    """Trigger non-blocking LED ring & mini-screen animation for VAD/assistant phases."""
-    ring_cmd = None
-    screen_cmd = None
-    if phase == "vad":
-        ring_cmd = ["/usr/bin/atrios", "ring", "amber", "15"]
-        screen_cmd = ["/usr/bin/atrios", "screen", "eyes", "open"]
-    elif phase == "thinking":
-        ring_cmd = ["/usr/bin/atrios", "ring", "amber", "20"]
-        screen_cmd = ["/usr/bin/atrios", "screen", "eyes", "open"]
-    elif phase == "speaking":
-        ring_cmd = ["/usr/bin/atrios", "ring", "green"]
-        screen_cmd = ["/usr/bin/atrios", "screen", "eyes", "happy"]
-    elif phase == "idle":
-        ring_cmd = ["/usr/bin/atrios", "ring", "off"]
-        screen_cmd = ["/usr/bin/atrios", "screen", "clock"]
-
+def _write_screen_mode(mode):
     try:
-        subprocess.run(["pkill", "-f", "/usr/lib/atrios/light"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        os.makedirs(os.path.dirname(SCREEN_MODE_FILE), exist_ok=True)
+        with open(SCREEN_MODE_FILE, "w") as f:
+            f.write(mode)
     except Exception:
         pass
-    for cmd in (ring_cmd, screen_cmd):
-        if cmd:
-            try:
-                subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            except Exception:
-                pass
+
+
+def set_vad_visual(phase, force=False):
+    """Trigger non-blocking LED ring & mini-screen animation for VAD/assistant phases."""
+    global _current_phase, _current_ring_tag, _current_screen_tag, _ring_proc
+    _current_phase = phase
+
+    if phase == "vad":
+        ring_tag = "amber"
+        ring_cmd = ["/usr/bin/atrios", "ring", "amber", "30"]
+        screen_tag = "eyes_open"
+        screen_cmd = ["/usr/bin/atrios", "screen", "eyes", "open"]
+        _write_screen_mode("ai")
+    elif phase == "thinking":
+        ring_tag = "amber"
+        ring_cmd = ["/usr/bin/atrios", "ring", "amber", "30"]
+        screen_tag = "eyes_open"
+        screen_cmd = ["/usr/bin/atrios", "screen", "eyes", "open"]
+        _write_screen_mode("ai")
+    elif phase == "speaking":
+        ring_tag = "amber_green"
+        ring_cmd = ["/usr/bin/atrios", "ring", "amber_green", "60"]
+        screen_tag = "eyes_happy"
+        screen_cmd = ["/usr/bin/atrios", "screen", "eyes", "happy"]
+        _write_screen_mode("ai")
+    else:
+        ring_tag = "off"
+        ring_cmd = ["/usr/bin/atrios", "ring", "off"]
+        screen_tag = "clock"
+        screen_cmd = ["/usr/bin/atrios", "screen", "clock"]
+        _write_screen_mode("clock")
+
+    volume_override = os.path.exists(RING_OVERRIDE_FILE)
+    ring_alive = (_ring_proc is not None and _ring_proc.poll() is None)
+
+    if not volume_override and (force or ring_tag != _current_ring_tag or (ring_tag != "off" and not ring_alive)):
+        try:
+            subprocess.run(["pkill", "-f", "/usr/lib/atrios/light ring"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+        try:
+            _ring_proc = subprocess.Popen(ring_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            _ring_proc = None
+        _current_ring_tag = ring_tag
+
+    if force or screen_tag != _current_screen_tag:
+        try:
+            subprocess.run(["pkill", "-f", "/usr/lib/atrios/light screen"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+        try:
+            subprocess.Popen(screen_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+        _current_screen_tag = screen_tag
 
 
 def play_audio_bytes(audio_bytes, sample_rate=48000):

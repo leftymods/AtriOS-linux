@@ -557,6 +557,8 @@ def ring_amber(speed=0.04, duration=8.0):
     phase = 0.0
     try:
         while duration <= 0 or (time.time() - start) < duration:
+            if os.path.exists("/var/run/atrios/ring_override"):
+                return
             frame = bytearray(RING_SIZE)
             for i in range(RING_LEDS):
                 wave = 0.5 * (1.0 + math.sin(phase + i * (2.0 * math.pi / RING_LEDS) * 2.0))
@@ -568,6 +570,32 @@ def ring_amber(speed=0.04, duration=8.0):
                 frame[i * 3 + 2] = b
             ring_send_frame(frame)
             phase = (phase + 0.16) % (2.0 * math.pi)
+            time.sleep(speed)
+    except KeyboardInterrupt:
+        pass
+    ring_clear()
+
+def ring_amber_green(speed=0.04, duration=15.0):
+    print("[Ring] Running amber+green runner animation...", flush=True)
+    start = time.time()
+    pos = 0.0
+    try:
+        while duration <= 0 or (time.time() - start) < duration:
+            if os.path.exists("/var/run/atrios/ring_override"):
+                return
+            frame = bytearray(RING_SIZE)
+            for i in range(RING_LEDS):
+                d = abs(i - pos)
+                d = min(d, RING_LEDS - d)
+                green_mix = max(0.0, 1.0 - (d / 3.2)) ** 2
+                r = int(225 * (1.0 - green_mix))
+                g = int(90 * (1.0 - green_mix) + 255 * green_mix)
+                b = int(20 * green_mix)
+                frame[i * 3 + 0] = r
+                frame[i * 3 + 1] = g
+                frame[i * 3 + 2] = b
+            ring_send_frame(frame)
+            pos = (pos + 0.45) % RING_LEDS
             time.sleep(speed)
     except KeyboardInterrupt:
         pass
@@ -625,7 +653,7 @@ def main():
     # Ring parser
     p_ring = subparsers.add_parser("ring", help="Top 24-channel RGB LED ring")
     p_ring.add_argument("action", nargs="?", default="rainbow",
-                        choices=["rainbow", "amber", "volume", "red", "blue", "green", "fill", "clear", "off"],
+                        choices=["rainbow", "amber", "amber_green", "volume", "red", "blue", "green", "fill", "clear", "off"],
                         help="Ring effect")
     p_ring.add_argument("value", nargs="*", help="Parameters (e.g. volume percent, RGB values)")
 
@@ -656,6 +684,9 @@ def main():
         elif act == "amber":
             dur = float(args.value[0]) if args.value else 8.0
             ring_amber(duration=dur)
+        elif act == "amber_green":
+            dur = float(args.value[0]) if args.value else 15.0
+            ring_amber_green(duration=dur)
         elif act == "volume":
             pct = int(args.value[0]) if args.value else 50
             ring_volume(pct)
@@ -732,6 +763,7 @@ def main():
         print("  atrios screen off                  - Turn off screen")
         print("  atrios ring rainbow                - Rainbow animation")
         print("  atrios ring amber [sec]            - Warm amber shimmer animation")
+        print("  atrios ring amber_green [sec]      - Green pulse running over amber ring")
         print("  atrios ring volume 70              - Volume arc at 70%")
         print("  atrios ring red                    - Mic Mute solid red")
         print("  atrios ring off                    - Turn off ring")

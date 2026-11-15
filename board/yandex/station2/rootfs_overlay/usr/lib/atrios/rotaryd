@@ -490,6 +490,37 @@ def init_ring_triggers():
             pass
 
 
+RING_OVERRIDE_FILE = "/var/run/atrios/ring_override"
+
+
+def _enter_volume_ring_override():
+    try:
+        os.makedirs("/var/run/atrios", exist_ok=True)
+        with open(RING_OVERRIDE_FILE, "w") as f:
+            f.write("volume")
+    except Exception:
+        pass
+    try:
+        subprocess.run(["pkill", "-f", "/usr/lib/atrios/light ring"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
+
+def _exit_volume_ring_override():
+    try:
+        if os.path.exists(RING_OVERRIDE_FILE):
+            os.unlink(RING_OVERRIDE_FILE)
+    except Exception:
+        pass
+    try:
+        if os.path.exists("/var/run/atrios/atriai.pid"):
+            with open("/var/run/atrios/atriai.pid") as pf:
+                os.kill(int(pf.read().strip()), signal.SIGUSR2)
+    except Exception:
+        pass
+
+
 def _render_loop():
     """Dedicated LED ring renderer thread so 12ms I2C fb writes never block input."""
     global display_volume, last_volume_time
@@ -498,6 +529,7 @@ def _render_loop():
     FRAME_INTERVAL = 0.025  # ~40 FPS max (matches ~12ms I2C fb_write bandwidth)
     last_anim_time = time.time()
     last_drawn = None
+    override_active = False
 
     while True:
         now = time.time()
@@ -505,11 +537,18 @@ def _render_loop():
         lvt = last_volume_time
         active = (lvt > 0 or abs(display_volume - target) > 0.05)
         if not active:
+            if override_active:
+                override_active = False
+                _exit_volume_ring_override()
             last_drawn = None
             _render_wake.wait(timeout=0.5)
             _render_wake.clear()
             last_anim_time = time.time()
             continue
+
+        if not override_active:
+            override_active = True
+            _enter_volume_ring_override()
 
         dt = max(0.001, min(0.08, now - last_anim_time))
         last_anim_time = now
@@ -532,6 +571,9 @@ def _render_loop():
             clear_ring()
             last_volume_time = 0.0
             last_drawn = None
+            if override_active:
+                override_active = False
+                _exit_volume_ring_override()
         else:
             key = (round(display_volume, 2), round(fade_factor, 3))
             if key != last_drawn:

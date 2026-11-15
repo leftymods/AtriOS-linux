@@ -19,7 +19,7 @@ AtriOS - Yandex Station Max tools
     atrios screen eyes [state]          Eyes (open/blink/wink/left/right/up/down/happy/love/wide/angry/sleep/cry/squint/dizzy/animate)
     atrios screen clock|ticker "TEXT"|fill [0..255]|pixel X Y [B]|gradient|off
   LED ring (24 RGB):
-    atrios ring rainbow|amber|volume N|red|blue|green|off
+    atrios ring rainbow|amber|amber_green|volume N|red|blue|green|off
   Light sensor:
     atrios sensor
 
