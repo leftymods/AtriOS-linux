@@ -44,7 +44,13 @@ data class SpeakerStatus(
     val pairedDevices: List<String> = emptyList(),
     val actionPressed: Boolean = false,
     val micMuted: Boolean = false,
-    val screenMode: String = "clock"
+    val screenMode: String = "clock",
+    val aiEnabled: Boolean = false,
+    val aiServer: String = "ws://192.168.1.10:8090/voice",
+    val aiState: String = "disabled",
+    val aiLastAsr: String = "",
+    val aiLastAnswer: String = "",
+    val aiError: String = ""
 )
 
 class BtControlClient(
@@ -124,6 +130,7 @@ class BtControlClient(
                 val wifi = json.optJSONObject("wifi") ?: JSONObject()
                 val bt = json.optJSONObject("bluetooth") ?: JSONObject()
                 val buttons = json.optJSONObject("buttons") ?: JSONObject()
+                val ai = json.optJSONObject("ai") ?: JSONObject()
                 val pairedArr: JSONArray = bt.optJSONArray("paired_devices") ?: JSONArray()
                 val paired = buildList {
                     for (i in 0 until pairedArr.length()) add(pairedArr.optString(i))
@@ -157,7 +164,13 @@ class BtControlClient(
                     pairedDevices = paired,
                     actionPressed = buttons.optBoolean("action_pressed", false),
                     micMuted = buttons.optBoolean("mic_muted", false),
-                    screenMode = json.optString("screen_mode", "clock")
+                    screenMode = json.optString("screen_mode", "clock"),
+                    aiEnabled = ai.optBoolean("enabled", false),
+                    aiServer = ai.optString("server", "ws://192.168.1.10:8090/voice"),
+                    aiState = ai.optString("state", "disabled"),
+                    aiLastAsr = ai.optString("last_asr", ""),
+                    aiLastAnswer = ai.optString("last_answer", ""),
+                    aiError = ai.optString("error", "")
                 )
                 withContext(Dispatchers.Main) { onStatus(status) }
             }
