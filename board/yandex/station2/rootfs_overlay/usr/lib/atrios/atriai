@@ -515,10 +515,15 @@ def run_daemon():
     os.makedirs(os.path.dirname(PID_FILE), exist_ok=True)
     with open(PID_FILE, "w") as f:
         f.write(str(os.getpid()))
-    # Clear any stale button trigger from before daemon startup/reboot.
+    # Clear any stale button trigger or orphan arecord from before daemon startup/reboot.
     try:
         if os.path.exists(TRIGGER_FILE):
             os.unlink(TRIGGER_FILE)
+    except Exception:
+        pass
+    try:
+        subprocess.run(["pkill", "-9", "-f", "arecord.*hw:0,3"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:
         pass
 
@@ -572,13 +577,18 @@ def run_daemon():
                         print("[atriai] funcbutton pressed again -> cancelled -> clock", flush=True)
                         force_active = False
                         speaking = False
+                        speech_hits = 0
                         buf.clear()
                         set_vad_visual("idle")
                         break
                     force_active = True
+                    speaking = False
+                    speech_hits = 0
+                    silence_ms = 0.0
                     wait_speech_ms = 0.0
+                    buf.clear()
                     set_vad_visual("vad")
-                    print("[atriai] funcbutton pressed -> listening without wake word (5s timeout)", flush=True)
+                    print("[atriai] funcbutton pressed -> listening without wake word (6s timeout)", flush=True)
                 raw = proc.stdout.read(CAP_FRAME_BYTES)
                 if not raw or len(raw) < CAP_FRAME_BYTES:
                     err_msg = ""
@@ -599,9 +609,11 @@ def run_daemon():
                     pre_roll.append(chunk)
                     continue
                 rms = pcm16_rms(chunk)
-                if rms >= vad_thr:
+                active_thr = min(vad_thr, 350.0) if force_active else vad_thr
+                needed_hits = 2 if force_active else 3
+                if rms >= active_thr:
                     speech_hits += 1
-                    if not speaking and speech_hits >= 3:
+                    if not speaking and speech_hits >= needed_hits:
                         speaking = True
                         for prev in pre_roll:
                             buf.extend(prev)
@@ -609,6 +621,8 @@ def run_daemon():
                     if speaking:
                         silence_ms = 0.0
                         buf.extend(chunk)
+                        if len(buf) >= SR * 2 * 12:
+                            break
                     else:
                         pre_roll.append(chunk)
                 elif speaking:
@@ -622,15 +636,23 @@ def run_daemon():
                     pre_roll.append(chunk)
                     if force_active:
                         wait_speech_ms += frame_ms
-                        if wait_speech_ms >= 5000.0:
-                            print("[atriai] funcbutton timeout (5s without speech) -> clock", flush=True)
+                        if wait_speech_ms >= 6000.0:
+                            print("[atriai] funcbutton timeout (6s without speech) -> clock", flush=True)
                             break
 
-            try:
-                proc.terminate()
-                proc.wait(timeout=1)
-            except Exception:
-                pass
+            if proc is not None:
+                try:
+                    if proc.poll() is None:
+                        proc.terminate()
+                        proc.wait(timeout=0.5)
+                except Exception:
+                    pass
+                try:
+                    if proc.poll() is None:
+                        proc.kill()
+                        proc.wait(timeout=1.0)
+                except Exception:
+                    pass
 
             if speaking and len(buf) >= min_bytes:
                 write_status("thinking")

@@ -672,22 +672,30 @@ def main():
                                     if duration >= 2.5:
                                         pass
                                     else:
+                                        ai_enabled = False
                                         try:
-                                            with open("/var/run/atrios/ai_trigger", "w") as tf:
-                                                tf.write(str(time.time()))
+                                            with open("/var/lib/atrios/ai.json") as af:
+                                                ai_enabled = bool(json.load(af).get("enabled", False))
                                         except Exception:
                                             pass
-                                        try:
-                                            if os.path.exists("/var/run/atrios/atriai.pid"):
-                                                with open("/var/run/atrios/atriai.pid") as pf:
-                                                    os.kill(int(pf.read().strip()), signal.SIGUSR1)
-                                        except Exception:
-                                            pass
-                                        try:
-                                            subprocess.run(["playerctl", "play-pause"],
-                                                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                                        except Exception:
-                                            pass
+                                        if ai_enabled:
+                                            try:
+                                                with open("/var/run/atrios/ai_trigger", "w") as tf:
+                                                    tf.write(str(time.time()))
+                                            except Exception:
+                                                pass
+                                            try:
+                                                if os.path.exists("/var/run/atrios/atriai.pid"):
+                                                    with open("/var/run/atrios/atriai.pid") as pf:
+                                                        os.kill(int(pf.read().strip()), signal.SIGUSR1)
+                                            except Exception:
+                                                pass
+                                        else:
+                                            try:
+                                                subprocess.Popen(["playerctl", "play-pause"],
+                                                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                            except Exception:
+                                                pass
                     if net_vol_step != 0:
                         adjust_volume(net_vol_step)
                 except OSError:
