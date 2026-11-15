@@ -64,6 +64,7 @@ case "$c" in
   reset|factory-reset) exec /bin/sh $L/reset "$@" ;;
   ota|swupdate)       exec python3 $L/ota "$@" ;;
   time|ntp)           exec python3 $L/ntp "$@" ;;
+  ai|atriai)          exec python3 $L/atriai "$@" ;;
   info|fetch|fastfetch) exec /bin/sh /usr/bin/fastfetch "$@" ;;
   ""|help|-h|--help)  usage ;;
   *) echo "atrios: unknown command '$c'"; echo; usage; exit 1 ;;

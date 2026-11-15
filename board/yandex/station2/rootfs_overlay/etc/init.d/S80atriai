@@ -1,0 +1,29 @@
+#!/bin/sh
+# /etc/init.d/S80atriai - AtriAI voice assistant thin-client daemon
+
+DAEMON=/usr/lib/atrios/atriai
+LOG=/var/log/atriai.log
+
+case "$1" in
+  start)
+    if grep -q '"enabled": *true' /var/lib/atrios/ai.json 2>/dev/null; then
+      echo "[AtriAI] Starting voice assistant runtime..."
+      pkill -f "/usr/lib/atrios/atriai daemon" 2>/dev/null || true
+      setsid "$DAEMON" daemon >"$LOG" 2>&1 </dev/null &
+    else
+      echo "[AtriAI] Disabled in /var/lib/atrios/ai.json (skipping)"
+    fi
+    ;;
+  stop)
+    pkill -f "/usr/lib/atrios/atriai daemon" 2>/dev/null || true
+    ;;
+  restart)
+    "$0" stop
+    sleep 1
+    "$0" start
+    ;;
+  *)
+    echo "Usage: $0 {start|stop|restart}"
+    exit 1
+    ;;
+esac

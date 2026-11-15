@@ -1,0 +1,386 @@
+#!/usr/bin/env python3
+"""
+AtriAI Thin-Client Runtime for AtriOS (Yandex Station 2 / Max)
+Pure Python 3 stdlib implementation of the leftymods/AtriAI column protocol:
+- Captures 16 kHz mono PCM16 via arecord
+- Local RMS energy VAD (silence/speech segmentation, respects mic_muted)
+- Streams audio to AtriAI server over WebSocket (/voice)
+- Plays returned WAV response via aplay and logs ASR/route/answer events
+"""
+
+import base64
+import hashlib
+import json
+import math
+import os
+import signal
+import socket
+import struct
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.parse
+
+SR = 16000
+FRAME_SAMPLES = 512
+FRAME_BYTES = FRAME_SAMPLES * 2
+CONFIG_FILE = "/var/lib/atrios/ai.json"
+STATUS_FILE = "/var/run/atrios/ai_status.json"
+BUTTONS_FILE = "/var/run/atrios/buttons.json"
+PID_FILE = "/var/run/atrios/atriai.pid"
+
+DEFAULT_CONFIG = {
+    "enabled": False,
+    "server": "ws://192.168.1.10:8090/voice",
+    "vad_threshold": 650,
+    "silence_ms": 600,
+    "min_speech_ms": 400,
+}
+
+
+def load_config():
+    cfg = dict(DEFAULT_CONFIG)
+    try:
+        if os.path.exists(CONFIG_FILE):
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                cfg.update(data)
+    except Exception:
+        pass
+    return cfg
+
+
+def save_config(cfg):
+    os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
+    tmp = CONFIG_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=2)
+    os.replace(tmp, CONFIG_FILE)
+
+
+def write_status(state, last_asr="", last_answer="", error=""):
+    try:
+        os.makedirs(os.path.dirname(STATUS_FILE), exist_ok=True)
+        tmp = STATUS_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({
+                "state": state,
+                "last_asr": last_asr,
+                "last_answer": last_answer,
+                "error": error,
+                "updated_at": int(time.time()),
+            }, f)
+        os.replace(tmp, STATUS_FILE)
+    except Exception:
+        pass
+
+
+def is_mic_muted():
+    try:
+        if os.path.exists(BUTTONS_FILE):
+            with open(BUTTONS_FILE, "r") as f:
+                return bool(json.load(f).get("mic_muted", False))
+    except Exception:
+        pass
+    return False
+
+
+def pcm16_rms(chunk):
+    count = len(chunk) // 2
+    if count <= 0:
+        return 0.0
+    samples = struct.unpack(f"<{count}h", chunk[:count * 2])
+    s = sum(x * x for x in samples)
+    return math.sqrt(s / count)
+
+
+class SimpleWebSocket:
+    """Minimal RFC 6455 WebSocket client using Python stdlib sockets."""
+
+    def __init__(self, url, timeout=15.0):
+        u = urllib.parse.urlparse(url)
+        if u.scheme not in ("ws", "wss"):
+            raise ValueError(f"Unsupported scheme: {u.scheme}")
+        host = u.hostname
+        port = u.port or (443 if u.scheme == "wss" else 80)
+        path = u.path or "/"
+        if u.query:
+            path += "?" + u.query
+
+        raw = socket.create_connection((host, port), timeout=timeout)
+        if u.scheme == "wss":
+            import ssl
+            ctx = ssl.create_default_context()
+            raw = ctx.wrap_socket(raw, server_hostname=host)
+        self.sock = raw
+        self.sock.settimeout(timeout)
+
+        key = base64.b64encode(os.urandom(16)).decode()
+        req = (
+            f"GET {path} HTTP/1.1\r\n"
+            f"Host: {host}:{port}\r\n"
+            f"Upgrade: websocket\r\n"
+            f"Connection: Upgrade\r\n"
+            f"Sec-WebSocket-Key: {key}\r\n"
+            f"Sec-WebSocket-Version: 13\r\n\r\n"
+        )
+        self.sock.sendall(req.encode())
+
+        buf = b""
+        while b"\r\n\r\n" not in buf:
+            chunk = self.sock.recv(1024)
+            if not chunk:
+                raise ConnectionError("WebSocket handshake failed")
+            buf += chunk
+        header = buf.split(b"\r\n\r\n", 1)[0].decode(errors="ignore")
+        if "101 " not in header.splitlines()[0]:
+            raise ConnectionError(f"WebSocket rejected: {header.splitlines()[0]}")
+        self._extra = buf.split(b"\r\n\r\n", 1)[1]
+
+    def _recv_exact(self, n):
+        out = bytearray()
+        if self._extra:
+            take = min(n, len(self._extra))
+            out.extend(self._extra[:take])
+            self._extra = self._extra[take:]
+        while len(out) < n:
+            chunk = self.sock.recv(n - len(out))
+            if not chunk:
+                raise EOFError("WebSocket closed")
+            out.extend(chunk)
+        return bytes(out)
+
+    def send_frame(self, opcode, payload):
+        mask = os.urandom(4)
+        length = len(payload)
+        header = bytearray([0x80 | opcode])
+        if length < 126:
+            header.append(0x80 | length)
+        elif length < 65536:
+            header.append(0x80 | 126)
+            header.extend(struct.pack("!H", length))
+        else:
+            header.append(0x80 | 127)
+            header.extend(struct.pack("!Q", length))
+        header.extend(mask)
+        masked = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+        self.sock.sendall(bytes(header) + masked)
+
+    def send_json(self, obj):
+        self.send_frame(0x1, json.dumps(obj).encode("utf-8"))
+
+    def send_bytes(self, data):
+        self.send_frame(0x2, data)
+
+    def recv_frame(self):
+        while True:
+            b1, b2 = self._recv_exact(2)
+            opcode = b1 & 0x0F
+            masked = (b2 & 0x80) != 0
+            length = b2 & 0x7F
+            if length == 126:
+                length = struct.unpack("!H", self._recv_exact(2))[0]
+            elif length == 127:
+                length = struct.unpack("!Q", self._recv_exact(8))[0]
+            mask = self._recv_exact(4) if masked else None
+            payload = self._recv_exact(length)
+            if masked and mask:
+                payload = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+            if opcode == 0x8:  # close
+                return 0x8, b""
+            if opcode == 0x9:  # ping -> pong
+                self.send_frame(0xA, payload)
+                continue
+            if opcode == 0xA:  # pong
+                continue
+            return opcode, payload
+
+    def close(self):
+        try:
+            self.send_frame(0x8, b"")
+        except Exception:
+            pass
+        try:
+            self.sock.close()
+        except Exception:
+            pass
+
+
+def play_wav_bytes(wav_bytes):
+    if not wav_bytes:
+        return
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tf:
+        tf.write(wav_bytes)
+        path = tf.name
+    try:
+        subprocess.run(["aplay", "-q", path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    finally:
+        try:
+            os.unlink(path)
+        except Exception:
+            pass
+
+
+def send_phrase_to_server(server_url, pcm_bytes):
+    ws = SimpleWebSocket(server_url, timeout=20.0)
+    last_asr = ""
+    last_answer = ""
+    audio = bytearray()
+    try:
+        ws.send_json({"type": "start", "sample_rate": SR, "format": "pcm16", "lang": "ru"})
+        ws.send_bytes(pcm_bytes)
+        ws.send_json({"type": "end"})
+
+        while True:
+            opcode, payload = ws.recv_frame()
+            if opcode == 0x8:
+                break
+            if opcode == 0x1:
+                ev = json.loads(payload.decode("utf-8", errors="ignore"))
+                kind = ev.get("type")
+                if kind == "asr":
+                    last_asr = ev.get("text", "")
+                    print(f"[atriai] asr: {last_asr}", flush=True)
+                elif kind == "answer":
+                    last_answer = ev.get("text", "")
+                    print(f"[atriai] answer: {last_answer}", flush=True)
+                elif kind == "audio_end":
+                    break
+            elif opcode == 0x2:
+                audio.extend(payload)
+    finally:
+        ws.close()
+
+    if audio:
+        write_status("speaking", last_asr=last_asr, last_answer=last_answer)
+        play_wav_bytes(bytes(audio))
+    return last_asr, last_answer
+
+
+def run_daemon():
+    os.makedirs(os.path.dirname(PID_FILE), exist_ok=True)
+    with open(PID_FILE, "w") as f:
+        f.write(str(os.getpid()))
+
+    cfg = load_config()
+    if not cfg.get("enabled", False):
+        write_status("disabled")
+        print("[atriai] Disabled in config; exiting.", flush=True)
+        return
+
+    print(f"[atriai] Starting voice client -> {cfg['server']}", flush=True)
+    write_status("listening")
+
+    while True:
+        cfg = load_config()
+        if not cfg.get("enabled", False):
+            write_status("disabled")
+            break
+
+        if is_mic_muted():
+            write_status("muted")
+            time.sleep(0.5)
+            continue
+
+        proc = None
+        try:
+            proc = subprocess.Popen(
+                ["arecord", "-q", "-t", "raw", "-f", "S16_LE", "-r", str(SR), "-c", "1"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+            )
+            buf = bytearray()
+            speaking = False
+            silence_ms = 0.0
+            frame_ms = (FRAME_SAMPLES / SR) * 1000.0
+            vad_thr = float(cfg.get("vad_threshold", 650))
+            max_sil = float(cfg.get("silence_ms", 600))
+            min_bytes = int(SR * 2 * (float(cfg.get("min_speech_ms", 400)) / 1000.0))
+
+            write_status("listening")
+            while True:
+                if is_mic_muted() or not load_config().get("enabled", False):
+                    break
+                chunk = proc.stdout.read(FRAME_BYTES)
+                if not chunk or len(chunk) < FRAME_BYTES:
+                    break
+                rms = pcm16_rms(chunk)
+                if rms >= vad_thr:
+                    speaking = True
+                    silence_ms = 0.0
+                    buf.extend(chunk)
+                elif speaking:
+                    buf.extend(chunk)
+                    silence_ms += frame_ms
+                    if silence_ms >= max_sil:
+                        break
+
+            try:
+                proc.terminate()
+                proc.wait(timeout=1)
+            except Exception:
+                pass
+
+            if len(buf) >= min_bytes:
+                write_status("thinking")
+                try:
+                    asr, ans = send_phrase_to_server(cfg["server"], bytes(buf))
+                    write_status("listening", last_asr=asr, last_answer=ans)
+                except Exception as e:
+                    write_status("error", error=str(e))
+                    print(f"[atriai] server error: {e}", flush=True)
+                    time.sleep(2.0)
+        except Exception as e:
+            write_status("error", error=str(e))
+            if proc:
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+            time.sleep(2.0)
+
+
+def main():
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "status"
+    if cmd == "daemon":
+        run_daemon()
+    elif cmd == "enable":
+        cfg = load_config()
+        cfg["enabled"] = True
+        save_config(cfg)
+        print("AtriAI enabled.")
+    elif cmd == "disable":
+        cfg = load_config()
+        cfg["enabled"] = False
+        save_config(cfg)
+        write_status("disabled")
+        print("AtriAI disabled.")
+    elif cmd == "server" and len(sys.argv) > 2:
+        cfg = load_config()
+        cfg["server"] = sys.argv[2]
+        save_config(cfg)
+        print(f"AtriAI server set to {cfg['server']}")
+    elif cmd == "ask" and len(sys.argv) > 2:
+        cfg = load_config()
+        with open(sys.argv[2], "rb") as f:
+            data = f.read()
+        if data[:4] == b"RIFF" and len(data) > 44:
+            data = data[44:]
+        asr, ans = send_phrase_to_server(cfg["server"], data)
+        print(json.dumps({"asr": asr, "answer": ans}, ensure_ascii=False))
+    else:
+        cfg = load_config()
+        st = {}
+        try:
+            if os.path.exists(STATUS_FILE):
+                with open(STATUS_FILE, "r") as f:
+                    st = json.load(f)
+        except Exception:
+            pass
+        print(json.dumps({"config": cfg, "status": st}, ensure_ascii=False, indent=2))
+
+
+if __name__ == "__main__":
+    main()

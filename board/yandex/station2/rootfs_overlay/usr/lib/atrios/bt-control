@@ -27,6 +27,8 @@ BT_PAIRED_FILE = "/var/lib/atrios/bt_paired"
 BT_PAIR_UNTIL_FILE = "/var/run/atrios-bt-pair-until"
 BUTTONS_STATE_FILE = "/var/run/atrios/buttons.json"
 SCREEN_MODE_FILE = "/var/run/atrios/screen_mode"
+AI_CONFIG_FILE = "/var/lib/atrios/ai.json"
+AI_STATUS_FILE = "/var/run/atrios/ai_status.json"
 DEVICE_FILE = "/etc/atrios-device"
 FB_RING = "/dev/fb5"
 FB_SCREEN = "/dev/fb0"
@@ -204,6 +206,35 @@ def is_bt_speaker_mode():
     except Exception:
         return False
 
+def get_ai_info():
+    info = {
+        "enabled": False,
+        "server": "ws://192.168.1.10:8090/voice",
+        "state": "disabled",
+        "last_asr": "",
+        "last_answer": "",
+        "error": "",
+    }
+    try:
+        if os.path.exists(AI_CONFIG_FILE):
+            with open(AI_CONFIG_FILE, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            info["enabled"] = bool(cfg.get("enabled", False))
+            info["server"] = str(cfg.get("server", info["server"]))
+    except Exception:
+        pass
+    try:
+        if os.path.exists(AI_STATUS_FILE):
+            with open(AI_STATUS_FILE, "r", encoding="utf-8") as f:
+                st = json.load(f)
+            info["state"] = str(st.get("state", "idle" if info["enabled"] else "disabled"))
+            info["last_asr"] = str(st.get("last_asr", ""))
+            info["last_answer"] = str(st.get("last_answer", ""))
+            info["error"] = str(st.get("error", ""))
+    except Exception:
+        pass
+    return info
+
 def get_buttons_state():
     state = {"action_pressed": False, "mic_muted": False}
     try:
@@ -272,6 +303,7 @@ def build_status_payload():
         "wifi": get_wifi_info(),
         "buttons": get_buttons_state(),
         "screen_mode": get_screen_mode(),
+        "ai": get_ai_info(),
         "bluetooth": {
             "adapter": "hci0",
             "name": meta["name"],
@@ -434,10 +466,22 @@ def process_command(cmd_obj):
         if mode == "volume":
             subprocess.Popen(["/usr/bin/atrios", "ring", "volume", str(get_current_volume())],
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        elif mode in ("rainbow", "off"):
+        elif mode in ("rainbow", "red", "blue", "green", "off"):
             subprocess.Popen(["/usr/bin/atrios", "ring", mode],
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return {"type": "action_response", "success": True, "message": f"Ring: {mode}"}
+
+    elif cmd == "set_ai":
+        if "server" in cmd_obj and str(cmd_obj.get("server", "")).strip():
+            subprocess.run(["/usr/bin/atrios", "ai", "server", str(cmd_obj["server"]).strip()],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+        if "enabled" in cmd_obj:
+            en = bool(cmd_obj["enabled"])
+            subprocess.run(["/usr/bin/atrios", "ai", "enable" if en else "disable"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+            subprocess.Popen(["/etc/init.d/S80atriai", "restart" if en else "stop"],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return build_status_payload()
 
     elif cmd == "bt_pair":
         secs = max(10, min(300, int(cmd_obj.get("seconds", 60))))
