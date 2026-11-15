@@ -52,17 +52,21 @@ apply_volume() {
     raw=$(volume_raw "$pct" 255)
     raw_hp=$(volume_raw "$pct" 191)
     sw=1
-    master_sw=0
+    master_sw=3
     mute_i2c="0x00"
     mute_es="0x11"
     if [ "$pct" -le 0 ]; then
         sw=0
-        master_sw=3
+        master_sw=0
         raw=0
         raw_hp=0
         mute_i2c="0x08"
         mute_es="0x00"
     fi
+
+    mkdir -p /var/run/atrios 2>/dev/null || true
+    (
+    flock -w 2 9 2>/dev/null || true
 
     # 1. ALSA hardware mixer controls (all speaker channels + headphone DAC)
     # Note: Ch1/Ch2 are hardware channel trims (159 = 0 dB nominal). Master is user volume.
@@ -116,6 +120,7 @@ apply_volume() {
         wpctl set-volume @DEFAULT_AUDIO_SINK@ "${pct}%" 2>/dev/null || true
         wpctl set-mute @DEFAULT_AUDIO_SINK@ $( [ "$pct" -le 0 ] && echo 1 || echo 0 ) 2>/dev/null || true
     fi
+    ) 9>/var/run/atrios/audio.lock
 }
 
 case "$ACTION" in
