@@ -48,6 +48,7 @@ DEFAULT_CONFIG = {
 }
 
 _button_triggered = False
+_resume_visual = False
 _current_phase = "idle"
 _current_ring_tag = "off"
 _current_screen_tag = "clock"
@@ -60,8 +61,16 @@ def _on_sigusr1(signum, frame):
 
 
 def _on_sigusr2(signum, frame):
-    if _current_phase != "idle":
-        set_vad_visual(_current_phase, force=True)
+    global _resume_visual
+    _resume_visual = True
+
+
+def check_resume_visual():
+    global _resume_visual
+    if _resume_visual:
+        _resume_visual = False
+        if _current_phase != "idle":
+            set_vad_visual(_current_phase, force=True)
 
 
 signal.signal(signal.SIGUSR1, _on_sigusr1)
@@ -313,6 +322,15 @@ def _write_screen_mode(mode):
         pass
 
 
+def _write_ring_mode(mode):
+    try:
+        os.makedirs("/var/run/atrios", exist_ok=True)
+        with open("/var/run/atrios/ring_mode", "w") as f:
+            f.write(mode)
+    except Exception:
+        pass
+
+
 def set_vad_visual(phase, force=False):
     """Trigger non-blocking LED ring & mini-screen animation for VAD/assistant phases."""
     global _current_phase, _current_ring_tag, _current_screen_tag, _ring_proc
@@ -343,6 +361,7 @@ def set_vad_visual(phase, force=False):
         screen_cmd = ["/usr/bin/atrios", "screen", "clock"]
         _write_screen_mode("clock")
 
+    _write_ring_mode(ring_tag)
     volume_override = os.path.exists(RING_OVERRIDE_FILE)
     ring_alive = (_ring_proc is not None and _ring_proc.poll() is None)
 
@@ -383,13 +402,17 @@ def play_audio_bytes(audio_bytes, sample_rate=48000):
             cmd = ["aplay", "-q", path]
         else:
             cmd = ["aplay", "-q", "-t", "raw", "-f", "S16_LE", "-r", str(int(sample_rate)), "-c", "1", path]
-        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         while proc.poll() is None:
+            check_resume_visual()
             if consume_button_trigger():
                 print("[atriai] funcbutton pressed during playback -> cancelled -> clock", flush=True)
                 proc.terminate()
                 break
             time.sleep(0.05)
+        if proc.returncode and proc.returncode != -15:
+            err = proc.stderr.read().decode("utf-8", errors="replace").strip() if proc.stderr else ""
+            print(f"[atriai] aplay rc={proc.returncode} err={err}", flush=True)
     finally:
         if proc and proc.poll() is None:
             try:
@@ -465,9 +488,12 @@ def send_phrase_to_server(server_url, pcm_bytes, wake_word=""):
         return last_asr, ""
 
     if audio:
+        print(f"[atriai] playing audio: {len(audio)} bytes @ {audio_sr} Hz", flush=True)
         write_status("speaking", last_asr=last_asr, last_answer=last_answer)
         set_vad_visual("speaking")
         play_audio_bytes(bytes(audio), sample_rate=audio_sr)
+    else:
+        print(f"[atriai] no audio bytes received for answer: {last_answer}", flush=True)
     set_vad_visual("idle")
     return last_asr, last_answer
 
@@ -519,6 +545,7 @@ def run_daemon():
 
             write_status("listening")
             while True:
+                check_resume_visual()
                 if is_mic_muted() or not load_config().get("enabled", False):
                     break
                 if consume_button_trigger():

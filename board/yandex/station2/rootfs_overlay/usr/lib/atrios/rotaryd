@@ -513,12 +513,34 @@ def _exit_volume_ring_override():
             os.unlink(RING_OVERRIDE_FILE)
     except Exception:
         pass
+    ai_active = False
+    try:
+        if os.path.exists("/var/run/atrios/ai_status.json"):
+            with open("/var/run/atrios/ai_status.json") as sf:
+                st = json.load(sf).get("state", "")
+                ai_active = st in ("thinking", "speaking")
+    except Exception:
+        pass
     try:
         if os.path.exists("/var/run/atrios/atriai.pid"):
             with open("/var/run/atrios/atriai.pid") as pf:
                 os.kill(int(pf.read().strip()), signal.SIGUSR2)
     except Exception:
         pass
+    if not ai_active:
+        try:
+            mode_path = "/var/run/atrios/ring_mode"
+            if os.path.exists(mode_path):
+                with open(mode_path) as mf:
+                    mode = mf.read().strip()
+                if mode in ("amber", "amber_green"):
+                    subprocess.Popen(["/usr/bin/atrios", "ring", mode, "0"],
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                elif mode in ("rainbow", "red", "blue", "green"):
+                    subprocess.Popen(["/usr/bin/atrios", "ring", mode],
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
 
 
 def _render_loop():

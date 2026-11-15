@@ -469,7 +469,16 @@ def process_command(cmd_obj):
             subprocess.Popen(["/usr/bin/atrios", "ring", "volume", str(get_current_volume())],
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         elif mode in ("rainbow", "amber", "amber_green", "red", "blue", "green", "off"):
-            subprocess.Popen(["/usr/bin/atrios", "ring", mode],
+            try:
+                os.makedirs("/var/run/atrios", exist_ok=True)
+                with open("/var/run/atrios/ring_mode", "w") as rf:
+                    rf.write(mode)
+            except Exception:
+                pass
+            cmd_args = ["/usr/bin/atrios", "ring", mode]
+            if mode in ("amber", "amber_green"):
+                cmd_args.append("0")
+            subprocess.Popen(cmd_args,
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return {"type": "action_response", "success": True, "message": f"Ring: {mode}"}
 
