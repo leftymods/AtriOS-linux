@@ -348,11 +348,11 @@ audit_alsa() {
     fi
 
     # 2. Verify playback switches unmuted
+    #    SY6045S Master Playback Switch has max=3, invert=1: 3 = both channels unmuted (reg 0x06=0x00), 0 = muted.
     for sw in "Woofer Master Playback Switch" \
-              "Tweeters Master Playback Switch" \
-              "Headphone Headphone Switch"; do
+              "Tweeters Master Playback Switch"; do
         sw_val=$(get_alsa_ctl "$sw")
-        if value_is_one_of "$sw_val" 1 true on yes; then
+        if value_is_one_of "$sw_val" 3; then
             log_verbose "  * ${sw}: ${sw_val} [OK]"
         else
             CHECK_ALSA_STATUS="FAIL"
@@ -361,6 +361,17 @@ audit_alsa() {
             return 1
         fi
     done
+
+    sw="Headphone Headphone Switch"
+    sw_val=$(get_alsa_ctl "$sw")
+    if value_is_one_of "$sw_val" 1 true on yes; then
+        log_verbose "  * ${sw}: ${sw_val} [OK]"
+    else
+        CHECK_ALSA_STATUS="FAIL"
+        CHECK_ALSA_MSG="${sw} is muted (${sw_val:-<missing>})"
+        log_error "ALSA mixer muted: ${CHECK_ALSA_MSG}"
+        return 1
+    fi
 
     # 3. Verify hardware SPK mute is disabled (inverted logic).
     #    The control only exists when the DT provides spk_mute-gpios.  On this
