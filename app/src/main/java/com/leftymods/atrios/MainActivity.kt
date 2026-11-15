@@ -75,6 +75,9 @@ fun AtriOSApp() {
                 sliderVol = s.volume.toFloat()
             },
             onVolumePush = { v -> sliderVol = v.toFloat() },
+            onButtonsPush = { action, mic ->
+                status = status.copy(actionPressed = action, micMuted = mic)
+            },
             onConnectionState = { ok, msg ->
                 connected = ok
                 connText = msg
@@ -182,6 +185,28 @@ fun AtriOSApp() {
                 item {
                     ElevatedCard(shape = RoundedCornerShape(24.dp)) {
                         Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                            Text("Верхние кнопки", style = MaterialTheme.typography.titleMedium)
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                                Text("Кнопка 1 (Действие / Play-Pause)")
+                                AssistChip(
+                                    onClick = {},
+                                    label = { Text(if (status.actionPressed) "Нажата" else "Отпущена") }
+                                )
+                            }
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                                Text("Кнопка 2 (Микрофон)")
+                                AssistChip(
+                                    onClick = {},
+                                    label = { Text(if (status.micMuted) "Выключен (Mute)" else "Включён") }
+                                )
+                            }
+                        }
+                    }
+                }
+
+                item {
+                    ElevatedCard(shape = RoundedCornerShape(24.dp)) {
+                        Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                                 Text("Громкость", style = MaterialTheme.typography.titleMedium)
                                 Text("${sliderVol.toInt()}%", fontWeight = FontWeight.Bold)
@@ -211,16 +236,16 @@ fun AtriOSApp() {
                         Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                             Text("LED-экран и кольцо", style = MaterialTheme.typography.titleMedium)
                             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                FilterChip(selected = false, onClick = {
+                                FilterChip(selected = status.screenMode == "clock", onClick = {
                                     client.sendCommand(JSONObject().put("cmd", "set_screen").put("mode", "clock"))
                                 }, label = { Text("Часы") })
-                                FilterChip(selected = false, onClick = {
+                                FilterChip(selected = status.screenMode == "kisser", onClick = {
                                     client.sendCommand(JSONObject().put("cmd", "set_screen").put("mode", "kisser"))
                                 }, label = { Text("Kisser") })
-                                FilterChip(selected = false, onClick = {
+                                FilterChip(selected = status.screenMode == "eyes", onClick = {
                                     client.sendCommand(JSONObject().put("cmd", "set_screen").put("mode", "eyes").put("state", "happy"))
                                 }, label = { Text("Глаза") })
-                                FilterChip(selected = false, onClick = {
+                                FilterChip(selected = status.screenMode == "off", onClick = {
                                     client.sendCommand(JSONObject().put("cmd", "set_screen").put("mode", "off"))
                                 }, label = { Text("Выкл") })
                             }

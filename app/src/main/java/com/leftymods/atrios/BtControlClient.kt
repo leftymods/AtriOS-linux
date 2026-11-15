@@ -32,13 +32,17 @@ data class SpeakerStatus(
     val btHidden: Boolean = false,
     val btDiscoverable: Boolean = false,
     val btPairRemainingSec: Int = 0,
-    val pairedDevices: List<String> = emptyList()
+    val pairedDevices: List<String> = emptyList(),
+    val actionPressed: Boolean = false,
+    val micMuted: Boolean = false,
+    val screenMode: String = "clock"
 )
 
 class BtControlClient(
     private val scope: CoroutineScope,
     private val onStatus: (SpeakerStatus) -> Unit,
     private val onVolumePush: (Int) -> Unit,
+    private val onButtonsPush: (Boolean, Boolean) -> Unit,
     private val onConnectionState: (Boolean, String) -> Unit
 ) {
     companion object {
@@ -110,6 +114,7 @@ class BtControlClient(
                 val audio = json.optJSONObject("audio") ?: JSONObject()
                 val wifi = json.optJSONObject("wifi") ?: JSONObject()
                 val bt = json.optJSONObject("bluetooth") ?: JSONObject()
+                val buttons = json.optJSONObject("buttons") ?: JSONObject()
                 val pairedArr: JSONArray = bt.optJSONArray("paired_devices") ?: JSONArray()
                 val paired = buildList {
                     for (i in 0 until pairedArr.length()) add(pairedArr.optString(i))
@@ -131,13 +136,21 @@ class BtControlClient(
                     btHidden = bt.optBoolean("hidden", false),
                     btDiscoverable = bt.optBoolean("discoverable", false),
                     btPairRemainingSec = bt.optInt("pair_remaining_sec", 0),
-                    pairedDevices = paired
+                    pairedDevices = paired,
+                    actionPressed = buttons.optBoolean("action_pressed", false),
+                    micMuted = buttons.optBoolean("mic_muted", false),
+                    screenMode = json.optString("screen_mode", "clock")
                 )
                 withContext(Dispatchers.Main) { onStatus(status) }
             }
             "volume_change" -> {
                 val vol = json.optInt("volume", 60)
                 withContext(Dispatchers.Main) { onVolumePush(vol) }
+            }
+            "buttons_change" -> {
+                val action = json.optBoolean("action_pressed", false)
+                val mic = json.optBoolean("mic_muted", false)
+                withContext(Dispatchers.Main) { onButtonsPush(action, mic) }
             }
         }
     }
