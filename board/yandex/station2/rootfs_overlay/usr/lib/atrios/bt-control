@@ -209,7 +209,8 @@ def is_bt_speaker_mode():
 def get_ai_info():
     info = {
         "enabled": False,
-        "server": "ws://192.168.1.10:8090/voice",
+        "server": "ws://192.168.1.106:8090/voice",
+        "wake_word": "Atri",
         "state": "disabled",
         "last_asr": "",
         "last_answer": "",
@@ -221,6 +222,7 @@ def get_ai_info():
                 cfg = json.load(f)
             info["enabled"] = bool(cfg.get("enabled", False))
             info["server"] = str(cfg.get("server", info["server"]))
+            info["wake_word"] = str(cfg.get("wake_word", info["wake_word"]))
     except Exception:
         pass
     try:
@@ -474,6 +476,10 @@ def process_command(cmd_obj):
     elif cmd == "set_ai":
         if "server" in cmd_obj and str(cmd_obj.get("server", "")).strip():
             subprocess.run(["/usr/bin/atrios", "ai", "server", str(cmd_obj["server"]).strip()],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+        if "wake_word" in cmd_obj:
+            ww = str(cmd_obj.get("wake_word", "")).strip() or "off"
+            subprocess.run(["/usr/bin/atrios", "ai", "wake", ww],
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
         if "enabled" in cmd_obj:
             en = bool(cmd_obj["enabled"])

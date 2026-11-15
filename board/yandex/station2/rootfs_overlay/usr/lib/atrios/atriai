@@ -13,6 +13,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import signal
 import socket
 import struct
@@ -32,11 +33,38 @@ PID_FILE = "/var/run/atrios/atriai.pid"
 
 DEFAULT_CONFIG = {
     "enabled": False,
-    "server": "ws://192.168.1.10:8090/voice",
+    "server": "ws://192.168.1.106:8090/voice",
+    "wake_word": "Atri",
     "vad_threshold": 650,
     "silence_ms": 600,
     "min_speech_ms": 400,
 }
+
+ATRI_WAKE_ALIASES = (
+    "atri",
+    "атри",
+    "атря",
+    "атрия",
+    "atria",
+    "этри",
+    "а три",
+    "о три",
+)
+
+
+def matches_wake_word(text, wake_word):
+    ww = (wake_word or "").strip().lower()
+    if not ww or ww in ("off", "none", "false"):
+        return True
+    norm = re.sub(r"[^\w\s]", " ", (text or "").lower().replace("ё", "е"))
+    norm = re.sub(r"\s+", " ", norm).strip()
+    if not norm:
+        return False
+    tokens = [t.strip() for t in ww.split(",") if t.strip()]
+    candidates = set(tokens)
+    if "atri" in candidates or "атри" in candidates:
+        candidates.update(ATRI_WAKE_ALIASES)
+    return any(c in norm for c in candidates)
 
 
 def load_config():
@@ -223,13 +251,16 @@ def play_wav_bytes(wav_bytes):
             pass
 
 
-def send_phrase_to_server(server_url, pcm_bytes):
+def send_phrase_to_server(server_url, pcm_bytes, wake_word=""):
     ws = SimpleWebSocket(server_url, timeout=20.0)
     last_asr = ""
     last_answer = ""
     audio = bytearray()
     try:
-        ws.send_json({"type": "start", "sample_rate": SR, "format": "pcm16", "lang": "ru"})
+        start_msg = {"type": "start", "sample_rate": SR, "format": "pcm16", "lang": "ru"}
+        if wake_word:
+            start_msg["wake_word"] = wake_word
+        ws.send_json(start_msg)
         ws.send_bytes(pcm_bytes)
         ws.send_json({"type": "end"})
 
@@ -252,6 +283,10 @@ def send_phrase_to_server(server_url, pcm_bytes):
                 audio.extend(payload)
     finally:
         ws.close()
+
+    if wake_word and not matches_wake_word(last_asr, wake_word):
+        print(f"[atriai] ignored (no wake word '{wake_word}'): {last_asr}", flush=True)
+        return last_asr, ""
 
     if audio:
         write_status("speaking", last_asr=last_asr, last_answer=last_answer)
@@ -326,7 +361,7 @@ def run_daemon():
             if len(buf) >= min_bytes:
                 write_status("thinking")
                 try:
-                    asr, ans = send_phrase_to_server(cfg["server"], bytes(buf))
+                    asr, ans = send_phrase_to_server(cfg["server"], bytes(buf), wake_word=cfg.get("wake_word", ""))
                     write_status("listening", last_asr=asr, last_answer=ans)
                 except Exception as e:
                     write_status("error", error=str(e))
@@ -362,13 +397,19 @@ def main():
         cfg["server"] = sys.argv[2]
         save_config(cfg)
         print(f"AtriAI server set to {cfg['server']}")
+    elif cmd == "wake" and len(sys.argv) > 2:
+        cfg = load_config()
+        ww = sys.argv[2].strip()
+        cfg["wake_word"] = "" if ww.lower() in ("off", "none", "false") else ww
+        save_config(cfg)
+        print(f"AtriAI wake_word set to {cfg['wake_word'] or '(off)'}")
     elif cmd == "ask" and len(sys.argv) > 2:
         cfg = load_config()
         with open(sys.argv[2], "rb") as f:
             data = f.read()
         if data[:4] == b"RIFF" and len(data) > 44:
             data = data[44:]
-        asr, ans = send_phrase_to_server(cfg["server"], data)
+        asr, ans = send_phrase_to_server(cfg["server"], data, wake_word=cfg.get("wake_word", ""))
         print(json.dumps({"asr": asr, "answer": ans}, ensure_ascii=False))
     else:
         cfg = load_config()
