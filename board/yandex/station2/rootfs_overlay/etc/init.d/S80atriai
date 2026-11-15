@@ -9,7 +9,7 @@ case "$1" in
     if grep -q '"enabled": *true' /var/lib/atrios/ai.json 2>/dev/null; then
       echo "[AtriAI] Starting voice assistant runtime..."
       pkill -f "/usr/lib/atrios/atriai daemon" 2>/dev/null || true
-      setsid "$DAEMON" daemon >"$LOG" 2>&1 </dev/null &
+      nohup python3 "$DAEMON" daemon >"$LOG" 2>&1 </dev/null &
     else
       echo "[AtriAI] Disabled in /var/lib/atrios/ai.json (skipping)"
     fi
