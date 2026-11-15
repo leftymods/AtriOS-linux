@@ -357,9 +357,10 @@ static void sy6045s_spk_on_work(struct work_struct *work)
 
 	if (debug)
 		dev_info(&sy->client->dev,
-			 "[SY6045S:%s] spk_on_work -> exiting standby (reg 0x22 &= ~0x30)\n",
+			 "[SY6045S:%s] spk_on_work -> exiting standby (reg 0x22 &= ~0x30, reg 0x02 &= ~0x30)\n",
 			 sy6045s_role_name(sy));
 	sy6045s_soc_update_bits(sy, 0x22, 0x30, 0x00);
+	sy6045s_soc_update_bits(sy, 0x02, 0x30, 0x00);
 }
 
 static void sy6045s_set_sby_mode_on(struct sy6045s_priv *sy)
