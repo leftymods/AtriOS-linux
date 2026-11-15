@@ -10,7 +10,9 @@ Enables direct peer-to-peer control from the Android Companion App over Bluetoot
 - Remote diagnostic chime & reboot
 """
 
+import glob
 import os
+import re
 import sys
 import time
 import json
@@ -21,8 +23,71 @@ import threading
 
 RFCOMM_PORT = 1
 VOLUME_FILE = "/var/lib/atrios/volume"
+BT_PAIRED_FILE = "/var/lib/atrios/bt_paired"
+BT_PAIR_UNTIL_FILE = "/var/run/atrios-bt-pair-until"
+DEVICE_FILE = "/etc/atrios-device"
 FB_RING = "/dev/fb5"
 FB_SCREEN = "/dev/fb0"
+
+def read_device_meta():
+    meta = {"name": "AtriStation Max", "codename": "station-max", "os": "AtriOS Nebula"}
+    try:
+        if os.path.exists(DEVICE_FILE):
+            with open(DEVICE_FILE, "r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("DEVICE_NAME="):
+                        meta["name"] = line.split("=", 1)[1].strip().strip('"').strip("'") or meta["name"]
+                    elif line.startswith("DEVICE_CODENAME="):
+                        meta["codename"] = line.split("=", 1)[1].strip().strip('"').strip("'") or meta["codename"]
+    except Exception:
+        pass
+    return meta
+
+def get_lux():
+    try:
+        for path in glob.glob("/sys/bus/iio/devices/iio:device*/in_illuminance_raw") + glob.glob("/sys/bus/iio/devices/iio:device*/in_illuminance_input"):
+            with open(path, "r") as f:
+                return int(float(f.read().strip()))
+    except Exception:
+        pass
+    return None
+
+def get_bt_privacy():
+    paired = []
+    try:
+        if os.path.exists(BT_PAIRED_FILE):
+            with open(BT_PAIRED_FILE, "r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    mac = line.strip()
+                    if re.match(r"^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$", mac):
+                        paired.append(mac.upper())
+    except Exception:
+        pass
+
+    pair_remaining = 0
+    try:
+        if os.path.exists(BT_PAIR_UNTIL_FILE):
+            with open(BT_PAIR_UNTIL_FILE, "r") as f:
+                rem = int(f.read().strip()) - int(time.time())
+            if rem > 0:
+                pair_remaining = rem
+    except Exception:
+        pass
+
+    discoverable = False
+    try:
+        out = subprocess.check_output(["hciconfig", "hci0"], timeout=2).decode("utf-8", errors="ignore")
+        discoverable = "ISCAN" in out
+    except Exception:
+        pass
+
+    return {
+        "discoverable": discoverable,
+        "hidden": bool(paired) and not discoverable and pair_remaining == 0,
+        "paired_devices": paired,
+        "pair_remaining_sec": pair_remaining,
+    }
 
 def get_cpu_temp():
     try:
@@ -112,15 +177,19 @@ def is_bt_speaker_mode():
 
 def build_status_payload():
     vol = get_current_volume()
+    meta = read_device_meta()
+    bt_priv = get_bt_privacy()
     return {
         "type": "status",
         "device": {
-            "model": "Yandex Station Max",
+            "model": meta["name"],
+            "codename": meta["codename"],
             "soc": "Amlogic S905X3 (SM1) quad Cortex-A55",
-            "os": "AtriOS Linux",
-            "kernel": "4.9.113-atrios",
+            "os": meta["os"],
+            "kernel": os.uname().release,
             "uptime_seconds": get_uptime_sec(),
             "cpu_temperature": get_cpu_temp(),
+            "lux": get_lux(),
             "memory": get_mem_info()
         },
         "audio": {
@@ -132,9 +201,13 @@ def build_status_payload():
         "wifi": get_wifi_info(),
         "bluetooth": {
             "adapter": "hci0",
-            "name": "Yandex Station Max",
+            "name": meta["name"],
             "transport": "RFCOMM SPP (Channel 1)",
-            "is_speaker_mode": is_bt_speaker_mode()
+            "is_speaker_mode": is_bt_speaker_mode(),
+            "discoverable": bt_priv["discoverable"],
+            "hidden": bt_priv["hidden"],
+            "paired_devices": bt_priv["paired_devices"],
+            "pair_remaining_sec": bt_priv["pair_remaining_sec"]
         }
     }
 
@@ -242,6 +315,48 @@ def process_command(cmd_obj):
             os.system("reboot")
         threading.Thread(target=do_reboot, daemon=True).start()
         return {"type": "action_response", "success": True, "message": "Rebooting in 1s"}
+
+    elif cmd == "set_screen":
+        mode = str(cmd_obj.get("mode", "clock"))
+        if mode == "ticker":
+            text = str(cmd_obj.get("text", "AtriOS"))
+            subprocess.Popen(["/usr/bin/atrios", "screen", "ticker", text],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        elif mode == "eyes":
+            state = str(cmd_obj.get("state", "happy"))
+            subprocess.Popen(["/usr/bin/atrios", "screen", "eyes", state],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        elif mode in ("clock", "kisser", "off"):
+            subprocess.Popen(["/usr/bin/atrios", "screen", mode],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return {"type": "action_response", "success": True, "message": f"Screen: {mode}"}
+
+    elif cmd == "set_ring":
+        mode = str(cmd_obj.get("mode", "off"))
+        if mode == "volume":
+            subprocess.Popen(["/usr/bin/atrios", "ring", "volume", str(get_current_volume())],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        elif mode in ("rainbow", "off"):
+            subprocess.Popen(["/usr/bin/atrios", "ring", mode],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return {"type": "action_response", "success": True, "message": f"Ring: {mode}"}
+
+    elif cmd == "bt_pair":
+        secs = max(10, min(300, int(cmd_obj.get("seconds", 60))))
+        subprocess.run(["/usr/bin/atrios", "bt", "pair", str(secs)],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+        return build_status_payload()
+
+    elif cmd == "bt_hide":
+        subprocess.run(["/usr/bin/atrios", "bt", "hide"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+        return build_status_payload()
+
+    elif cmd == "bt_unpair":
+        mac = str(cmd_obj.get("mac", "all"))
+        subprocess.run(["/usr/bin/atrios", "bt", "unpair", mac],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+        return build_status_payload()
 
     elif cmd == "wifi_connect":
         ssid = cmd_obj.get("ssid", "")

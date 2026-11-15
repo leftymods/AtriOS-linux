@@ -37,8 +37,7 @@ AtriOS - Yandex Station Max tools
   Buttons / knob monitor:
     atrios input
 
-  System & App:
-    atrios web [start|stop|status]       Material 3 Web Control App (port 8080)
+  System:
     atrios reset                          Factory reset (double confirmation)
     atrios ota [status|install|rollback]  OTA / SWUpdate firmware manager
     atrios info                           System info (fastfetch)
@@ -63,7 +62,6 @@ case "$c" in
   input|buttons)      exec /bin/sh $L/input "$@" ;;
   reset|factory-reset) exec /bin/sh $L/reset "$@" ;;
   ota|swupdate)       exec python3 $L/ota "$@" ;;
-  web|app|webui)      exec /bin/sh /etc/init.d/S65atrios-web "${1:-status}" ;;
   info|fetch|fastfetch) exec /bin/sh /usr/bin/fastfetch "$@" ;;
   ""|help|-h|--help)  usage ;;
   *) echo "atrios: unknown command '$c'"; echo; usage; exit 1 ;;
