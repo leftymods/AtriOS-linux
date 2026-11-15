@@ -42,7 +42,7 @@ DEFAULT_CONFIG = {
     "enabled": False,
     "server": "ws://192.168.1.106:8090/voice",
     "wake_word": "Atri,Алиса",
-    "vad_threshold": 420,
+    "vad_threshold": 650,
     "silence_ms": 600,
     "min_speech_ms": 400,
 }
@@ -409,6 +409,8 @@ def send_phrase_to_server(server_url, pcm_bytes, wake_word=""):
                         break
                     if wake_word and not matches_wake_word(last_asr, wake_word):
                         break
+                    if wake_word:
+                        set_vad_visual("thinking")
                 elif kind == "answer":
                     last_answer = ev.get("text", "")
                     print(f"[atriai] answer: {last_answer}", flush=True)
@@ -472,11 +474,12 @@ def run_daemon():
             pre_roll = deque(maxlen=10)
             speaking = False
             speech_hits = 0
+            warmup_frames = 3
             force_active = False
             wait_speech_ms = 0.0
             silence_ms = 0.0
             frame_ms = (FRAME_SAMPLES / SR) * 1000.0
-            vad_thr = float(cfg.get("vad_threshold", 420))
+            vad_thr = float(cfg.get("vad_threshold", 650))
             max_sil = float(cfg.get("silence_ms", 600))
             min_bytes = int(SR * 2 * (float(cfg.get("min_speech_ms", 400)) / 1000.0))
 
@@ -495,16 +498,18 @@ def run_daemon():
                     time.sleep(1.0)
                     break
                 chunk = downsample_48k_s32_stereo_to_16k_s16_mono(raw)
+                if warmup_frames > 0:
+                    warmup_frames -= 1
+                    pre_roll.append(chunk)
+                    continue
                 rms = pcm16_rms(chunk)
                 if rms >= vad_thr:
                     speech_hits += 1
-                    if not speaking and speech_hits >= 2:
+                    if not speaking and speech_hits >= 3:
                         speaking = True
                         for prev in pre_roll:
                             buf.extend(prev)
                         pre_roll.clear()
-                        if not force_active:
-                            set_vad_visual("vad")
                     if speaking:
                         silence_ms = 0.0
                         buf.extend(chunk)
@@ -533,7 +538,8 @@ def run_daemon():
 
             if speaking and len(buf) >= min_bytes:
                 write_status("thinking")
-                set_vad_visual("thinking")
+                if force_active:
+                    set_vad_visual("thinking")
                 try:
                     ww = "" if force_active else cfg.get("wake_word", "")
                     asr, ans = send_phrase_to_server(cfg["server"], bytes(buf), wake_word=ww)
@@ -543,7 +549,7 @@ def run_daemon():
                     set_vad_visual("idle")
                     print(f"[atriai] server error: {e}", flush=True)
                     time.sleep(2.0)
-            elif speaking or force_active:
+            elif force_active:
                 set_vad_visual("idle")
         except Exception as e:
             write_status("error", error=str(e))
