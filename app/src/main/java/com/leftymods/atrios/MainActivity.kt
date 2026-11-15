@@ -26,6 +26,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.leftymods.atrios.ui.theme.AtriOSTheme
+import kotlinx.coroutines.launch
 import org.json.JSONObject
 
 class MainActivity : ComponentActivity() {
@@ -68,6 +69,15 @@ fun AtriOSApp() {
     var wifiPass by remember { mutableStateOf("") }
     var showRebootDialog by remember { mutableStateOf(false) }
 
+    val appVersion = remember { AppUpdater.currentVersionName(context) }
+    var availableUpdate by remember { mutableStateOf<AppReleaseInfo?>(null) }
+    var updateProgress by remember { mutableStateOf<Float?>(null) }
+    var updateStatusText by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(Unit) {
+        availableUpdate = AppUpdater.checkForUpdate(context)
+    }
+
     val client = remember {
         BtControlClient(
             scope = scope,
@@ -106,6 +116,16 @@ fun AtriOSApp() {
                     }
                 },
                 actions = {
+                    IconButton(onClick = {
+                        scope.launch {
+                            updateStatusText = "Проверка обновлений..."
+                            val upd = AppUpdater.checkForUpdate(context)
+                            availableUpdate = upd
+                            updateStatusText = if (upd == null) "Установлена последняя версия (v$appVersion)" else null
+                        }
+                    }) {
+                        Icon(Icons.Rounded.SystemUpdate, contentDescription = "Проверить обновления")
+                    }
                     if (connected) {
                         IconButton(onClick = { client.disconnect() }) {
                             Icon(Icons.Rounded.BluetoothDisabled, contentDescription = "Отключить")
@@ -120,6 +140,59 @@ fun AtriOSApp() {
             verticalArrangement = Arrangement.spacedBy(14.dp),
             contentPadding = PaddingValues(vertical = 12.dp)
         ) {
+            availableUpdate?.let { upd ->
+                item {
+                    Card(
+                        shape = RoundedCornerShape(24.dp),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer)
+                    ) {
+                        Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text("Доступно обновление v${upd.version}", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                            if (upd.notes.isNotBlank()) {
+                                Text(upd.notes.take(240), style = MaterialTheme.typography.bodySmall)
+                            }
+                            updateProgress?.let { prog ->
+                                LinearProgressIndicator(progress = { prog }, modifier = Modifier.fillMaxWidth())
+                                Text("Загрузка: ${(prog * 100).toInt()}%", style = MaterialTheme.typography.labelSmall)
+                            }
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Button(
+                                    enabled = updateProgress == null,
+                                    onClick = {
+                                        scope.launch {
+                                            updateProgress = 0f
+                                            val res = AppUpdater.downloadAndInstall(context, upd) { p -> updateProgress = p }
+                                            updateProgress = null
+                                            res.onFailure { e ->
+                                                updateStatusText = "Ошибка обновления: ${e.message}"
+                                            }
+                                        }
+                                    }
+                                ) { Text(if (updateProgress != null) "Загрузка..." else "Обновить") }
+                                TextButton(enabled = updateProgress == null, onClick = { availableUpdate = null }) {
+                                    Text("Позже")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            updateStatusText?.let { msg ->
+                item {
+                    ElevatedCard(shape = RoundedCornerShape(16.dp)) {
+                        Row(
+                            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(msg, style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
+                            TextButton(onClick = { updateStatusText = null }) { Text("OK") }
+                        }
+                    }
+                }
+            }
+
             if (!hasPerms) {
                 item {
                     ElevatedCard(shape = RoundedCornerShape(24.dp)) {
