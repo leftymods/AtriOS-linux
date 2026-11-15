@@ -24,7 +24,7 @@
 
 ### 1. Конфигурация и сборка (`config/`, `scripts/`)
 * **Профили семейств и плат:** `config/families/*.conf` и `config/boards/*.conf` задают архитектуру, SoC, загрузчик, DTS и rootfs overlay для каждого устройства.
-* **Mainline U-Boot:** скрипт сборки и FIP-подписи `scripts/build_mainline_uboot.sh` с поддержкой USB OTG, `fastboot` и `aml_burn`.
+* **Mainline U-Boot:** скрипт сборки и FIP-подписи `scripts/build_mainline_uboot.sh` с поддержкой USB OTG и `fastboot`.
 * **Mainline Linux (`AtriOS-aml`):** единое дерево ядра Linux 7.x с внешним набором драйверов `drivers/atrios/` (подробный статус по платам — в [DRIVERS.md](DRIVERS.md)).
 
 ### 2. Userspace и сервисы (`rootfs_overlay`)
@@ -99,15 +99,14 @@ atrios reset                                        # Полный сброс у
 ./scripts/build_mainline_uboot.sh
 ```
 
-### Прошивка (Amlogic USB Burning Tool / Fastboot)
-1. **USB Burning Tool:** откройте собранный `.img` (`File -> Import image`), нажмите **Start**, переведите устройство в BootROM DFU и подключите по USB.
-2. **UART + Fastboot:** прервите загрузку в U-Boot (`fastboot 0`), затем прошейте разделы:
-   ```bash
-   fastboot flash bootloader u-boot.bin
-   fastboot flash boot boot.img
-   fastboot flash rootfs rootfs.ext4
-   fastboot reboot
-   ```
+### Прошивка (UART + Fastboot)
+Прервите загрузку в U-Boot (`fastboot 0`), затем прошейте разделы:
+```bash
+fastboot flash bootloader u-boot.bin
+fastboot flash boot boot.img
+fastboot flash rootfs rootfs.ext4
+fastboot reboot
+```
 
 ---
 
