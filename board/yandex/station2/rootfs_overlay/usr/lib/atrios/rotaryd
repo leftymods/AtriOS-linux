@@ -76,12 +76,32 @@ MIC_MUTE_ACTIVE_LOW = True
 KEY_PAGEUP = 104    # Knob CW
 KEY_PAGEDOWN = 109  # Knob CCW
 
+import json
+
+BUTTONS_STATE_FILE = "/var/run/atrios/buttons.json"
+
 mic_muted = False
+action_pressed = False
 ring_active = False
 is_fading = False
 current_volume = DEFAULT_VOLUME
 display_volume = float(DEFAULT_VOLUME)
 _alsa_lock = threading.Lock()
+
+
+def write_buttons_state():
+    """Persist top button states for bt-control / companion app."""
+    try:
+        os.makedirs(os.path.dirname(BUTTONS_STATE_FILE), exist_ok=True)
+        tmp = BUTTONS_STATE_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump({
+                "action_pressed": bool(action_pressed),
+                "mic_muted": bool(mic_muted),
+            }, f)
+        os.replace(tmp, BUTTONS_STATE_FILE)
+    except Exception:
+        pass
 
 
 def volume_to_raw(pct, zero_db_raw):
@@ -396,6 +416,7 @@ def clear_ring():
 def set_software_mic_mute(muted):
     global mic_muted
     mic_muted = bool(muted)
+    write_buttons_state()
 
     alsa_cmd = "mute" if mic_muted else "unmute"
     alsa_vol = "0%" if mic_muted else "100%"
@@ -536,6 +557,7 @@ def main():
     top_press_time = 0
     last_volume_time = 0.0
     apply_saved_volume()
+    write_buttons_state()
     last_enforce = time.time()
     last_scan = time.time()
     last_flush = time.time()
@@ -574,18 +596,23 @@ def main():
                                 set_software_mic_mute(pressed)
                             # Top Button 1: Assistant / Play-Pause
                             elif ev_code in (KEY_VOICECOMMAND, KEY_POWER):
+                                global action_pressed
                                 if ev_value == 1:
                                     top_press_time = time.time()
+                                    action_pressed = True
+                                    write_buttons_state()
                                 elif ev_value == 0:
+                                    action_pressed = False
+                                    write_buttons_state()
                                     duration = time.time() - top_press_time
                                     if duration >= 2.5:
                                         pass
-                                else:
-                                    try:
-                                        subprocess.run(["playerctl", "play-pause"],
-                                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                                    except Exception:
-                                        pass
+                                    else:
+                                        try:
+                                            subprocess.run(["playerctl", "play-pause"],
+                                                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                        except Exception:
+                                            pass
                     if net_vol_step != 0:
                         adjust_volume(net_vol_step)
                 except OSError:

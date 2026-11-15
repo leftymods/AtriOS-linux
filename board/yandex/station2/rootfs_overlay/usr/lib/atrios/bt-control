@@ -25,6 +25,8 @@ RFCOMM_PORT = 1
 VOLUME_FILE = "/var/lib/atrios/volume"
 BT_PAIRED_FILE = "/var/lib/atrios/bt_paired"
 BT_PAIR_UNTIL_FILE = "/var/run/atrios-bt-pair-until"
+BUTTONS_STATE_FILE = "/var/run/atrios/buttons.json"
+SCREEN_MODE_FILE = "/var/run/atrios/screen_mode"
 DEVICE_FILE = "/etc/atrios-device"
 FB_RING = "/dev/fb5"
 FB_SCREEN = "/dev/fb0"
@@ -175,6 +177,37 @@ def is_bt_speaker_mode():
     except Exception:
         return False
 
+def get_buttons_state():
+    state = {"action_pressed": False, "mic_muted": False}
+    try:
+        if os.path.exists(BUTTONS_STATE_FILE):
+            with open(BUTTONS_STATE_FILE, "r") as f:
+                data = json.load(f)
+            state["action_pressed"] = bool(data.get("action_pressed", False))
+            state["mic_muted"] = bool(data.get("mic_muted", False))
+    except Exception:
+        pass
+    return state
+
+def get_screen_mode():
+    try:
+        if os.path.exists(SCREEN_MODE_FILE):
+            with open(SCREEN_MODE_FILE, "r") as f:
+                m = f.read().strip()
+                if m:
+                    return m
+    except Exception:
+        pass
+    return "clock"
+
+def set_screen_mode(mode):
+    try:
+        os.makedirs(os.path.dirname(SCREEN_MODE_FILE), exist_ok=True)
+        with open(SCREEN_MODE_FILE, "w") as f:
+            f.write(str(mode))
+    except Exception:
+        pass
+
 def build_status_payload():
     vol = get_current_volume()
     meta = read_device_meta()
@@ -199,6 +232,8 @@ def build_status_payload():
             "speakers": "Silergy SY6045S (Woofer 30W + Tweeters 2x10W, 20V PVDD)"
         },
         "wifi": get_wifi_info(),
+        "buttons": get_buttons_state(),
+        "screen_mode": get_screen_mode(),
         "bluetooth": {
             "adapter": "hci0",
             "name": meta["name"],
@@ -231,6 +266,7 @@ def handle_client(client_sock, client_info):
 
     last_heartbeat = time.time()
     last_volume = get_current_volume()
+    last_buttons = get_buttons_state()
 
     while True:
         # Check incoming Bluetooth data
@@ -266,6 +302,15 @@ def handle_client(client_sock, client_info):
             try:
                 push_pkt = json.dumps({"type": "volume_change", "volume": cur_vol, "mute": cur_vol == 0}) + "\n"
                 client_sock.sendall(push_pkt.encode('utf-8'))
+            except Exception:
+                break
+
+        cur_buttons = get_buttons_state()
+        if cur_buttons != last_buttons:
+            last_buttons = cur_buttons
+            try:
+                btn_pkt = json.dumps({"type": "buttons_change", **cur_buttons}) + "\n"
+                client_sock.sendall(btn_pkt.encode('utf-8'))
             except Exception:
                 break
 
@@ -318,10 +363,17 @@ def process_command(cmd_obj):
 
     elif cmd == "set_screen":
         mode = str(cmd_obj.get("mode", "clock"))
+        subprocess.run(["pkill", "-f", "/usr/lib/atrios/light screen"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        set_screen_mode(mode)
         if mode == "ticker":
             text = str(cmd_obj.get("text", "AtriOS"))
-            subprocess.Popen(["/usr/bin/atrios", "screen", "ticker", text],
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            def run_ticker():
+                subprocess.run(["/usr/bin/atrios", "screen", "ticker", text],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                if get_screen_mode() == "ticker":
+                    set_screen_mode("clock")
+            threading.Thread(target=run_ticker, daemon=True).start()
         elif mode == "eyes":
             state = str(cmd_obj.get("state", "happy"))
             subprocess.Popen(["/usr/bin/atrios", "screen", "eyes", state],
@@ -329,7 +381,7 @@ def process_command(cmd_obj):
         elif mode in ("clock", "kisser", "off"):
             subprocess.Popen(["/usr/bin/atrios", "screen", mode],
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        return {"type": "action_response", "success": True, "message": f"Screen: {mode}"}
+        return build_status_payload()
 
     elif cmd == "set_ring":
         mode = str(cmd_obj.get("mode", "off"))

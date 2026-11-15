@@ -202,11 +202,28 @@ def send_frame(buf):
     except Exception:
         pass
 
+SCREEN_MODE_FILE = "/var/run/atrios/screen_mode"
+
+def get_screen_mode():
+    try:
+        if os.path.exists(SCREEN_MODE_FILE):
+            with open(SCREEN_MODE_FILE, "r") as f:
+                m = f.read().strip()
+                if m:
+                    return m
+    except Exception:
+        pass
+    return "clock"
+
 def main():
     last_rendered = ""
     last_bt = None
     last_tz = None
     while True:
+        if get_screen_mode() != "clock":
+            last_rendered = ""
+            time.sleep(0.5)
+            continue
         cur_tz = os.path.realpath("/etc/localtime") if os.path.exists("/etc/localtime") else None
         if cur_tz != last_tz:
             time.tzset()
