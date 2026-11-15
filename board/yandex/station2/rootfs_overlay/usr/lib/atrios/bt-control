@@ -378,13 +378,16 @@ def process_command(cmd_obj):
             state = str(cmd_obj.get("state", "happy"))
             subprocess.Popen(["/usr/bin/atrios", "screen", "eyes", state],
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        elif mode in ("clock", "kisser", "off"):
+        elif mode in ("kisser", "off"):
             subprocess.Popen(["/usr/bin/atrios", "screen", mode],
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # For "clock", screend immediately renders the 5x9 font once screen_mode == "clock"
         return build_status_payload()
 
     elif cmd == "set_ring":
         mode = str(cmd_obj.get("mode", "off"))
+        subprocess.run(["pkill", "-f", "/usr/lib/atrios/light ring"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         if mode == "volume":
             subprocess.Popen(["/usr/bin/atrios", "ring", "volume", str(get_current_volume())],
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
