@@ -32,7 +32,13 @@ FB_RING = "/dev/fb5"
 FB_SCREEN = "/dev/fb0"
 
 def read_device_meta():
-    meta = {"name": "AtriStation Max", "codename": "station-max", "os": "AtriOS Nebula"}
+    meta = {
+        "name": "AtriStation Max",
+        "codename": "station-max",
+        "rev": "rev1.0",
+        "os": "AtriOS Nebula",
+        "fw_version": "1.0",
+    }
     try:
         if os.path.exists(DEVICE_FILE):
             with open(DEVICE_FILE, "r", encoding="utf-8", errors="ignore") as f:
@@ -42,6 +48,27 @@ def read_device_meta():
                         meta["name"] = line.split("=", 1)[1].strip().strip('"').strip("'") or meta["name"]
                     elif line.startswith("DEVICE_CODENAME="):
                         meta["codename"] = line.split("=", 1)[1].strip().strip('"').strip("'") or meta["codename"]
+                    elif line.startswith("DEVICE_REV="):
+                        meta["rev"] = line.split("=", 1)[1].strip().strip('"').strip("'") or meta["rev"]
+    except Exception:
+        pass
+    try:
+        if os.path.exists("/etc/os-release"):
+            with open("/etc/os-release", "r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("PRETTY_NAME="):
+                        meta["os"] = line.split("=", 1)[1].strip().strip('"').strip("'") or meta["os"]
+                    elif line.startswith("VERSION="):
+                        meta["fw_version"] = line.split("=", 1)[1].strip().strip('"').strip("'") or meta["fw_version"]
+    except Exception:
+        pass
+    try:
+        if os.path.exists("/etc/atrios-version"):
+            with open("/etc/atrios-version", "r", encoding="utf-8", errors="ignore") as f:
+                v = f.read().strip()
+                if v:
+                    meta["fw_version"] = v
     except Exception:
         pass
     return meta
@@ -212,15 +239,26 @@ def build_status_payload():
     vol = get_current_volume()
     meta = read_device_meta()
     bt_priv = get_bt_privacy()
+    try:
+        time.tzset()
+    except Exception:
+        pass
+    tz_path = os.path.realpath("/etc/localtime") if os.path.exists("/etc/localtime") else ""
+    tz_name = tz_path.split("zoneinfo/")[-1] if "zoneinfo/" in tz_path else "UTC"
     return {
         "type": "status",
         "device": {
             "model": meta["name"],
             "codename": meta["codename"],
+            "rev": meta["rev"],
             "soc": "Amlogic S905X3 (SM1) quad Cortex-A55",
+            "arch": os.uname().machine,
             "os": meta["os"],
+            "fw_version": meta["fw_version"],
             "kernel": os.uname().release,
             "uptime_seconds": get_uptime_sec(),
+            "local_time": time.strftime("%Y-%m-%d %H:%M:%S %Z"),
+            "timezone": tz_name,
             "cpu_temperature": get_cpu_temp(),
             "lux": get_lux(),
             "memory": get_mem_info()
@@ -353,6 +391,11 @@ def process_command(cmd_obj):
         subprocess.Popen(["/usr/lib/atrios/audio", "test"],
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return {"type": "action_response", "success": True, "message": "Audio chime triggered"}
+
+    elif cmd == "sync_time":
+        subprocess.run(["/usr/bin/atrios", "time", "sync"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+        return build_status_payload()
 
     elif cmd == "reboot":
         def do_reboot():
