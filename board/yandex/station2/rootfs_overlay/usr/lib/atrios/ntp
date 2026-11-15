@@ -1,0 +1,141 @@
+#!/usr/bin/env python3
+"""
+AtriOS NTP Time Synchronization & RTC Helper (/usr/lib/atrios/ntp)
+Zero-dependency SNTP (UDP/123) client with RTC (/dev/rtc0) persistence.
+"""
+
+import os
+import socket
+import struct
+import subprocess
+import sys
+import time
+
+NTP_DELTA = 2208988800  # 1900-01-01 to 1970-01-01
+NTP_SERVERS = [
+    "ru.pool.ntp.org",
+    "pool.ntp.org",
+    "time.google.com",
+    "time.cloudflare.com",
+    "ntp1.stratum2.ru",
+]
+ZONEINFO_DIR = "/usr/share/zoneinfo"
+LOCALTIME = "/etc/localtime"
+TIMEZONE_FILE = "/etc/timezone"
+
+
+def sntp_query(host, timeout=3.0):
+    pkt = b"\x1b" + 47 * b"\x00"
+    addr_info = socket.getaddrinfo(host, 123, socket.AF_INET, socket.SOCK_DGRAM)
+    ip = addr_info[0][4][0]
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(timeout)
+    try:
+        t0 = time.time()
+        sock.sendto(pkt, (ip, 123))
+        data, _ = sock.recvfrom(1024)
+        t1 = time.time()
+    finally:
+        sock.close()
+    if len(data) < 48:
+        raise RuntimeError("short NTP response")
+    sec, frac = struct.unpack("!II", data[40:48])
+    if sec <= NTP_DELTA:
+        raise RuntimeError("invalid NTP timestamp")
+    unix_ts = (sec - NTP_DELTA) + (frac / 4294967296.0) + max(0.0, (t1 - t0) / 2.0)
+    return unix_ts
+
+
+def set_system_time(unix_ts):
+    try:
+        time.clock_settime(time.CLOCK_REALTIME, unix_ts)
+    except Exception:
+        t_str = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(unix_ts))
+        subprocess.run(["date", "-u", "-s", t_str], check=True)
+    for hw in ("/sbin/hwclock", "/usr/sbin/hwclock"):
+        if os.path.exists(hw):
+            subprocess.run([hw, "-w", "-u"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            break
+
+
+def sync_once(quiet=False):
+    last_err = None
+    for srv in NTP_SERVERS:
+        try:
+            ts = sntp_query(srv, timeout=3.0)
+            set_system_time(ts)
+            if not quiet:
+                print(f"[atrios-ntp] Synced via {srv}: {time.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+            return True
+        except Exception as e:
+            last_err = e
+    if not quiet:
+        print(f"[atrios-ntp] Sync failed: {last_err}", file=sys.stderr)
+    return False
+
+
+def set_timezone(tz_name):
+    target = os.path.join(ZONEINFO_DIR, tz_name)
+    if not os.path.exists(target):
+        print(f"Error: timezone '{tz_name}' not found in {ZONEINFO_DIR}", file=sys.stderr)
+        sys.exit(1)
+    try:
+        if os.path.lexists(LOCALTIME):
+            os.unlink(LOCALTIME)
+        os.symlink(target, LOCALTIME)
+        with open(TIMEZONE_FILE, "w") as f:
+            f.write(tz_name + "\n")
+        print(f"[atrios-ntp] Timezone set to {tz_name} ({time.strftime('%Y-%m-%d %H:%M:%S %Z')})")
+    except Exception as e:
+        print(f"Error setting timezone: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def run_daemon():
+    # Restore from RTC immediately if system clock is still at 1970
+    if time.time() < 1600000000:
+        for hw in ("/sbin/hwclock", "/usr/sbin/hwclock"):
+            if os.path.exists(hw):
+                subprocess.run([hw, "-s", "-u"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                break
+
+    # Retry rapidly at boot while Wi-Fi/DHCP comes up, then re-sync every 6h
+    while True:
+        if sync_once(quiet=False):
+            time.sleep(6 * 3600)
+        else:
+            time.sleep(10)
+
+
+def show_status():
+    tz = "UTC"
+    if os.path.exists(TIMEZONE_FILE):
+        with open(TIMEZONE_FILE, "r") as f:
+            tz = f.read().strip() or tz
+    elif os.path.islink(LOCALTIME):
+        tz = os.readlink(LOCALTIME).replace(ZONEINFO_DIR + "/", "")
+    print(f"Local time : {time.strftime('%Y-%m-%d %H:%M:%S %Z (%z)')}")
+    print(f"UTC time   : {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}")
+    print(f"Timezone   : {tz}")
+
+
+def main():
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "status"
+    if cmd in ("sync", "now"):
+        sys.exit(0 if sync_once() else 1)
+    elif cmd == "daemon":
+        run_daemon()
+    elif cmd in ("tz", "timezone"):
+        if len(sys.argv) < 3:
+            print("Usage: atrios time tz <Region/City>  (e.g. Europe/Moscow)")
+            sys.exit(1)
+        set_timezone(sys.argv[2])
+    elif cmd == "status":
+        show_status()
+    else:
+        print("Usage: atrios time [status|sync|tz <Region/City>|daemon]")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

@@ -110,7 +110,7 @@ case "$CMD" in
       ip link set wlan0 up
       wpa_supplicant -B -i wlan0 -c "$CONF" -D nl80211,wext
       sleep 2
-      udhcpc -i wlan0 -n -q -t 5 2>/dev/null &
+      udhcpc -i wlan0 -n -q -t 5 2>/dev/null && (python3 /usr/lib/atrios/ntp sync >/dev/null 2>&1 &)
       echo "Connection requested. Run 'atrios wifi' to check status."
     else
       ip -4 addr show wlan0 2>/dev/null || ip link show wlan0 2>/dev/null

@@ -38,6 +38,7 @@ AtriOS - Yandex Station Max tools
     atrios input
 
   System:
+    atrios time [status|sync|tz Zone]     NTP time sync & timezone
     atrios reset                          Factory reset (double confirmation)
     atrios ota [status|install|rollback]  OTA / SWUpdate firmware manager
     atrios info                           System info (fastfetch)
@@ -62,6 +63,7 @@ case "$c" in
   input|buttons)      exec /bin/sh $L/input "$@" ;;
   reset|factory-reset) exec /bin/sh $L/reset "$@" ;;
   ota|swupdate)       exec python3 $L/ota "$@" ;;
+  time|ntp)           exec python3 $L/ntp "$@" ;;
   info|fetch|fastfetch) exec /bin/sh /usr/bin/fastfetch "$@" ;;
   ""|help|-h|--help)  usage ;;
   *) echo "atrios: unknown command '$c'"; echo; usage; exit 1 ;;

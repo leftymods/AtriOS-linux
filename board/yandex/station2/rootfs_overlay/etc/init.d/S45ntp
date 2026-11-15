@@ -1,0 +1,47 @@
+#!/bin/sh
+# /etc/init.d/S45ntp - Restore RTC clock and keep system time synced via NTP
+
+PIDFILE="/var/run/atrios-ntp.pid"
+
+case "$1" in
+  start)
+    echo "[AtriOS] Restoring RTC and starting NTP time sync..."
+    mkdir -p /var/run /var/log 2>/dev/null || true
+
+    # Default timezone to Europe/Moscow if still on UTC and no /etc/timezone override
+    if [ ! -f /etc/timezone ] && [ -f /usr/share/zoneinfo/Europe/Moscow ]; then
+      ln -sf /usr/share/zoneinfo/Europe/Moscow /etc/localtime 2>/dev/null || true
+    fi
+
+    # Restore system clock from hardware RTC (/dev/rtc0) before Wi-Fi is up
+    hwclock -s -u 2>/dev/null || true
+
+    if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null; then
+      exit 0
+    fi
+    if [ -f /usr/lib/atrios/ntp ]; then
+      python3 /usr/lib/atrios/ntp daemon >/var/log/atrios-ntp.log 2>&1 &
+      echo "$!" > "$PIDFILE"
+    fi
+    ;;
+  stop)
+    if [ -f "$PIDFILE" ]; then
+      kill "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null || true
+      rm -f "$PIDFILE"
+    fi
+    pkill -f "/usr/lib/atrios/ntp daemon" 2>/dev/null || true
+    ;;
+  restart)
+    "$0" stop
+    sleep 1
+    "$0" start
+    ;;
+  status)
+    python3 /usr/lib/atrios/ntp status 2>/dev/null || date
+    ;;
+  *)
+    echo "Usage: $0 {start|stop|restart|status}"
+    exit 1
+    ;;
+esac
+exit 0
