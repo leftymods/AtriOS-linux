@@ -8,11 +8,22 @@ mkdir -p /run/network /var/run/network
 case "$1" in
   start)
 	printf "Starting network: "
+	ip link set lo up 2>/dev/null || true
 	python3 -c "import socket, struct, fcntl; s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); ifr = struct.pack('16sH', b'wlan0', 0); res = fcntl.ioctl(s.fileno(), 0x8913, ifr); flags = struct.unpack('16sH', res)[1] | 1; fcntl.ioctl(s.fileno(), 0x8914, struct.pack('16sH', b'wlan0', flags))" 2>/dev/null || true
+	if [ -f /etc/wpa_supplicant.conf ] && command -v wpa_supplicant >/dev/null 2>&1; then
+		if ! pgrep -x wpa_supplicant >/dev/null 2>&1; then
+			wpa_supplicant -B -i wlan0 -c /etc/wpa_supplicant.conf -D nl80211,wext >/dev/null 2>&1 || true
+		fi
+		if command -v udhcpc >/dev/null 2>&1 && ! pgrep -f "udhcpc.*wlan0" >/dev/null 2>&1; then
+			udhcpc -b -i wlan0 -x hostname:atrios -p /var/run/udhcpc.wlan0.pid >/dev/null 2>&1 || true
+		fi
+	fi
 	echo "OK"
 	;;
   stop)
 	printf "Stopping network: "
+	pkill -f "udhcpc.*wlan0" 2>/dev/null || true
+	pkill -x wpa_supplicant 2>/dev/null || true
 	echo "OK"
 	;;
   restart|reload)

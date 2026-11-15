@@ -8,6 +8,7 @@ Pure Python 3 stdlib implementation of the leftymods/AtriAI column protocol:
 - Plays returned WAV response via aplay and logs ASR/route/answer events
 """
 
+import array
 import base64
 from collections import deque
 import hashlib
@@ -26,10 +27,10 @@ import urllib.parse
 
 SR = 16000
 CAP_SR = 48000
-CAP_CH = 2
+CAP_CH = 8
 FRAME_SAMPLES = 512
 FRAME_BYTES = FRAME_SAMPLES * 2
-CAP_FRAME_BYTES = FRAME_SAMPLES * 3 * CAP_CH * 4  # 48kHz 2ch S32_LE -> 16kHz 1ch S16_LE
+CAP_FRAME_BYTES = FRAME_SAMPLES * 3 * CAP_CH * 4  # 48kHz 8ch S32_LE -> 16kHz 1ch S16_LE
 CONFIG_FILE = "/var/lib/atrios/ai.json"
 STATUS_FILE = "/var/run/atrios/ai_status.json"
 BUTTONS_FILE = "/var/run/atrios/buttons.json"
@@ -41,7 +42,7 @@ RING_OVERRIDE_FILE = "/var/run/atrios/ring_override"
 DEFAULT_CONFIG = {
     "enabled": False,
     "server": "ws://192.168.1.106:8090/voice",
-    "wake_word": "Atri,Алиса",
+    "wake_word": "Atri",
     "vad_threshold": 650,
     "silence_ms": 600,
     "min_speech_ms": 400,
@@ -90,13 +91,25 @@ def consume_button_trigger():
     return hit
 
 
-def downsample_48k_s32_stereo_to_16k_s16_mono(raw_bytes):
-    n_i32 = len(raw_bytes) // 4
-    if n_i32 < 6:
+def downsample_48k_s32_8ch_to_16k_s16_mono(raw_bytes):
+    n_i32 = (len(raw_bytes) // 4)
+    stride = CAP_CH * 3  # 8ch * 3 (48kHz -> 16kHz) = 24 int32s per output sample
+    if n_i32 < stride:
         return b""
-    samples = struct.unpack(f"<{n_i32}i", raw_bytes[:n_i32 * 4])
-    mono16 = [max(-32768, min(32767, s >> 11)) for s in samples[::6]]
-    return struct.pack(f"<{len(mono16)}h", *mono16)
+    samples = array.array("i", raw_bytes[:n_i32 * 4])
+    out = array.array("h")
+    limit = n_i32 - CAP_CH + 1
+    for i in range(0, limit, stride):
+        s = (
+            samples[i] + samples[i + 1] + samples[i + 2] + samples[i + 3]
+            + samples[i + 4] + samples[i + 5] + samples[i + 6] + samples[i + 7]
+        ) >> 14
+        if s > 32767:
+            s = 32767
+        elif s < -32768:
+            s = -32768
+        out.append(s)
+    return out.tobytes()
 
 ATRI_WAKE_ALIASES = (
     "atri",
@@ -502,6 +515,12 @@ def run_daemon():
     os.makedirs(os.path.dirname(PID_FILE), exist_ok=True)
     with open(PID_FILE, "w") as f:
         f.write(str(os.getpid()))
+    # Clear any stale button trigger from before daemon startup/reboot.
+    try:
+        if os.path.exists(TRIGGER_FILE):
+            os.unlink(TRIGGER_FILE)
+    except Exception:
+        pass
 
     cfg = load_config()
     if not cfg.get("enabled", False):
@@ -528,7 +547,7 @@ def run_daemon():
             proc = subprocess.Popen(
                 ["arecord", "-q", "-D", "hw:0,3", "-t", "raw", "-f", "S32_LE", "-r", str(CAP_SR), "-c", str(CAP_CH)],
                 stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
             )
             buf = bytearray()
             pre_roll = deque(maxlen=10)
@@ -562,10 +581,19 @@ def run_daemon():
                     print("[atriai] funcbutton pressed -> listening without wake word (5s timeout)", flush=True)
                 raw = proc.stdout.read(CAP_FRAME_BYTES)
                 if not raw or len(raw) < CAP_FRAME_BYTES:
-                    print("[atriai] arecord stream ended, retrying...", flush=True)
+                    err_msg = ""
+                    try:
+                        proc.wait(timeout=0.5)
+                        err_msg = proc.stderr.read().decode("utf-8", errors="ignore").strip()
+                    except Exception:
+                        pass
+                    if err_msg:
+                        print(f"[atriai] arecord stream ended ({err_msg}), retrying...", flush=True)
+                    else:
+                        print("[atriai] arecord stream ended, retrying...", flush=True)
                     time.sleep(1.0)
                     break
-                chunk = downsample_48k_s32_stereo_to_16k_s16_mono(raw)
+                chunk = downsample_48k_s32_8ch_to_16k_s16_mono(raw)
                 if warmup_frames > 0:
                     warmup_frames -= 1
                     pre_roll.append(chunk)
