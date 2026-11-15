@@ -66,6 +66,7 @@ fun AtriOSApp() {
     var tickerText by remember { mutableStateOf("") }
     var wifiSsid by remember { mutableStateOf("") }
     var wifiPass by remember { mutableStateOf("") }
+    var showRebootDialog by remember { mutableStateOf(false) }
 
     val client = remember {
         BtControlClient(
@@ -338,7 +339,71 @@ fun AtriOSApp() {
                         }
                     }
                 }
+
+                item {
+                    ElevatedCard(shape = RoundedCornerShape(24.dp)) {
+                        Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text("Об устройстве", style = MaterialTheme.typography.titleMedium)
+                            InfoRow("Модель", "${status.model} (${status.codename})")
+                            InfoRow("Ревизия", status.rev)
+                            InfoRow("Прошивка", status.fwVersion)
+                            InfoRow("ОС", status.os)
+                            InfoRow("Ядро", "${status.kernel} (${status.arch})")
+                            InfoRow("Платформа", status.soc)
+                            if (status.speakers.isNotBlank()) {
+                                InfoRow("Акустика", status.speakers)
+                            }
+                            if (status.localTime.isNotBlank()) {
+                                InfoRow("Время", "${status.localTime} (${status.timezone})")
+                            }
+                            InfoRow("Аптайм", formatUptime(status.uptimeSec))
+                            InfoRow("Bluetooth A2DP", if (status.isSpeakerMode) "Активен" else "Ожидание")
+                            Spacer(Modifier.height(4.dp))
+                            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                FilledTonalButton(onClick = {
+                                    client.sendCommand(JSONObject().put("cmd", "sync_time"))
+                                }) { Text("Синхр. время (NTP)") }
+                                OutlinedButton(onClick = { showRebootDialog = true }) {
+                                    Text("Перезагрузить")
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
+
+    if (showRebootDialog) {
+        AlertDialog(
+            onDismissRequest = { showRebootDialog = false },
+            title = { Text("Перезагрузить колонку?") },
+            text = { Text("Соединение по Bluetooth будет временно прервано на время загрузки.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    showRebootDialog = false
+                    client.sendCommand(JSONObject().put("cmd", "reboot"))
+                }) { Text("Перезагрузить") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showRebootDialog = false }) { Text("Отмена") }
+            }
+        )
+    }
+}
+
+@Composable
+private fun InfoRow(label: String, value: String) {
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+        Text(label, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Spacer(Modifier.width(12.dp))
+        Text(value, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Medium)
+    }
+}
+
+private fun formatUptime(sec: Int): String {
+    val h = sec / 3600
+    val m = (sec % 3600) / 60
+    val s = sec % 60
+    return if (h > 0) "${h}ч ${m}м ${s}с" else "${m}м ${s}с"
 }
