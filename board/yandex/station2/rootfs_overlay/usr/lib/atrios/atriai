@@ -236,6 +236,35 @@ class SimpleWebSocket:
             pass
 
 
+def set_vad_visual(phase):
+    """Trigger non-blocking LED ring & mini-screen animation for VAD/assistant phases."""
+    ring_cmd = None
+    screen_cmd = None
+    if phase == "vad":
+        ring_cmd = ["/usr/bin/atrios", "ring", "blue"]
+        screen_cmd = ["/usr/bin/atrios", "screen", "eyes", "wide"]
+    elif phase == "thinking":
+        ring_cmd = ["/usr/bin/atrios", "ring", "rainbow"]
+        screen_cmd = ["/usr/bin/atrios", "screen", "eyes", "animate"]
+    elif phase == "speaking":
+        ring_cmd = ["/usr/bin/atrios", "ring", "green"]
+        screen_cmd = ["/usr/bin/atrios", "screen", "eyes", "happy"]
+    elif phase == "idle":
+        ring_cmd = ["/usr/bin/atrios", "ring", "off"]
+        screen_cmd = ["/usr/bin/atrios", "screen", "clock"]
+
+    try:
+        subprocess.run(["pkill", "-f", "/usr/lib/atrios/light"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+    for cmd in (ring_cmd, screen_cmd):
+        if cmd:
+            try:
+                subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception:
+                pass
+
+
 def play_wav_bytes(wav_bytes):
     if not wav_bytes:
         return
@@ -286,11 +315,14 @@ def send_phrase_to_server(server_url, pcm_bytes, wake_word=""):
 
     if wake_word and not matches_wake_word(last_asr, wake_word):
         print(f"[atriai] ignored (no wake word '{wake_word}'): {last_asr}", flush=True)
+        set_vad_visual("idle")
         return last_asr, ""
 
     if audio:
         write_status("speaking", last_asr=last_asr, last_answer=last_answer)
+        set_vad_visual("speaking")
         play_wav_bytes(bytes(audio))
+    set_vad_visual("idle")
     return last_asr, last_answer
 
 
@@ -343,6 +375,8 @@ def run_daemon():
                     break
                 rms = pcm16_rms(chunk)
                 if rms >= vad_thr:
+                    if not speaking:
+                        set_vad_visual("vad")
                     speaking = True
                     silence_ms = 0.0
                     buf.extend(chunk)
@@ -360,13 +394,17 @@ def run_daemon():
 
             if len(buf) >= min_bytes:
                 write_status("thinking")
+                set_vad_visual("thinking")
                 try:
                     asr, ans = send_phrase_to_server(cfg["server"], bytes(buf), wake_word=cfg.get("wake_word", ""))
                     write_status("listening", last_asr=asr, last_answer=ans)
                 except Exception as e:
                     write_status("error", error=str(e))
+                    set_vad_visual("idle")
                     print(f"[atriai] server error: {e}", flush=True)
                     time.sleep(2.0)
+            elif speaking:
+                set_vad_visual("idle")
         except Exception as e:
             write_status("error", error=str(e))
             if proc:
