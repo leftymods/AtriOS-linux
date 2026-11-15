@@ -261,9 +261,18 @@ class SimpleWebSocket:
     def send_bytes(self, data):
         self.send_frame(0x2, data)
 
-    def recv_frame(self):
+    def recv_frame(self, poll_cancel=None, total_timeout=25.0):
+        deadline = time.time() + total_timeout
+        self.sock.settimeout(0.2)
         while True:
-            b1, b2 = self._recv_exact(2)
+            if poll_cancel and poll_cancel():
+                return None, None
+            if time.time() > deadline:
+                raise TimeoutError("timed out")
+            try:
+                b1, b2 = self._recv_exact(2)
+            except socket.timeout:
+                continue
             opcode = b1 & 0x0F
             masked = (b2 & 0x80) != 0
             length = b2 & 0x7F
@@ -368,13 +377,25 @@ def play_audio_bytes(audio_bytes, sample_rate=48000):
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tf:
         tf.write(audio_bytes)
         path = tf.name
+    proc = None
     try:
         if is_wav:
             cmd = ["aplay", "-q", path]
         else:
             cmd = ["aplay", "-q", "-t", "raw", "-f", "S16_LE", "-r", str(int(sample_rate)), "-c", "1", path]
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        while proc.poll() is None:
+            if consume_button_trigger():
+                print("[atriai] funcbutton pressed during playback -> cancelled -> clock", flush=True)
+                proc.terminate()
+                break
+            time.sleep(0.05)
     finally:
+        if proc and proc.poll() is None:
+            try:
+                proc.kill()
+            except Exception:
+                pass
         try:
             os.unlink(path)
         except Exception:
@@ -382,11 +403,12 @@ def play_audio_bytes(audio_bytes, sample_rate=48000):
 
 
 def send_phrase_to_server(server_url, pcm_bytes, wake_word=""):
-    ws = SimpleWebSocket(server_url, timeout=20.0)
+    ws = SimpleWebSocket(server_url, timeout=25.0)
     last_asr = ""
     last_answer = ""
     audio = bytearray()
     audio_sr = 48000
+    cancelled = False
     try:
         start_msg = {"type": "start", "sample_rate": SR, "format": "pcm16", "lang": "ru"}
         if wake_word:
@@ -396,7 +418,15 @@ def send_phrase_to_server(server_url, pcm_bytes, wake_word=""):
         ws.send_json({"type": "end"})
 
         while True:
-            opcode, payload = ws.recv_frame()
+            opcode, payload = ws.recv_frame(poll_cancel=consume_button_trigger, total_timeout=25.0)
+            if opcode is None:
+                cancelled = True
+                print("[atriai] funcbutton pressed during server request -> cancelled -> clock", flush=True)
+                try:
+                    ws.send_json({"type": "barge_in"})
+                except Exception:
+                    pass
+                break
             if opcode == 0x8:
                 break
             if opcode == 0x1:
@@ -407,7 +437,11 @@ def send_phrase_to_server(server_url, pcm_bytes, wake_word=""):
                     print(f"[atriai] asr: {last_asr}", flush=True)
                     if not last_asr.strip():
                         break
-                    if wake_word and not matches_wake_word(last_asr, wake_word):
+                    if cancelled:
+        set_vad_visual("idle")
+        return "", ""
+
+    if wake_word and not matches_wake_word(last_asr, wake_word):
                         break
                     if wake_word:
                         set_vad_visual("thinking")
@@ -424,6 +458,10 @@ def send_phrase_to_server(server_url, pcm_bytes, wake_word=""):
                 audio.extend(payload)
     finally:
         ws.close()
+
+    if cancelled:
+        set_vad_visual("idle")
+        return "", ""
 
     if wake_word and not matches_wake_word(last_asr, wake_word):
         print(f"[atriai] ignored (no wake word '{wake_word}'): {last_asr}", flush=True)
@@ -474,7 +512,7 @@ def run_daemon():
             pre_roll = deque(maxlen=10)
             speaking = False
             speech_hits = 0
-            warmup_frames = 3
+            warmup_frames = 20
             force_active = False
             wait_speech_ms = 0.0
             silence_ms = 0.0
@@ -488,6 +526,13 @@ def run_daemon():
                 if is_mic_muted() or not load_config().get("enabled", False):
                     break
                 if consume_button_trigger():
+                    if force_active:
+                        print("[atriai] funcbutton pressed again -> cancelled -> clock", flush=True)
+                        force_active = False
+                        speaking = False
+                        buf.clear()
+                        set_vad_visual("idle")
+                        break
                     force_active = True
                     wait_speech_ms = 0.0
                     set_vad_visual("vad")
