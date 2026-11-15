@@ -91,24 +91,21 @@ FONT_5X7 = {
     'Z': [0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b10000, 0b11111],
 }
 
-# 5x13 seven-segment clock face, used only by the clock.  The rest of the
-# UI keeps the compact 5x7 font above.
-CLOCK_FONT_5X13 = {
-    '0': [0b01110, 0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110, 0b01110],
-    '1': [0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110, 0b01110],
-    '2': [0b01110, 0b01110, 0b10001, 0b00001, 0b00001, 0b00010, 0b00100, 0b01000, 0b10000, 0b10000, 0b10000, 0b11111, 0b11111],
-    '3': [0b11110, 0b11110, 0b00001, 0b00001, 0b00001, 0b01110, 0b01110, 0b00001, 0b00001, 0b00001, 0b00001, 0b11110, 0b11110],
-    '4': [0b00010, 0b00110, 0b01010, 0b10010, 0b10010, 0b10010, 0b11111, 0b11111, 0b00010, 0b00010, 0b00010, 0b00010, 0b00010],
-    '5': [0b11111, 0b11111, 0b10000, 0b10000, 0b10000, 0b11110, 0b11110, 0b00001, 0b00001, 0b00001, 0b00001, 0b11110, 0b11110],
-    '6': [0b00110, 0b01100, 0b10000, 0b10000, 0b10000, 0b11110, 0b11110, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110, 0b01110],
-    '7': [0b11111, 0b11111, 0b00001, 0b00010, 0b00010, 0b00100, 0b00100, 0b01000, 0b01000, 0b01000, 0b01000, 0b01000, 0b01000],
-    '8': [0b01110, 0b01110, 0b10001, 0b10001, 0b10001, 0b01110, 0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110, 0b01110],
-    '9': [0b01110, 0b01110, 0b10001, 0b10001, 0b10001, 0b01111, 0b01111, 0b00001, 0b00001, 0b00001, 0b00010, 0b01100, 0b01100],
+# Clean 5x9 clock font matching screend (Yandex clock_large.gif):
+# 4 digits (5px wide) + 1 colon (1px wide) + 4 spaces (1px wide) = 25px total width.
+CLOCK_FONT_5X9 = {
+    '0': [0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110],
+    '1': [0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110],
+    '2': [0b01110, 0b10001, 0b00001, 0b00001, 0b00110, 0b01000, 0b10000, 0b10000, 0b11111],
+    '3': [0b01110, 0b10001, 0b00001, 0b00001, 0b01110, 0b00001, 0b00001, 0b10001, 0b01110],
+    '4': [0b10001, 0b10001, 0b10001, 0b10001, 0b01111, 0b00001, 0b00001, 0b00001, 0b00001],
+    '5': [0b11111, 0b10000, 0b10000, 0b11110, 0b00001, 0b00001, 0b00001, 0b10001, 0b01110],
+    '6': [0b01110, 0b10001, 0b10000, 0b10000, 0b11110, 0b10001, 0b10001, 0b10001, 0b01110],
+    '7': [0b11111, 0b00001, 0b00001, 0b00010, 0b00010, 0b00100, 0b00100, 0b00100, 0b00100],
+    '8': [0b01110, 0b10001, 0b10001, 0b10001, 0b01110, 0b10001, 0b10001, 0b10001, 0b01110],
+    '9': [0b01110, 0b10001, 0b10001, 0b10001, 0b01111, 0b00001, 0b00001, 0b10001, 0b01110],
+    ':': [0b0, 0b0, 0b1, 0b0, 0b0, 0b0, 0b1, 0b0, 0b0],
 }
-
-# Single centered colon, 2-row dots, matching the 13-row digits.
-CLOCK_COLON = [0b000, 0b000, 0b010, 0b010, 0b000, 0b000, 0b000, 0b010, 0b010, 0b000, 0b000, 0b000, 0b000]
-CLOCK_COLON_WIDTH = 3
 
 # --- Ambient Light Sensor ---
 def read_sensor_lux():
@@ -156,16 +153,12 @@ def screen_fill(brightness=200):
 def screen_clock(brightness=220):
     now = time.strftime("%H:%M")
     buf = bytearray(SCR_SIZE)
-    x_positions = [0, 6, 12, 15, 20]
+    x_positions = [0, 6, 12, 14, 20]
     for char, x_start in zip(now, x_positions):
-        if char == ':':
-            glyph = CLOCK_COLON
-            width = CLOCK_COLON_WIDTH
-        else:
-            glyph = CLOCK_FONT_5X13.get(char, [0]*13)
-            width = 5
+        glyph = CLOCK_FONT_5X9.get(char, [0] * 9)
+        width = 1 if char == ':' else 5
         for row_idx, row_bits in enumerate(glyph):
-            y = 1 + row_idx
+            y = 3 + row_idx
             for col_idx in range(width):
                 if (row_bits >> (width - 1 - col_idx)) & 1:
                     screen_set_pixel(buf, x_start + col_idx, y, brightness)
@@ -558,6 +551,28 @@ def ring_rainbow(speed=0.05, duration=5.0):
         pass
     ring_clear()
 
+def ring_amber(speed=0.04, duration=8.0):
+    print("[Ring] Running amber shimmer animation...", flush=True)
+    start = time.time()
+    phase = 0.0
+    try:
+        while duration <= 0 or (time.time() - start) < duration:
+            frame = bytearray(RING_SIZE)
+            for i in range(RING_LEDS):
+                wave = 0.5 * (1.0 + math.sin(phase + i * (2.0 * math.pi / RING_LEDS) * 2.0))
+                r = int(140 + 115 * wave)
+                g = int(35 + 125 * wave)
+                b = int(14 * (wave * wave))
+                frame[i * 3 + 0] = r
+                frame[i * 3 + 1] = g
+                frame[i * 3 + 2] = b
+            ring_send_frame(frame)
+            phase = (phase + 0.16) % (2.0 * math.pi)
+            time.sleep(speed)
+    except KeyboardInterrupt:
+        pass
+    ring_clear()
+
 def ring_volume(pct, fade=True):
     pct = max(0, min(100, int(pct)))
     active = int(round(RING_LEDS * (pct / 100.0)))
@@ -610,7 +625,7 @@ def main():
     # Ring parser
     p_ring = subparsers.add_parser("ring", help="Top 24-channel RGB LED ring")
     p_ring.add_argument("action", nargs="?", default="rainbow",
-                        choices=["rainbow", "volume", "red", "blue", "green", "fill", "clear", "off"],
+                        choices=["rainbow", "amber", "volume", "red", "blue", "green", "fill", "clear", "off"],
                         help="Ring effect")
     p_ring.add_argument("value", nargs="*", help="Parameters (e.g. volume percent, RGB values)")
 
@@ -638,6 +653,9 @@ def main():
             ring_fill(0, 255, 0)
         elif act == "rainbow":
             ring_rainbow()
+        elif act == "amber":
+            dur = float(args.value[0]) if args.value else 8.0
+            ring_amber(duration=dur)
         elif act == "volume":
             pct = int(args.value[0]) if args.value else 50
             ring_volume(pct)
@@ -713,6 +731,7 @@ def main():
         print("  atrios screen pixel X Y [B]        - Individual LED control (0..255)")
         print("  atrios screen off                  - Turn off screen")
         print("  atrios ring rainbow                - Rainbow animation")
+        print("  atrios ring amber [sec]            - Warm amber shimmer animation")
         print("  atrios ring volume 70              - Volume arc at 70%")
         print("  atrios ring red                    - Mic Mute solid red")
         print("  atrios ring off                    - Turn off ring")

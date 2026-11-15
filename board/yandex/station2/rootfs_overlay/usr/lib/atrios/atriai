@@ -290,8 +290,8 @@ def set_vad_visual(phase):
         ring_cmd = ["/usr/bin/atrios", "ring", "blue"]
         screen_cmd = ["/usr/bin/atrios", "screen", "eyes", "wide"]
     elif phase == "thinking":
-        ring_cmd = ["/usr/bin/atrios", "ring", "rainbow"]
-        screen_cmd = ["/usr/bin/atrios", "screen", "eyes", "animate"]
+        ring_cmd = ["/usr/bin/atrios", "ring", "amber"]
+        screen_cmd = ["/usr/bin/atrios", "screen", "eyes", "open"]
     elif phase == "speaking":
         ring_cmd = ["/usr/bin/atrios", "ring", "green"]
         screen_cmd = ["/usr/bin/atrios", "screen", "eyes", "happy"]

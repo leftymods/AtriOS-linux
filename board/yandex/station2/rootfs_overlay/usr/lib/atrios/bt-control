@@ -468,7 +468,7 @@ def process_command(cmd_obj):
         if mode == "volume":
             subprocess.Popen(["/usr/bin/atrios", "ring", "volume", str(get_current_volume())],
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        elif mode in ("rainbow", "red", "blue", "green", "off"):
+        elif mode in ("rainbow", "amber", "red", "blue", "green", "off"):
             subprocess.Popen(["/usr/bin/atrios", "ring", mode],
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return {"type": "action_response", "success": True, "message": f"Ring: {mode}"}
