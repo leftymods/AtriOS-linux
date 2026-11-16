@@ -40,6 +40,13 @@ jobs:
           [[ "$RELEASE_TAG" =~ ^v[0-9]+(\.[0-9]+){0,3}$ ]]
           git show-ref --verify "refs/tags/$RELEASE_TAG"
           test "$(git rev-list -n 1 "$RELEASE_TAG")" = "$(git rev-parse HEAD)"
+      - name: Resolve selected board release paths
+        run: |
+          set -euo pipefail
+          source lib/release-board.sh
+          release_board_config "$BOARD"
+          printf 'ROOTFS_OVERLAY_PATH=%s\nDTB_IMAGE=%s\nIMAGE_FILENAME=%s\n' \
+            "$ROOTFS_OVERLAY_PATH" "$DTB_IMAGE" "$IMAGE_FILENAME" >> "$GITHUB_ENV"
       - name: Install mainline build dependencies
         run: |
           sudo apt-get update
@@ -60,11 +67,11 @@ jobs:
           umask 077
           printf '%s\n' "$OTA_SIGNING_KEY" > "$RUNNER_TEMP/ota-signing.pem"
           openssl rsa -in "$RUNNER_TEMP/ota-signing.pem" -check -noout >/dev/null
-          mkdir -p board/yandex/station2/rootfs_overlay/etc/atrios
+          mkdir -p "$ROOTFS_OVERLAY_PATH/etc/atrios"
           openssl rsa -in "$RUNNER_TEMP/ota-signing.pem" -pubout \
-            -out board/yandex/station2/rootfs_overlay/etc/atrios/ota-public.pem
-          chmod 644 board/yandex/station2/rootfs_overlay/etc/atrios/ota-public.pem
-          printf '%s\n' "${RELEASE_TAG#v}" > board/yandex/station2/rootfs_overlay/etc/atrios-version
+            -out "$ROOTFS_OVERLAY_PATH/etc/atrios/ota-public.pem"
+          chmod 644 "$ROOTFS_OVERLAY_PATH/etc/atrios/ota-public.pem"
+          printf '%s\n' "${RELEASE_TAG#v}" > "$ROOTFS_OVERLAY_PATH/etc/atrios-version"
           sed -i "s/^RELEASE_VERSION=.*/RELEASE_VERSION=\"${RELEASE_TAG#v}\"/" config/system.conf
       - name: Run local build and release regressions
         run: python3 -m pytest -q tests/test_build_regressions.py tests/test_release_bundle.py
@@ -96,7 +103,7 @@ jobs:
             --board "$BOARD" --version "${RELEASE_TAG#v}" \
             --kernel-release "$KERNEL_RELEASE" \
             --kernel output/images/Image \
-            --dtb output/images/meson-sm1-yandex-station-max.dtb \
+            --dtb "$DTB_IMAGE" \
             --rootfs "$OTA_OVERLAY" \
             --modules "output/rootfs_debian_staging/usr/lib/modules/$KERNEL_RELEASE" \
             --signing-key "$RUNNER_TEMP/ota-signing.pem" \
@@ -105,11 +112,11 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p output/release-assets
-          cp "output/images/AtriOS-Nebula-$BOARD-emmc.img" \
-            "output/images/AtriOS-Nebula-$BOARD-emmc.img.sha256" \
+          cp "output/images/$IMAGE_FILENAME" \
+            "output/images/$IMAGE_FILENAME.sha256" \
             "output/releases/AtriOS-$BOARD-ota.tar.gz" \
             "output/releases/AtriOS-$BOARD-ota.tar.gz.sha256" output/release-assets/
-          (cd output/release-assets && sha256sum "AtriOS-Nebula-$BOARD-emmc.img" > "AtriOS-Nebula-$BOARD-emmc.img.sha256")
+          (cd output/release-assets && sha256sum "$IMAGE_FILENAME" > "$IMAGE_FILENAME.sha256")
       - name: Upload public release artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -147,12 +154,15 @@ jobs:
           set -euo pipefail
           [[ "$RELEASE_TAG" =~ ^v[0-9]+(\.[0-9]+){0,3}$ ]]
           git ls-remote --exit-code --tags origin "refs/tags/$RELEASE_TAG" >/dev/null
-          for board in station-max yndxsttion53; do
+          source lib/release-board.sh
+          # Explicit release allowlist; new hardware needs a reviewed CI entry.
+          for board in station-max yndxsttion53; do (
+            release_board_config "$board"
             test -s "release-assets/AtriOS-$board-ota.tar.gz"
-            test -s "release-assets/AtriOS-Nebula-$board-emmc.img"
+            test -s "release-assets/$IMAGE_FILENAME"
             test -s "release-assets/AtriOS-$board-ota.tar.gz.sha256"
-            test -s "release-assets/AtriOS-Nebula-$board-emmc.img.sha256"
-          done
+            test -s "release-assets/$IMAGE_FILENAME.sha256"
+          ); done
           # Compare every uploaded artifact with its detached digest.
           for sidecar in release-assets/*.sha256; do
             asset="${sidecar%.sha256}"
