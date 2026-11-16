@@ -96,7 +96,7 @@ def test_signed_bundle_is_deterministic_and_has_exact_checksums(inputs, rsa_keys
         assert builder.digest(destination / entry['path']) == entry['sha256']
     with tarfile.open(destination / manifest['files']['rootfs']['path'], 'r:gz') as archive:
         names = archive.getnames()
-        assert 'usr/lib/modules/7.3.1-AtriOS-aml/kernel/example.ko' in names
+        assert 'lib/modules/7.3.1-AtriOS-aml/kernel/example.ko' in names
         assert archive.getmember('usr/bin/example').mode == 0o755
         assert all(item.isfile() and item.uid == item.gid == item.mtime == 0 for item in archive)
         assert not any('private.pem' in name for name in names)
@@ -276,3 +276,45 @@ def test_release_stages_normalized_checkout_commands_and_preserves_config_modes(
         for name in commands:
             assert archive.getmember(name).mode & 0o111 == 0o111
         assert archive.getmember(config).mode & 0o111 == 0
+
+
+@pytest.mark.parametrize('input_prefix', ['lib', 'usr/lib'])
+def test_bundle_emits_canonical_kernel_paths_for_existing_ota_clients(inputs, tmp_path, input_prefix):
+    firmware = inputs['rootfs'] / input_prefix / 'firmware'
+    firmware.mkdir(parents=True)
+    (firmware / 'regulatory.db-upstream').write_bytes(b'upstream-db')
+    (firmware / 'regulatory.db.p7s-upstream').write_bytes(b'upstream-signature')
+    # Accept either complete modules_install layout as a rootfs input.
+    target = inputs['rootfs'] / input_prefix / 'modules' / inputs['kernel_release']
+    shutil.copytree(inputs['modules'], target)
+    inputs['modules'] = None
+    bundle = builder.build_bundle(**inputs)
+    unpacked = tmp_path / 'canonical-bundle'
+    manifest = unpack_bundle(bundle, unpacked)
+    with tarfile.open(unpacked / manifest['files']['rootfs']['path'], 'r:gz') as archive:
+        names = archive.getnames()
+        assert 'lib/modules/7.3.1-AtriOS-aml/kernel/example.ko' in names
+        assert 'lib/firmware/regulatory.db-upstream' in names
+        assert 'lib/firmware/regulatory.db.p7s-upstream' in names
+        assert not any(name.startswith(('usr/lib/modules/', 'usr/lib/firmware/')) for name in names)
+        assert 'usr/bin/example' in names  # Other usr/ paths are not remapped.
+
+
+@pytest.mark.parametrize('subtree', ['modules/7.3.1-AtriOS-aml', 'firmware'])
+def test_bundle_rejects_lib_and_usr_alias_collisions_before_publishing(inputs, subtree):
+    for prefix in ['lib', 'usr/lib']:
+        path = inputs['rootfs'] / prefix / subtree / 'same-file'
+        path.parent.mkdir(parents=True)
+        path.write_bytes(prefix.encode())
+    with pytest.raises(ValueError, match='Duplicate canonical rootfs destination'):
+        builder.build_bundle(**inputs)
+    assert not inputs['output_dir'].exists()
+
+
+def test_bundle_rejects_rootfs_modules_collision_with_explicit_modules_source(inputs):
+    path = inputs['rootfs'] / 'usr/lib/modules' / inputs['kernel_release'] / 'modules.dep'
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b'conflicting-index')
+    with pytest.raises(ValueError, match='Duplicate rootfs/module destinations'):
+        builder.build_bundle(**inputs)
+    assert not inputs['output_dir'].exists()

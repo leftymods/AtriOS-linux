@@ -607,3 +607,89 @@ def test_only_apk_releases_are_not_firmware(ota, monkeypatch):
     monkeypatch.setitem(ota.g, "request_bytes", lambda *args, **kwargs: json.dumps([app]).encode())
     with pytest.raises(ota.g["NoFirmwareRelease"]):
         ota.g["latest_release"]()
+
+
+def kernel_library_layout(ota, merged):
+    (ota.root / 'usr/lib').mkdir(parents=True)
+    if merged:
+        (ota.root / 'lib').symlink_to('usr/lib', target_is_directory=True)
+    else:
+        (ota.root / 'lib').mkdir()
+
+
+@pytest.mark.parametrize('merged', [False, True])
+@pytest.mark.parametrize('payload_prefix', ['lib', 'usr/lib'])
+@pytest.mark.parametrize('suffix', ['modules/7.3.1-AtriOS-aml/kernel/drivers/atrios/quasar_led_ring.ko',
+                                  'firmware/regulatory.db-upstream',
+                                  'firmware/regulatory.db.p7s-upstream'])
+def test_usr_kernel_payload_updates_canonical_lib_with_journalled_rollback(ota, bundle, merged, payload_prefix, suffix):
+    kernel_library_layout(ota, merged)
+    canonical = (ota.root / 'lib' / suffix).resolve()
+    canonical.parent.mkdir(parents=True, exist_ok=True)
+    canonical.write_bytes(b'old-active-file')
+    shadow = ota.root / 'usr/lib' / suffix
+    if not merged:
+        shadow.parent.mkdir(parents=True, exist_ok=True)
+        shadow.write_bytes(b'unrelated-shadow-file')
+    flat_recovery = ota.root / 'lib/modules/7.3.1-AtriOS-aml/quasar_led_ring.ko'
+    flat_recovery.parent.mkdir(parents=True, exist_ok=True)
+    flat_recovery.write_bytes(b'flat-recovery-copy')
+    ota.g['install_bundle_tar'](bundle({payload_prefix + '/' + suffix: b'new-active-file'}), 'test')
+    assert canonical.read_bytes() == b'new-active-file'
+    if not merged:
+        assert shadow.read_bytes() == b'unrelated-shadow-file'
+    state = json.loads(ota.paths['JOURNAL'].read_text())
+    entry = next(item for item in state['entries'] if item['destination'] == str(canonical))
+    assert entry['existed'] is True
+    assert (Path(state['backup_dir']) / entry['backup']).read_bytes() == b'old-active-file'
+    assert flat_recovery.read_bytes() == b'flat-recovery-copy'
+    ota.g['rollback_transaction']()
+    assert canonical.read_bytes() == b'old-active-file'
+    assert flat_recovery.read_bytes() == b'flat-recovery-copy'
+    if not merged:
+        assert shadow.read_bytes() == b'unrelated-shadow-file'
+    assert ota.paths['VERSION_FILE'].read_text() == '1.0\n'
+
+
+@pytest.mark.parametrize('merged', [False, True])
+@pytest.mark.parametrize('suffix', ['modules/7.3.1-AtriOS-aml/example.ko', 'firmware/regulatory.db-upstream'])
+def test_usr_and_lib_alias_collision_fails_before_first_write(ota, bundle, merged, suffix):
+    kernel_library_layout(ota, merged)
+    canonical = (ota.root / 'lib' / suffix).resolve()
+    canonical.parent.mkdir(parents=True, exist_ok=True)
+    canonical.write_bytes(b'keep-active-file')
+    archive = bundle({'etc/a-before': b'must-not-install',
+                      'lib/' + suffix: b'first', 'usr/lib/' + suffix: b'second'})
+    with pytest.raises(ValueError, match='Duplicate OTA destinations'):
+        ota.g['install_bundle_tar'](archive, 'test')
+    assert canonical.read_bytes() == b'keep-active-file'
+    assert not (ota.root / 'etc/a-before').exists()
+    assert not ota.paths['JOURNAL'].exists()
+    assert ota.paths['VERSION_FILE'].read_text() == '1.0\n'
+
+
+@pytest.mark.parametrize('subtree', ['modules', 'firmware'])
+@pytest.mark.parametrize('escape', ['outside', 'boot'])
+def test_canonical_kernel_mapping_still_applies_resolved_destination_policy(ota, bundle, subtree, escape):
+    kernel_library_layout(ota, False)
+    target = ota.tmp / 'outside-root' if escape == 'outside' else ota.paths['BOOT_DIR']
+    target.mkdir(exist_ok=True)
+    (ota.root / 'lib' / subtree).symlink_to(target, target_is_directory=True)
+    archive = bundle({'etc/a-before': b'never-installed', 'usr/lib/' + subtree + '/payload': b'bad'})
+    with pytest.raises(ValueError):
+        ota.g['install_bundle_tar'](archive, 'test')
+    assert not (target / 'payload').exists()
+    assert not (ota.root / 'etc/a-before').exists()
+    assert not ota.paths['JOURNAL'].exists()
+
+
+def test_module_firmware_mapping_does_not_remap_other_usr_subtrees(ota, bundle):
+    kernel_library_layout(ota, False)
+    files = {'usr/bin/example': b'command', 'usr/lib/atrios/helper': b'helper',
+             'usr/lib/modules-extra/example': b'not-a-module-tree'}
+    ota.g['install_bundle_tar'](bundle(files), 'test')
+    for name, value in files.items():
+        assert (ota.root / name).read_bytes() == value
+    assert not (ota.root / 'bin/example').exists()
+    assert not (ota.root / 'lib/atrios/helper').exists()
+    assert not (ota.root / 'lib/modules-extra/example').exists()

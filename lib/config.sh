@@ -18,7 +18,7 @@ load_board_config() {
     # RELEASE selects the name; preserve an explicit caller version override.
     OS_NAME="${OS_NAME:-AtriOS}"
     RELEASE_NAME="${RELEASE:-${RELEASE_NAME:-Nebula}}"
-    RELEASE_VERSION="${release_version_override:-${RELEASE_VERSION:-1.1.1}}"
+    RELEASE_VERSION="${release_version_override:-${RELEASE_VERSION:-1.1.2}}"
 
     if [ ! -f "$conf_file" ]; then
         exit_with_error "Board configuration not found: $conf_file"

@@ -663,7 +663,7 @@ def test_board_profile_cannot_emit_artifacts_for_a_different_id(tmp_path):
     assert 'Board profile identity mismatch' in result.stdout
 
 
-@pytest.mark.parametrize('override,expected', [('', '1.1.1'), ('2.7.4', '2.7.4')])
+@pytest.mark.parametrize('override,expected', [('', '1.1.2'), ('2.7.4', '2.7.4')])
 def test_release_version_default_and_explicit_override_reach_child_process(override, expected):
     command = library('config.sh') + '''
 load_board_config yndxsttion53

@@ -4,6 +4,8 @@
 Rootfs sources must contain only directories and regular files. The build/source
 symlinks directly under the selected kernel's modules directory are deliberately
 excluded; all other links, special files and forbidden runtime paths are errors.
+Kernel modules and firmware are emitted under logical lib/, including when the
+input tree uses usr/lib/, so previously installed OTA clients update active files.
 """
 import argparse
 import gzip
@@ -73,6 +75,13 @@ def rootfs_name(name):
     return path
 
 
+def canonical_rootfs_name(name):
+    parts = safe_name(name).parts
+    if parts[:3] in (('usr', 'lib', 'modules'), ('usr', 'lib', 'firmware')):
+        return PurePosixPath('lib', *parts[2:]).as_posix()
+    return name
+
+
 def module_build_link(name, release):
     return name in {f'lib/modules/{release}/build', f'lib/modules/{release}/source',
                     f'usr/lib/modules/{release}/build', f'usr/lib/modules/{release}/source'}
@@ -92,7 +101,7 @@ def collect_tree(source, release, prefix=''):
                 if members > MAX_MEMBERS:
                     raise ValueError('Too many rootfs entries')
                 path = Path(entry.path)
-                name = prefix + path.relative_to(source).as_posix()
+                name = canonical_rootfs_name(prefix + path.relative_to(source).as_posix())
                 mode = entry.stat(follow_symlinks=False).st_mode
                 if stat.S_ISLNK(mode) and module_build_link(name, release):
                     continue
@@ -100,6 +109,8 @@ def collect_tree(source, release, prefix=''):
                     raise ValueError('Links and special rootfs files are forbidden: ' + name)
                 rootfs_name(name)
                 if stat.S_ISREG(mode):
+                    if name in result:
+                        raise ValueError('Duplicate canonical rootfs destination: ' + name)
                     result[name] = path
                 else:
                     pending.append(path)
@@ -257,7 +268,7 @@ def build_bundle(*, board, version, kernel_release, kernel, dtb, signing_key, ou
     if rootfs is not None:
         sources.update(collect_tree(rootfs, kernel_release))
     if modules is not None:
-        module_files = collect_tree(modules, kernel_release, f'usr/lib/modules/{kernel_release}/')
+        module_files = collect_tree(modules, kernel_release, f'lib/modules/{kernel_release}/')
         if set(sources) & set(module_files):
             raise ValueError('Duplicate rootfs/module destinations')
         sources.update(module_files)

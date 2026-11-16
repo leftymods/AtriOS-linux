@@ -1,0 +1,40 @@
+#!/bin/sh
+# Hardware-neutral bootstrap for custom init as well as SysV-style service loops.
+HOSTNAME_FILE=${HOSTNAME_FILE:-/etc/hostname}
+LC_ALL=C
+export LC_ALL
+
+valid_hostname() {
+    [ "${#1}" -le 63 ] || return 1
+    case "$1" in ''|*[!A-Za-z0-9.-]*|.*|*.|*..*) return 1 ;; esac
+    previous_ifs=$IFS
+    IFS=.
+    set -- $1
+    IFS=$previous_ifs
+    for label do
+        case "$label" in ''|-*|*-) return 1 ;; esac
+    done
+}
+
+case "${1:-start}" in
+    start|restart)
+        [ -r "$HOSTNAME_FILE" ] || exit 0
+        name=$(cat "$HOSTNAME_FILE") || exit 0
+        carriage_return=$(printf '\r')
+        name=${name%"$carriage_return"}
+        if ! valid_hostname "$name"; then
+            echo "[hostname] Ignoring invalid /etc/hostname" >&2
+            exit 0
+        fi
+        if command -v hostname >/dev/null 2>&1; then
+            hostname "$name" || exit 1
+        elif [ -x /bin/busybox ]; then
+            /bin/busybox hostname "$name" || exit 1
+        else
+            echo "[hostname] No hostname command is installed" >&2
+            exit 1
+        fi
+        ;;
+    stop) ;;
+    *) echo "Usage: $0 {start|stop|restart}" >&2; exit 1 ;;
+esac

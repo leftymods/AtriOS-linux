@@ -319,6 +319,22 @@ def rollback_transaction():
     atomic_json(STATE_FILE, {"status": "rolled_back", "version": current_version()})
 
 
+def rootfs_destination(relative):
+    logical = Path(safe_rel(str(relative)))
+    # Kernel/kmod paths are /lib on both layouts. Resolve afterwards so a
+    # merged-/usr root still reaches its actual /usr/lib backing directory.
+    if logical.parts[:3] in (("usr", "lib", "modules"), ("usr", "lib", "firmware")):
+        logical = Path("lib", *logical.parts[2:])
+    dest = (ROOT_DIR / logical).resolve()
+    try:
+        resolved_rel = dest.relative_to(ROOT_DIR.resolve())
+    except ValueError:
+        raise ValueError("Rootfs destination escapes target root") from None
+    if not resolved_rel.parts or resolved_rel.parts[0] in ("proc", "sys", "dev", "run", "tmp", "boot") or str(resolved_rel).startswith("var/run/") or str(resolved_rel).startswith("var/lib/atrios/ota-"):
+        raise ValueError("Forbidden rootfs update destination: " + str(relative))
+    return dest
+
+
 def install_bundle_tar(pkg_path, source_label, do_reboot=False, expected_version=None):
     cfg = load_config()
     if JOURNAL.exists() and json.loads(JOURNAL.read_text()).get("status") in ("installing", "rolling_back"):
@@ -343,13 +359,7 @@ def install_bundle_tar(pkg_path, source_label, do_reboot=False, expected_version
                 if not src.is_file():
                     continue
                 rel = src.relative_to(overlay)
-                dest = (ROOT_DIR / rel).resolve()
-                try:
-                    resolved_rel = dest.relative_to(ROOT_DIR.resolve())
-                except ValueError:
-                    raise ValueError("Rootfs destination escapes target root") from None
-                if resolved_rel.parts[0] in ("proc", "sys", "dev", "run", "tmp", "boot") or str(resolved_rel).startswith("var/run/") or str(resolved_rel).startswith("var/lib/atrios/ota-"):
-                    raise ValueError("Forbidden rootfs update destination: " + str(rel))
+                dest = rootfs_destination(rel)
                 plan.append((src, dest))
         if "kernel" in payloads:
             release = manifest.get("kernel_release", "")

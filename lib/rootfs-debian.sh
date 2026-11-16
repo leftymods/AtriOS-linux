@@ -21,7 +21,7 @@ build_debian_micro_rootfs() {
     local rootfs_img="$ROOTFS_IMAGE"
     local debian_mirror="${DEBIAN_MIRROR:-https://deb.debian.org/debian}"
     local suite="bookworm"
-    local base_packages="ca-certificates,openssl,python3,fish,kmod,util-linux,coreutils,passwd,wireless-regdb,iw"
+    local base_packages="ca-certificates,openssl,python3,fish,kmod,util-linux,coreutils,passwd,wireless-regdb,iw,hostname"
     local base_profile="${suite}|${ARCH}|${debian_mirror}|${base_packages}"
 
     mkdir -p "$PROJECT_ROOT/cache" "$PROJECT_ROOT/output/images"
@@ -136,7 +136,7 @@ EOF
     # Restore command modes even when an overlay checkout has index mode 0644.
     # Keep certificates, shared libraries and ordinary /etc data non-executable.
     prepare_rootfs_command_modes "$stage_dir"
-    sudo dos2unix "$stage_dir/usr/bin/atrios" "$stage_dir/etc/fish/config.fish" 2>/dev/null || true
+    normalize_rootfs_startup_text "$stage_dir"
 
     # Ensure /etc/securetty allows serial console login
     cat <<EOF | sudo tee -a "$stage_dir/etc/securetty" >/dev/null
@@ -169,6 +169,11 @@ mkdir -p /boot /tmp
 if ! mount -a; then
     echo "[init] Failed to mount filesystems from /etc/fstab" >&2
     exit 1
+fi
+
+# Apply the validated configured hostname before systemd or the service loop.
+if [ -f /etc/init.d/S00hostname ]; then
+    /bin/sh /etc/init.d/S00hostname start || echo "[init] Failed to apply hostname" >&2
 fi
 
 # Silence kernel console logging so runtime dmesg doesn't pollute the interactive shell
@@ -285,4 +290,11 @@ prepare_rootfs_command_modes() {
 install_common_rootfs_services() {
     local stage_dir="$1"
     sudo install -D -m 755 "$PROJECT_ROOT/lib/runtime/S02regdb" "$stage_dir/etc/init.d/S02regdb"
+    sudo install -D -m 755 "$PROJECT_ROOT/lib/runtime/S00hostname" "$stage_dir/etc/init.d/S00hostname"
+}
+
+
+normalize_rootfs_startup_text() {
+    local stage_dir="$1"
+    sudo python3 "$PROJECT_ROOT/lib/normalize-rootfs-text.py" "$stage_dir"
 }
