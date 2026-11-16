@@ -1,3 +1,4 @@
+from common.acs_fixture import make_acs
 """Tier 2: Boundary & Corner Cases - Requirement R2: BL2 DDR Microcode & FIP Integrity."""
 
 import hashlib
@@ -69,10 +70,10 @@ class TestR2Bl2DdrBoundaries:
     def test_r2_boundary_acs_ddr3_rejected_for_station_max(self):
         """Verify ACS table configuring only DDR3 / DDR4 without LPDDR4 is rejected."""
         # acs block with only DramType = 0 (DDR3) or 1 (DDR4)
-        mock_ddr3_acs = b"acs__" + b"\x00\x00\x00\x00" * 10
+        mock_ddr3_acs = make_acs(dram_type=1)
         ok, msg = self.acs_parser.verify_lpddr4_support(mock_ddr3_acs)
         assert ok is False
-        assert "No LPDDR4 DramType marker" in msg
+        assert "No LPDDR4 record" in msg
 
     def test_r2_boundary_fip_empty_or_sub_header_data(self):
         """Verify check_magic handles empty or sub-4-byte buffers without IndexError."""

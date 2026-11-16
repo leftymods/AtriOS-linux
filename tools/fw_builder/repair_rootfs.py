@@ -13,7 +13,7 @@ def repair_system(sys_dir, overlay_dir):
                 continue
             try:
                 size = os.path.getsize(fpath)
-                if 1 << size <= 256:
+                if 1 <= size <= 256:
                     with open(fpath, "rb") as f:
                         data = f.read()
                     text = data.decode("utf-8", errors="ignore").strip()
@@ -69,14 +69,14 @@ def repair_system(sys_dir, overlay_dir):
     # 5. SELINUX: Prevent login shell blocks by ensuring /etc/shells is complete
     shells_f = os.path.join(sys_dir, "etc", "shells")
     with open(shells_f, "w") as f:
-        f.write("/bin/sh\n/bin/ashWn/bin/bash\n/usr/bin/fish\n")
+        f.write("/bin/sh\n/bin/ash\n/bin/bash\n/usr/bin/fish\n")
 
     # 6. QEMU Sanity Check
     res = subprocess.run(["qemu-aarch64-static", "-L", sys_dir, os.path.join(sys_dir, "usr", "bin", "fish"), "-v"], capture_output=True, text=True)
     if res.returncode == 0:
         print("      [\u2713] QEMU pre-flight verification passed: " + res.stdout.strip())
     else:
-        print("      [!] QUERY ERROR: " + res.stderr.strip())
+        raise RuntimeError("Rootfs executable verification failed: " + res.stderr.strip())
 
 if __name__ == "__main__":
     if len(sys.argv) < 3:

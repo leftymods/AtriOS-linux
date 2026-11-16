@@ -400,21 +400,37 @@ static const struct attribute_group pcba_ids_drv_group = {
 	.attrs = pcba_ids_drv_attrs,
 };
 
-static void pcba_add_bus_eeprom(struct pcba_priv *priv, u32 bus_nr,
+static void pcba_release_eeproms(void *data)
+{
+	struct pcba_priv *priv = data;
+	int i;
+
+	for (i = 0; i < priv->num_eeproms; i++) {
+		struct eeprom_info *ep = &priv->eeproms[i];
+
+		if (ep->client)
+			put_device(&ep->client->dev);
+		else if (ep->adap)
+			i2c_put_adapter(ep->adap);
+	}
+	priv->num_eeproms = 0;
+}
+
+static int pcba_add_bus_eeprom(struct pcba_priv *priv, u32 bus_nr,
 				u32 addr, const char *name)
 {
 	struct i2c_adapter *adap;
 	struct eeprom_info *ep;
 
 	if (priv->num_eeproms >= MAX_EEPROM_COUNT)
-		return;
+		return -E2BIG;
 
 	adap = i2c_get_adapter(bus_nr);
 	if (!adap) {
 		dev_warn(priv->dev,
 			 "[PCBA_IDS] i2c-%u adapter not available for EEPROM '%s' (0x%02x)\n",
 			 bus_nr, name, addr);
-		return;
+		return -EPROBE_DEFER;
 	}
 
 	ep = &priv->eeproms[priv->num_eeproms++];
@@ -425,6 +441,7 @@ static void pcba_add_bus_eeprom(struct pcba_priv *priv, u32 bus_nr,
 	dev_info(priv->dev,
 		 "[PCBA_IDS] Registered EEPROM '%s' on i2c-%u @ 0x%02x\n",
 		 ep->name, bus_nr, ep->addr);
+	return 0;
 }
 
 static int pcba_ids_probe(struct platform_device *pdev)
@@ -447,6 +464,9 @@ static int pcba_ids_probe(struct platform_device *pdev)
 	priv->dev = dev;
 	mutex_init(&priv->lock);
 	platform_set_drvdata(pdev, priv);
+	ret = devm_add_action_or_reset(dev, pcba_release_eeproms, priv);
+	if (ret)
+		return ret;
 
 	for (i = 0; ; i++) {
 		eeprom_np = of_parse_phandle(np, "eeproms", i);
@@ -461,8 +481,8 @@ static int pcba_ids_probe(struct platform_device *pdev)
 		eeprom_client = of_find_i2c_device_by_node(eeprom_np);
 		of_node_put(eeprom_np);
 		if (!eeprom_client) {
-			dev_warn(dev, "[PCBA_IDS] eeprom[%d] phandle i2c client not ready yet\n", i);
-			continue;
+			return dev_err_probe(dev, -EPROBE_DEFER,
+					     "EEPROM client %d not ready\n", i);
 		}
 
 		priv->eeproms[priv->num_eeproms].client = eeprom_client;
@@ -489,12 +509,21 @@ static int pcba_ids_probe(struct platform_device *pdev)
 	/* Also support i2c-bus / *-eeprom-addr DT properties */
 	if (priv->num_eeproms == 0) {
 		of_property_read_u32(np, "i2c-bus", &bus_nr);
-		if (of_property_read_u32(np, "top-eeprom-addr", &addr) == 0)
-			pcba_add_bus_eeprom(priv, bus_nr, addr, "top");
-		if (of_property_read_u32(np, "main-eeprom-addr", &addr) == 0)
-			pcba_add_bus_eeprom(priv, 2, addr, "main");
-		if (of_property_read_u32(np, "led-eeprom-addr", &addr) == 0)
-			pcba_add_bus_eeprom(priv, 2, addr, "led");
+		if (of_property_read_u32(np, "top-eeprom-addr", &addr) == 0) {
+			ret = pcba_add_bus_eeprom(priv, bus_nr, addr, "top");
+			if (ret)
+				return ret;
+		}
+		if (of_property_read_u32(np, "main-eeprom-addr", &addr) == 0) {
+			ret = pcba_add_bus_eeprom(priv, 2, addr, "main");
+			if (ret)
+				return ret;
+		}
+		if (of_property_read_u32(np, "led-eeprom-addr", &addr) == 0) {
+			ret = pcba_add_bus_eeprom(priv, 2, addr, "led");
+			if (ret)
+				return ret;
+		}
 	}
 
 	parse_eeproms(priv);
@@ -516,16 +545,8 @@ static void pcba_ids_remove(struct platform_device *pdev)
 static int pcba_ids_remove(struct platform_device *pdev)
 #endif
 {
-	struct pcba_priv *priv = platform_get_drvdata(pdev);
-	int i;
-
 	sysfs_remove_group(&pdev->dev.kobj, &pcba_ids_drv_group);
-	if (priv) {
-		for (i = 0; i < priv->num_eeproms; i++) {
-			if (!priv->eeproms[i].client && priv->eeproms[i].adap)
-				i2c_put_adapter(priv->eeproms[i].adap);
-		}
-	}
+	/* EEPROM references are released by the managed cleanup action. */
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 11, 0)
 	return 0;
 #endif

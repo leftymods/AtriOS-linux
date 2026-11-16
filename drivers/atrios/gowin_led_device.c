@@ -905,6 +905,12 @@ static int lp_fb_pan_display(struct fb_var_screeninfo *var, struct fb_info *fbi)
 
 static int lp_fb_mmap(struct fb_info *fbi, struct vm_area_struct *vma)
 {
+	unsigned long size = vma->vm_end - vma->vm_start;
+	unsigned long pages = PAGE_ALIGN(fbi->screen_size) >> PAGE_SHIFT;
+
+	if (vma->vm_pgoff >= pages ||
+	    size > ((pages - vma->vm_pgoff) << PAGE_SHIFT))
+		return -EINVAL;
 	return remap_vmalloc_range(vma, fbi->screen_buffer, vma->vm_pgoff);
 }
 
@@ -1016,7 +1022,7 @@ static int fb_init(struct gowin_priv *priv)
 	priv->fbi = fbi;
 	fbi->par = priv;
 
-	priv->fb_mem = vzalloc(fb_len);
+	priv->fb_mem = vmalloc_user(fb_len);
 	if (!priv->fb_mem) {
 		ret = -ENOMEM;
 		goto err_fb;
@@ -1533,6 +1539,8 @@ static int jtag_prog_fpga(struct gowin_priv *priv, const struct firmware *fw,
 	unsigned long flags;
 	int i, bit;
 
+	if (fw->size < 4 || aligned_len < fw->size)
+		return -EINVAL;
 	jtag_tap_move(priv, 16, 1);
 	idcode = jtag_read_code(priv, 0x11);
 	dev_info(priv->dev, "[GOWIN-JTAG] Programming FPGA (%zu bytes, IDCODE=0x%08x)...\n",
@@ -1747,12 +1755,21 @@ static int lp_handle_firmware_update(struct gowin_priv *priv)
 			 "flash failed: %d", ret);
 		dev_err(priv->dev, "[GOWIN] Firmware flash failed with error %d\n", ret);
 	} else {
-		snprintf(priv->fw_upd_status, sizeof(priv->fw_upd_status),
-			 "ok: %s programmed", fw_name);
 		dev_info(priv->dev, "[GOWIN] Firmware flash complete! Probing new status...\n");
 		msleep(100);
 		get_lp_status(priv, NULL);
-		get_lp_status(priv, NULL);
+		ret = get_lp_status(priv, NULL);
+		if (!ret && (!priv->fw_version ||
+		    (manifest_ver && priv->fw_version < manifest_ver) ||
+		    (manifest_uf_crc && priv->uf_crc != manifest_uf_crc)))
+			ret = -EPROTO;
+		if (ret) {
+			snprintf(priv->fw_upd_status, sizeof(priv->fw_upd_status),
+				 "post-flash validation failed: %d", ret);
+			return ret;
+		}
+		snprintf(priv->fw_upd_status, sizeof(priv->fw_upd_status),
+			 "ok: %s programmed", fw_name);
 		dev_info(priv->dev, "[GOWIN] Final status: board_rev=%u, fw_version=%u, uf_crc=0x%04x\n",
 			 priv->board_rev, priv->fw_version, priv->uf_crc);
 	}
@@ -2141,7 +2158,7 @@ static int probe(struct spi_device *spi)
 		spi->max_speed_hz = 4000000;
 	ret = spi_setup(spi);
 	if (ret)
-		dev_warn(dev, "[GOWIN] spi_setup returned %d\n", ret);
+		return dev_err_probe(dev, ret, "spi_setup failed\n");
 
 	/*
 	 * Request ONLY reset, jtag_reconfig, and jtag_sel in probe()!
@@ -2150,11 +2167,9 @@ static int probe(struct spi_device *spi)
 	 * requesting them switches the hardware pinmux away from SPI!
 	 */
 	priv->reset_gpio = devm_gpiod_get_optional(dev, "reset", GPIOD_OUT_LOW);
-	if (IS_ERR(priv->reset_gpio)) {
-		dev_warn(dev, "[GOWIN] reset_gpio unavailable (%ld), continuing\n",
-			 PTR_ERR(priv->reset_gpio));
-		priv->reset_gpio = NULL;
-	}
+	if (IS_ERR(priv->reset_gpio))
+		return dev_err_probe(dev, PTR_ERR(priv->reset_gpio),
+				     "failed to request reset_gpio GPIO\n");
 
 	/*
 	 * jtag_reconfig (RECONFIG_N on Gowin GW1N-9) is active-low open-drain.
@@ -2165,17 +2180,20 @@ static int probe(struct spi_device *spi)
 	priv->jtag_reconfig = devm_gpiod_get_optional(dev, "jtag_reconfig",
 						       GPIOD_OUT_LOW);
 	if (IS_ERR(priv->jtag_reconfig))
-		priv->jtag_reconfig = NULL;
+		return dev_err_probe(dev, PTR_ERR(priv->jtag_reconfig),
+				     "failed to request jtag_reconfig GPIO\n");
 
 	msleep(300);
 
 	priv->jtag_sel = devm_gpiod_get_optional(dev, "jtag_sel", GPIOD_OUT_HIGH);
 	if (IS_ERR(priv->jtag_sel))
-		priv->jtag_sel = NULL;
+		return dev_err_probe(dev, PTR_ERR(priv->jtag_sel),
+				     "failed to request jtag_sel GPIO\n");
 
 	priv->irq_gpio = devm_gpiod_get_optional(dev, "irq", GPIOD_IN);
 	if (IS_ERR(priv->irq_gpio))
-		priv->irq_gpio = NULL;
+		return dev_err_probe(dev, PTR_ERR(priv->irq_gpio),
+				     "failed to request irq_gpio GPIO\n");
 
 	dev_info(dev, "[GOWIN] GPIOs: reset=hw:%d, jtag_reconfig=hw:%d, jtag_sel=hw:%d, irq=hw:%d\n",
 		 priv->reset_gpio ? desc_to_gpio(priv->reset_gpio) : -1,
@@ -2200,10 +2218,14 @@ static int probe(struct spi_device *spi)
 	}
 
 	/* Ensure SPI mux and spicc1 master pinctrl are active */
-	select_spi_mode(priv);
+	ret = select_spi_mode(priv);
+	if (ret)
+		return ret;
 
-	/* Check FPGA status / firmware before registering devices */
-	lp_handle_firmware_update(priv);
+	/* Do not expose a framebuffer backed by an unresponsive FPGA. */
+	ret = lp_handle_firmware_update(priv);
+	if (ret)
+		return dev_err_probe(dev, ret, "FPGA initialization failed\n");
 
 	/* Optional subsystems based on DT properties */
 	if (of_find_property(dev->of_node, "has-gpio", NULL) ||

@@ -13,7 +13,7 @@ from typing import Dict, List, Optional, Tuple, Union
 
 
 class AmlProtocolEngine:
-    """Authoritative protocol engine and packet validator for Amlogic USB Burning Tool (R1)."""
+    """Reference framing model; does not execute the U-Boot gadget or validate hardware."""
 
     # USB Device Identifiers
     USB_VENDOR_ID = 0x1B8E
@@ -147,6 +147,8 @@ class AmlProtocolEngine:
         expected_csum = header["checksum"]
         alg = header["alg"]
 
+        if not 0 < user_len <= 1024 * 1024:
+            return False, b"Invalid chunk length"
         if len(payload) != user_len:
             return False, f"Length mismatch: payload {len(payload)} != header {user_len}".encode("utf-8")
 
@@ -177,15 +179,11 @@ class AmlProtocolEngine:
             # Must return success immediately in USB produce mode
             return True, "success"
 
-        elif cmd == "disk_initial":
-            return True, "success"
-
         elif cmd == "bootloader_is_old":
-            # Reports success (old) when running from USB to allow upgrading
             return True, "success"
 
-        elif cmd == "erase_bootloader":
-            return True, "success"
+        elif cmd in ("disk_initial", "erase_bootloader", "verify", "save_setting", "burn_complete", "get_chipid"):
+            return False, "failed:unsupported"
 
         elif cmd == "download":
             if len(tokens) >= 2 and tokens[1] == "get_status":
@@ -195,25 +193,9 @@ class AmlProtocolEngine:
                 return True, "success"
             return True, "success"
 
-        elif cmd == "verify":
-            # verify sha1sum <expected_sha1>
-            return True, "success"
-
-        elif cmd == "save_setting":
-            return True, "success"
-
-        elif cmd == "burn_complete":
-            return True, "success"
-
-        elif cmd == "get_chipid":
-            return True, ":112233445566778899aabbcc"
-
-        elif cmd == "support_tempcontrol":
-            return True, "success"
-
         else:
-            # Fallback execution in U-Boot CLI
-            return True, "success"
+            return False, "failed:unsupported"
+
 
 
 class FipTocParser:
@@ -330,17 +312,49 @@ class AcsBinParser:
     @classmethod
     def verify_lpddr4_support(cls, data: bytes) -> Tuple[bool, str]:
         """Verify that ACS binary configures LPDDR4 memory (SM1 Board ID = 4)."""
-        magics = cls.contains_magics(data)
-        if not magics["has_acs_magic"]:
+        # G12A packed acs_set_t: 16-byte header then 16-byte section descriptors.
+        # Addresses are SRAM addresses relative to the ACS load base, not offsets
+        # inferred by scanning for a DramType byte anywhere in the file.
+        base = 0xFFFAF000
+        start = data.find(cls.MAGIC_ACS)
+        if start < 0:
             return False, "Missing 'acs__' magic header in ACS block"
+        if start + 112 > len(data):
+            return False, "Truncated ACS header"
+        magic, chip, version, header_len = struct.unpack_from("<5sBHQ", data, start)
+        if version != 1 or header_len not in (112, 156) or start + header_len > len(data):
+            return False, "Unsupported or truncated ACS header layout"
+        sections = {}
+        for pos, expected in ((16, b"ddrs_"), (32, b"ddrr_"), (48, b"pll__")):
+            magic, version, length, addr = struct.unpack_from("<5sBHQ", data, start + pos)
+            if magic != expected or version != 1:
+                return False, "Invalid ACS section descriptor"
+            off = addr - base
+            if not length or off < 0 or off > len(data) or length > len(data) - off:
+                return False, "ACS section points outside input buffer"
+            if not (off + length <= start or off >= start + header_len):
+                return False, "ACS section overlaps header"
+            if any(off < other_off + other_len and other_off < off + length
+                   for other_off, other_len in sections.values()):
+                return False, "Overlapping ACS sections"
+            sections[expected] = (off, length)
+        off, length = sections[b"ddrs_"]
+        # Two known ABI layouts shipped by the supported G12A FIP profiles:
+        # compact 192-byte records (board/type at 12/14), and 560-byte
+        # records (board/type at 8/10). Unknown revisions fail closed.
+        for stride, board_at, type_at in ((192, 12, 14), (560, 8, 10)):
+            if length % stride:
+                continue
+            records = [data[x:x + stride] for x in range(off, off + length, stride)]
+            if not all(rec[:4] == b"cfg." for rec in records):
+                continue
+            for rec in records:
+                if (rec[board_at] in (cls.BOARD_ID_STATION_MAX, cls.BOARD_ID_WILDCARD)
+                        and rec[type_at] == cls.DRAM_TYPE_LPDDR4):
+                    return True, "ACS contains a bounded LPDDR4 record for Station Max"
+            return False, "No LPDDR4 record for Station Max Board ID"
+        return False, "Unsupported DDR record size or invalid record magic"
 
-        # In G12A/SM1 ACS table:
-        # DramType = 2 indicates LPDDR4
-        # Board ID = 4 (or 0xff wildcard) must be supported
-        if b"\x02" not in data:
-            return False, "No LPDDR4 DramType marker (2) found in ACS table"
-
-        return True, "ACS contains valid LPDDR4 configuration"
 
 
 class KitchenBlobAuditor:

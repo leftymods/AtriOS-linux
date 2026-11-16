@@ -173,7 +173,7 @@ def check_dirty_state(
 
 def get_next_version(output_dir: str) -> Tuple[int, str]:
     """Scan output directory for existing yandex_s905x3_custom_v{N}.img images.
-    
+
     Returns (next_version_num, next_image_filename).
     """
     p_dir = Path(output_dir)
@@ -198,7 +198,7 @@ def get_next_version(output_dir: str) -> Tuple[int, str]:
 
 def update_latest_pointer(target_img: str, output_dir: str) -> None:
     """Update yandex_s905x3_custom_latest.img and latest.img to point to or match target_img.
-    
+
     On Linux / WSL: uses symlink (with fallback to hard link / copy).
     On Windows: uses hard link (os.link) with fallback to shutil.copyfile.
     """
@@ -272,6 +272,8 @@ def _rebuild_dirty_components(
                 dts_file = PROJECT_ROOT / "overlay" / "dts" / "sm1_s905x3_yandex.dts"
             staging_aml_dtb = staging_dir / "_aml_dtb.PARTITION"
 
+            if not dts_file.is_file():
+                return False, f"DTS input missing: {dts_file}"
             if dts_file.exists():
                 compile_dts(str(dts_file), str(tmp_dtb))
                 build_multi_dtb(str(tmp_dtb), str(staging_aml_dtb))
@@ -279,8 +281,7 @@ def _rebuild_dirty_components(
                 shutil.copy2(str(staging_aml_dtb), str(staging_dir / "meson1_ENC.dtb"))
                 dtb_rebuilt = True
         except Exception as exc:
-            if verbose:
-                print(f"[BUILD] Note on DTS compilation: {exc}")
+            return False, f"DTS compilation failed: {exc}"
 
     # If DTS changed OR boot changed -> rebuild boot.PARTITION
     if dirty_map.get("boot", False) or dtb_rebuilt:
@@ -302,11 +303,11 @@ def _rebuild_dirty_components(
                     tmp_dtb = ref_dtb
 
             staging_boot = staging_dir / "boot.PARTITION"
-            if kernel_path.exists() and tmp_dtb.exists():
-                build_boot_img(str(kernel_path), str(tmp_dtb), cmdline_str, str(staging_boot))
+            if not kernel_path.is_file() or not tmp_dtb.is_file():
+                return False, "Kernel or DTB missing for boot repack"
+            build_boot_img(str(kernel_path), str(tmp_dtb), cmdline_str, str(staging_boot))
         except Exception as exc:
-            if verbose:
-                print(f"[BUILD] Note on boot repack: {exc}")
+            return False, f"Boot repack failed: {exc}"
 
     return True, "OK"
 
@@ -345,7 +346,7 @@ def build_image(
 ) -> Tuple[int, str]:
     """
     Assemble 21 partitions into flashable Amlogic v2 image with CRC32 integrity.
-    
+
     Features:
     - Incremental cache (.fw_builder_cache.json): skips build if nothing changed
     - Selective rebuilding: vendor ext4, DTS multi-DTB, boot.img
@@ -375,13 +376,20 @@ def build_image(
     target_existing = out_img_path.exists() or latest_pointer.exists()
 
     if not is_any_dirty and not from_scratch and target_existing:
-        print("[INFO] No changes detected. Firmware image is up to date.")
         target_return = out_img_path if out_img_path.exists() else latest_pointer
-        return 0, str(target_return)
+        ampack_bin = _find_ampack()
+        if not ampack_bin:
+            return 1, "Required packaging tool ampack not found"
+        verified = subprocess.run([ampack_bin, "verify", str(target_return)], capture_output=True, text=True)
+        if target_return.stat().st_size > 2048 and verified.returncode == 0:
+            print("[INFO] No changes detected. Verified firmware image is up to date.")
+            return 0, str(target_return)
+        return 1, "Cached firmware image failed verification; rebuild with --from-scratch"
 
     # 3. Locate Repack / Staging Sources
-    is_test_env = workspace.resolve() != PROJECT_ROOT.resolve()
     ampack_bin = _find_ampack()
+    if not ampack_bin:
+        return 1, "Required packaging tool ampack not found"
 
     staging_dir = workspace / "staging"
     staging_dir.mkdir(parents=True, exist_ok=True)
@@ -404,26 +412,22 @@ def build_image(
             return 1, f"Missing critical partition: {cp}"
 
     # 5. Rebuild Dirty Components
-    _rebuild_dirty_components(workspace, staging_dir, dirty_map, verbose=verbose)
+    rebuilt, message = _rebuild_dirty_components(workspace, staging_dir, dirty_map, verbose=verbose)
+    if not rebuilt:
+        return 1, message
 
     # 6. AVB signing skipped for pure Linux build (avb2: 0, permissive mode)
 
-    # 7. Package Image
-    if not is_test_env and ampack_bin and staging_dir.exists():
-        if verbose:
-            print(f"[BUILD] Packaging firmware image via ampack: {out_img_path}...")
-        cmd = [ampack_bin, "pack", "--out-ver", "v2", "--verify", str(staging_dir), str(out_img_path)]
-        res = subprocess.run(cmd, capture_output=True, text=True)
-        if res.returncode != 0:
-            return res.returncode, f"ampack failed: {res.stderr}"
-    else:
-        # Test fallback: write valid Amlogic v2 mock image
-        hdr = bytearray(2048)
-        hdr[0:12] = b"AML_IMAGE_V2"
-        crc = zlib.crc32(hdr[:16]) & 0xFFFFFFFF
-        struct.pack_into("<I", hdr, 16, crc)
-        out_img_path.parent.mkdir(parents=True, exist_ok=True)
-        out_img_path.write_bytes(hdr)
+    # Production and tests use the same error semantics. Tests inject a packer.
+    if not ampack_bin:
+        return 1, "Required packaging tool ampack not found"
+    out_img_path.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [ampack_bin, "pack", "--out-ver", "v2", "--verify", str(staging_dir), str(out_img_path)]
+    res = subprocess.run(cmd, capture_output=True, text=True)
+    if res.returncode != 0:
+        return res.returncode, f"ampack failed: {res.stderr}"
+    if not out_img_path.is_file() or out_img_path.stat().st_size <= 2048:
+        return 1, "ampack did not produce a complete firmware image"
 
     # 8. Update Latest Pointer
     update_latest_pointer(str(out_img_path), str(out_dir))

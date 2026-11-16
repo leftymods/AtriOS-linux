@@ -40,7 +40,9 @@ AtriOS - Yandex Station Max tools
   System:
     atrios time [status|sync|tz Zone]     NTP time sync & timezone
     atrios reset                          Factory reset (double confirmation)
-    atrios ota [status|install|rollback]  OTA / SWUpdate firmware manager
+    atrios ota [status|check|download|update|install|rollback]
+                                         Signed updates from GitHub Releases
+    atrios ai server https://host        HTTPS voice client (/asr, /chat, /tts)
     atrios info                           System info (fastfetch)
 EOT
 }

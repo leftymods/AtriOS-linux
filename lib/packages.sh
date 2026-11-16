@@ -1,143 +1,111 @@
 #!/bin/bash
-# ==============================================================================
-# AtriOS Build System - Package Management Generator (.deb)
-# ==============================================================================
-# Generates .deb packages for U-Boot and Linux Kernel with on-device postinst hooks.
+# Build packages from the same kernel/U-Boot artifacts used by the image.
+
+kernel_release() {
+    make -s -C "$PROJECT_ROOT/cache/kernel" ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" kernelrelease
+}
+
+package_postinst_header() {
+    printf "#!/bin/sh\nset -eu\nBOARD='%s'\n" "$BOARD"
+    cat "$PROJECT_ROOT/lib/package-boot.sh"
+}
 
 build_u_boot_package() {
-    display_alert "INFO" "Building U-Boot .deb package for" "$BOARD ($BOARD_NAME)"
-    
-    local pkg_name="atrios-u-boot-${BOARD}"
-    local pkg_version="1.0"
-    local pkg_arch="arm64"
+    local pkg_name="atrios-u-boot-${BOARD}" pkg_version="1.0" pkg_arch="$ARCH"
     local pkg_dir="$PROJECT_ROOT/output/packages/${pkg_name}_${pkg_version}_${pkg_arch}"
-    local deb_out="$PROJECT_ROOT/output/packages/${pkg_name}_${pkg_version}_${pkg_arch}.deb"
-    local bootloader_src="$PROJECT_ROOT/$BOOTLOADER_BIN"
-
-    [ -f "$bootloader_src" ] || exit_with_error "Bootloader binary not found: $bootloader_src"
-
+    UBOOT_DEB="${pkg_dir}.deb"
+    [ -s "$BOOTLOADER_BIN" ] || exit_with_error "Bootloader binary not found: $BOOTLOADER_BIN"
     rm -rf "$pkg_dir"
-    mkdir -p "$pkg_dir/DEBIAN"
-    mkdir -p "$pkg_dir/usr/lib/u-boot/${BOARD}"
-
-    # Copy binary
-    cp "$bootloader_src" "$pkg_dir/usr/lib/u-boot/${BOARD}/u-boot.bin.sd.bin"
-
-    # Control file
+    mkdir -p "$pkg_dir/DEBIAN" "$pkg_dir/usr/lib/u-boot/$BOARD"
+    cp "$BOOTLOADER_BIN" "$pkg_dir/usr/lib/u-boot/$BOARD/u-boot.bin.sd.bin"
     cat > "$pkg_dir/DEBIAN/control" <<CTRL
-Package: ${pkg_name}
-Version: ${pkg_version}
+Package: $pkg_name
+Version: $pkg_version
 Section: admin
 Priority: optional
-Architecture: ${pkg_arch}
+Architecture: $pkg_arch
 Maintainer: AtriOS Project <dev@atrios.org>
-Description: AtriOS U-Boot bootloader and FIP for ${BOARD_NAME}
- Provides raw bootloader image and automatic eMMC partition flasher.
+Depends: util-linux, coreutils
+Description: AtriOS U-Boot bootloader and FIP for $BOARD_NAME
 CTRL
-
-    # Post-install script: flashes to eMMC on-device
-    cat > "$pkg_dir/DEBIAN/postinst" << 'PST'
-#!/bin/sh
-set -e
-
-UBOOT_SRC="/usr/lib/u-boot/${BOARD}/u-boot.bin.sd.bin"
-TARGET_DEV="/dev/mmcblk0"
-
-if [ -f "$UBOOT_SRC" ] && [ -b "$TARGET_DEV" ]; then
-    echo "[AtriOS] Updating bootloader on ${TARGET_DEV}..."
-    dd if="$UBOOT_SRC" of="$TARGET_DEV" bs=1 count=442 conv=notrunc status=none
-    dd if="$UBOOT_SRC" of="$TARGET_DEV" bs=512 skip=1 seek=1 conv=notrunc status=none
-    sync
-    echo "[AtriOS] U-Boot successfully updated on ${TARGET_DEV}."
-else
-    echo "[AtriOS] Warning: Target device ${TARGET_DEV} not present, bootloader files staged only."
-fi
-
-exit 0
+    package_postinst_header > "$pkg_dir/DEBIAN/postinst"
+    cat >> "$pkg_dir/DEBIAN/postinst" <<'PST'
+[ "${ATRIOS_IMAGE_BUILD:-0}" = 1 ] && exit 0
+UBOOT_SRC="/usr/lib/u-boot/$BOARD/u-boot.bin.sd.bin"
+[ -s "$UBOOT_SRC" ] || exit 1
+atrios_boot_target
+first_sector=$(cat "/sys/class/block/${TARGET_DEV##*/}p1/start")
+atrios_check_bootloader_size "$(stat -c %s "$UBOOT_SRC")" "$first_sector"
+echo "[AtriOS] Updating bootloader on $TARGET_DEV"
+# Preserve bytes 440..511 (disk signature, partition table and MBR signature).
+dd if="$UBOOT_SRC" of="$TARGET_DEV" bs=1 count=440 conv=notrunc,fsync status=none
+dd if="$UBOOT_SRC" of="$TARGET_DEV" bs=512 skip=1 seek=1 conv=notrunc,fsync status=none
+sync
 PST
     chmod 755 "$pkg_dir/DEBIAN/postinst"
-
-    # Build package
-    mkdir -p "$PROJECT_ROOT/output/packages"
-    dpkg-deb --build "$pkg_dir" "$deb_out" >/dev/null
+    dpkg-deb --root-owner-group --build "$pkg_dir" "$UBOOT_DEB" >/dev/null
     rm -rf "$pkg_dir"
-
-    display_alert "OK" "U-Boot package created:" "$deb_out"
+    display_alert OK "U-Boot package created:" "$UBOOT_DEB"
 }
 
 build_kernel_package() {
-    display_alert "INFO" "Building Linux Kernel .deb package for" "$BOARD ($BOARD_NAME)"
-
-    local kver="7.3.1"
-    local pkg_name="atrios-linux-image-${kver}"
-    local pkg_version="${kver}-1"
-    local pkg_arch="arm64"
+    local krel pkg_version pkg_name="atrios-linux-image-${BOARD}" pkg_arch="$ARCH"
+    krel=$(kernel_release)
+    [[ "$krel" =~ ^[0-9][a-zA-Z0-9.+~-]*$ ]] || exit_with_error "Invalid kernel release: $krel"
+    pkg_version="${krel}-1"
     local pkg_dir="$PROJECT_ROOT/output/packages/${pkg_name}_${pkg_version}_${pkg_arch}"
-    local deb_out="$PROJECT_ROOT/output/packages/${pkg_name}_${pkg_version}_${pkg_arch}.deb"
-
-    local kernel_img="$KERNEL_IMAGE"
-    local dtb_file="$PROJECT_ROOT/$DTB_IMAGE"
-
-    [ -f "$kernel_img" ] || exit_with_error "Kernel image not found: $kernel_img"
-    [ -f "$dtb_file" ] || exit_with_error "DTB not found: $dtb_file"
-
+    KERNEL_DEB="${pkg_dir}.deb"
+    [ -s "$KERNEL_IMAGE" ] || exit_with_error "Kernel Image not found: $KERNEL_IMAGE"
+    [ -s "$DTB_IMAGE" ] || exit_with_error "DTB not found: $DTB_IMAGE"
     rm -rf "$pkg_dir"
-    mkdir -p "$pkg_dir/DEBIAN"
-    mkdir -p "$pkg_dir/boot"
-    mkdir -p "$pkg_dir/usr/lib/modules/${kver}"
-
-    # Copy Kernel Image and DTB
-    cp "$kernel_img" "$pkg_dir/boot/Image"
-    cp "$dtb_file" "$pkg_dir/boot/${DTS_NAME}.dtb"
-
-    # Copy modules if compiled
-    local mod_src="$PROJECT_ROOT/cache/kernel/drivers/atrios"
-    if [ -d "$mod_src" ]; then
-        find "$mod_src" -name "*.ko" -exec cp {} "$pkg_dir/usr/lib/modules/${kver}/" \; 2>/dev/null || true
-    fi
-
-    # Control file
+    mkdir -p "$pkg_dir/DEBIAN" "$pkg_dir/usr/lib/atrios-kernel/$krel"
+    cp "$KERNEL_IMAGE" "$pkg_dir/usr/lib/atrios-kernel/$krel/Image"
+    cp "$DTB_IMAGE" "$pkg_dir/usr/lib/atrios-kernel/$krel/$DTS_NAME.dtb"
+    make -C "$PROJECT_ROOT/cache/kernel" ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" \
+        INSTALL_MOD_PATH="$pkg_dir/usr" DEPMOD=true modules_install
+    local mod_dir="$pkg_dir/usr/lib/modules/$krel"
+    [ -d "$mod_dir" ] || exit_with_error "modules_install did not install $krel"
+    rm -f "$mod_dir/build" "$mod_dir/source"
+    depmod -b "$pkg_dir/usr" "$krel"
     cat > "$pkg_dir/DEBIAN/control" <<CTRL
-Package: ${pkg_name}
-Version: ${pkg_version}
+Package: $pkg_name
+Version: $pkg_version
 Section: kernel
 Priority: optional
-Architecture: ${pkg_arch}
+Architecture: $pkg_arch
 Maintainer: AtriOS Project <dev@atrios.org>
-Description: AtriOS Linux Kernel and DTB for ${BOARD_NAME}
- Kernel release ${kver} with hardware device tree and peripheral drivers.
+Depends: kmod, util-linux, coreutils
+Description: AtriOS kernel, DTB and modules for $BOARD_NAME ($krel)
 CTRL
-
-    # Post-install script: updates /boot and executes depmod
-    cat > "$pkg_dir/DEBIAN/postinst" << 'PST'
-#!/bin/sh
-set -e
-
-echo "[AtriOS] Updating kernel artifacts in /boot..."
-if [ -d /boot ]; then
-    cp -f /boot/${DTS_NAME}.dtb /boot/dtb.img 2>/dev/null || true
-    sync
+    package_postinst_header > "$pkg_dir/DEBIAN/postinst"
+    printf "KERNEL_RELEASE='%s'\nDTS_NAME='%s'\n" "$krel" "$DTS_NAME" >> "$pkg_dir/DEBIAN/postinst"
+    cat >> "$pkg_dir/DEBIAN/postinst" <<'PST'
+if [ "${ATRIOS_IMAGE_BUILD:-0}" != 1 ]; then
+    atrios_boot_target
+    atrios_mount_boot
 fi
-
-if command -v depmod >/dev/null 2>&1; then
-    echo "[AtriOS] Running depmod..."
-    depmod -a || true
-fi
-
-echo "[AtriOS] Kernel update complete."
-exit 0
+mkdir -p /boot
+payload="/usr/lib/atrios-kernel/$KERNEL_RELEASE"
+for name in Image "$DTS_NAME.dtb"; do
+    [ ! -f "/boot/$name" ] || cp -p "/boot/$name" "/boot/$name.bak"
+    cp "$payload/$name" "/boot/$name.new"
+    mv -f "/boot/$name.new" "/boot/$name"
+done
+cp "/boot/$DTS_NAME.dtb" /boot/dtb.img
+depmod -a "$KERNEL_RELEASE"
+sync
 PST
     chmod 755 "$pkg_dir/DEBIAN/postinst"
-
-    # Build package
-    mkdir -p "$PROJECT_ROOT/output/packages"
-    dpkg-deb --build "$pkg_dir" "$deb_out" >/dev/null
+    dpkg-deb --root-owner-group --build "$pkg_dir" "$KERNEL_DEB" >/dev/null
     rm -rf "$pkg_dir"
-
-    display_alert "OK" "Kernel package created:" "$deb_out"
+    display_alert OK "Kernel package created:" "$KERNEL_DEB"
 }
 
 build_all_packages() {
+    check_tool dpkg-deb
+    check_tool depmod
+    build_kernel
+    bash "$PROJECT_ROOT/scripts/build_mainline_uboot.sh"
     build_u_boot_package
     build_kernel_package
 }

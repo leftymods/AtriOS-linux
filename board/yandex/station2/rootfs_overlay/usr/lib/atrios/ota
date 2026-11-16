@@ -1,298 +1,570 @@
 #!/usr/bin/env python3
-"""
-atrios-ota - AtriOS OTA & SWUpdate Firmware Manager
-Supports:
-  atrios ota status
-  atrios ota install <bundle.tar.gz | image.swu | http(s)://url> [--reboot]
-  atrios ota rollback [--reboot]
-"""
+"""Outbound HTTPS GitHub Releases client and signed, journalled OTA installer.
 
+atrios ota status | check | download | update [--reboot]
+atrios ota install <bundle.tar.gz> [--reboot] | rollback | recover | daemon
+"""
+import contextlib
+import bz2
+import gzip
+import lzma
+import fcntl
+import errno
 import hashlib
 import json
 import os
+import re
 import shutil
+import signal
 import subprocess
 import sys
 import tarfile
 import tempfile
-import urllib.request
+import time
+import threading
+import urllib.error
+import urllib.parse
+from pathlib import Path, PurePosixPath
+from atrios_https import open_https, request_json, request_bytes, require_https
+from atrios_status import set_error, error_kind
 
-BOOT_PART = "/dev/mmcblk1p1"
-BOOT_DIR = "/boot"
-STATE_FILE = "/var/lib/atrios/ota_status.json"
-VERSION_FILE = "/etc/atrios-version"
+CONFIG_FILE = Path("/etc/atrios/updates.json")
+STATE_FILE = Path("/var/lib/atrios/ota_status.json")
+JOURNAL = Path("/var/lib/atrios/ota-transaction.json")
+BACKUP_DIR = Path("/var/lib/atrios/ota-rollback")
+CACHE_DIR = Path("/var/cache/atrios/updates")
+VERSION_FILE = Path("/etc/atrios-version")
+BOOT_DIR = Path("/boot")
+ROOT_DIR = Path("/")
+LOCK_FILE = Path("/var/run/atrios/ota.lock")
+MAX_DOWNLOAD = 512 * 1024 * 1024
+MAX_EXPANDED = 2 * 1024 * 1024 * 1024
+MAX_MEMBERS = 50000
+_stop_requested = threading.Event()
+DEFAULT_CONFIG = {"repository": "leftymods/AtriOS-linux", "enabled": True,
+                  "interval_seconds": 21600, "public_key": "/etc/atrios/ota-public.pem"}
 
 
-def get_device_info():
-    info = {"id": "unknown", "name": "AtriOS Device", "rev": "", "codename": ""}
-    if os.path.exists("/usr/lib/atrios/device-detect"):
+class VerificationError(ValueError):
+    error_kind = "signature"
+
+
+def load_config():
+    cfg = dict(DEFAULT_CONFIG)
+    if CONFIG_FILE.exists():
+        value = json.loads(CONFIG_FILE.read_text())
+        if not isinstance(value, dict):
+            raise ValueError("Invalid updates.json")
+        cfg.update(value)
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", cfg["repository"]):
+        raise ValueError("Invalid GitHub repository")
+    return cfg
+
+
+def atomic_json(path, value):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix=".ota-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as out:
+            json.dump(value, out, indent=2)
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(name, path)
+        sync_dir(path.parent)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
+
+
+def sync_dir(path):
+    import errno
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
         try:
-            out = subprocess.check_output(
-                ["/bin/sh", "-c", ". /usr/lib/atrios/device-detect && printf '%s\\n%s\\n%s\\n%s' \"$DEVICE_ID\" \"$DEVICE_NAME\" \"$DEVICE_REV\" \"$DEVICE_CODENAME\""],
-                text=True,
-            )
-            lines = out.split("\n")
-            if len(lines) >= 4:
-                info["id"], info["name"], info["rev"], info["codename"] = lines[:4]
-        except Exception:
-            pass
-    return info
+            os.fsync(fd)
+        except OSError as exc:
+            if exc.errno not in (errno.EINVAL, errno.ENOTSUP):
+                raise
+    finally:
+        os.close(fd)
+
+
+@contextlib.contextmanager
+def update_lock():
+    LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with LOCK_FILE.open("a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise RuntimeError("Another update operation is running") from None
+        yield
+
+
+def device_id():
+    board = Path("/etc/atrios-board")
+    if board.exists():
+        value = board.read_text().strip()
+    else:
+        value = ""
+        meta = Path("/etc/atrios-device")
+        if meta.exists():
+            for line in meta.read_text().splitlines():
+                if line.startswith("DEVICE_CODENAME="):
+                    value = line.split("=", 1)[1].strip().strip('"').strip("'")
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", value):
+        raise RuntimeError("Unknown device: configure /etc/atrios-board before updating")
+    return value
+
+
+def current_version():
+    return VERSION_FILE.read_text().strip() if VERSION_FILE.exists() else "1.0"
+
+
+def version_key(value):
+    if not isinstance(value, str) or not re.fullmatch(r"v?[0-9]+(?:\.[0-9]+){0,3}", value):
+        raise ValueError("Stable OTA versions must contain 1-4 numeric components")
+    parts = tuple(int(part) for part in value.removeprefix("v").split("."))
+    return parts + (0,) * (4 - len(parts))
 
 
 def sha256_file(path):
     h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(65536), b""):
+    with open(path, "rb") as stream:
+        for chunk in iter(lambda: stream.read(65536), b""):
             h.update(chunk)
     return h.hexdigest()
 
 
-def mount_boot_part():
-    mnt = tempfile.mkdtemp(prefix="atrios_boot_")
-    subprocess.check_call(["mount", BOOT_PART, mnt])
-    return mnt
+def safe_rel(name):
+    if not isinstance(name, str) or not name or "\\" in name or "\x00" in name:
+        raise ValueError("Invalid archive path")
+    rel = PurePosixPath(name)
+    if rel.is_absolute() or ".." in rel.parts or str(rel) in (".", ""):
+        raise ValueError("Archive path escapes extraction directory")
+    return str(rel)
 
 
-def umount_boot_part(mnt):
-    if mnt and os.path.ismount(mnt):
-        subprocess.call(["sync"])
-        subprocess.call(["umount", mnt])
-    if mnt and os.path.isdir(mnt):
-        try:
-            os.rmdir(mnt)
-        except OSError:
-            pass
+class BoundedTarInfo(tarfile.TarInfo):
+    @classmethod
+    def frombuf(cls, buf, encoding, errors):
+        member = super().frombuf(buf, encoding, errors)
+        if member.type in (tarfile.GNUTYPE_LONGNAME, tarfile.GNUTYPE_LONGLINK, tarfile.XHDTYPE, tarfile.XGLTYPE) and member.size > 65536:
+            raise ValueError("Oversized tar metadata")
+        if member.isdir() and member.size != 0:
+            raise ValueError("Directory with payload is not supported")
+        return member
 
 
-def cmd_status():
-    dev = get_device_info()
-    kernel = os.uname().release
-    ver = "1.0"
-    if os.path.exists(VERSION_FILE):
-        with open(VERSION_FILE, "r", encoding="utf-8", errors="ignore") as f:
-            ver = f.read().strip() or ver
-    swupdate_bin = shutil.which("swupdate")
+class BoundedTarStream:
+    def __init__(self, stream):
+        self.stream = stream
+        self.total = 0
 
-    print(f"Device:    {dev['name']} {dev['rev']} ({dev['codename']}) [id={dev['id']}]")
-    print(f"Version:   {ver}")
-    print(f"Kernel:    {kernel}")
-    print(f"SWUpdate:  {swupdate_bin if swupdate_bin else 'built-in atrios-ota (tar.gz/manifest)'}")
-
-    if os.path.exists(STATE_FILE):
-        try:
-            with open(STATE_FILE, "r", encoding="utf-8") as f:
-                st = json.load(f)
-            print(f"Last OTA:  {st.get('version', '?')} ({st.get('status', '?')}) at {st.get('source', '?')}")
-        except Exception:
-            pass
-
-    if os.path.exists(BOOT_PART):
-        mnt = None
-        try:
-            mnt = mount_boot_part()
-            baks = [fn for fn in sorted(os.listdir(mnt)) if fn.endswith(".bak")]
-            print(f"Rollback:  {'available (' + ', '.join(baks) + ')' if baks else 'no .bak on ' + BOOT_PART}")
-        except Exception as e:
-            print(f"Rollback:  unable to inspect {BOOT_PART} ({e})")
-        finally:
-            umount_boot_part(mnt)
+    def read(self, size):
+        if size < 0 or size > MAX_EXPANDED - self.total:
+            raise ValueError("Expanded tar stream exceeds limit")
+        data = self.stream.read(size)
+        self.total += len(data)
+        if self.total > MAX_EXPANDED:
+            raise ValueError("Expanded tar stream exceeds limit")
+        return data
 
 
-def save_state(version, status, source):
-    os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
-    with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump({"version": version, "status": status, "source": source}, f, indent=2)
+def extract_safe(archive, destination):
+    """Bound decompressed bytes including tar metadata before tarfile parses it."""
+    with open(archive, "rb") as src:
+        magic = src.read(6)
+    opener = gzip.open if magic.startswith(b"\x1f\x8b") else lzma.open if magic.startswith(b"\xfd7zXZ") else bz2.open if magic.startswith(b"BZh") else open
+    total = 0
+    seen = set()
+    with opener(archive, "rb") as stream, tarfile.open(fileobj=BoundedTarStream(stream), mode="r|", tarinfo=BoundedTarInfo) as tf:
+        for count, member in enumerate(tf, 1):
+            if count > MAX_MEMBERS:
+                raise ValueError("Too many archive members")
+            name = safe_rel(member.name)
+            if name in seen or not (member.isdir() or member.isfile()) or getattr(member, "sparse", None):
+                raise ValueError("Duplicate or unsupported archive member")
+            seen.add(name)
+            target = Path(destination) / name
+            if member.isdir():
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            total += member.size
+            if member.size < 0 or total > MAX_EXPANDED:
+                raise ValueError("Expanded OTA size exceeds limit")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with tf.extractfile(member) as src, target.open("xb") as out:
+                shutil.copyfileobj(src, out, 65536)
+            os.chmod(target, member.mode & 0o777)
+    return total
 
 
-def backup_and_copy(src, dst):
-    if os.path.exists(dst):
-        shutil.copy2(dst, dst + ".bak")
-    shutil.copy2(src, dst)
+def verify_bundle(work, cfg):
+    manifest_path = work / "manifest.json"
+    signature = work / "manifest.sig"
+    key = Path(cfg["public_key"])
+    if not key.is_file():
+        raise VerificationError("OTA trust key not provisioned: " + str(key))
+    if not manifest_path.is_file() or manifest_path.stat().st_size > 1024 * 1024 or not signature.is_file():
+        raise ValueError("Missing or oversized signed manifest")
+    result = subprocess.run(["openssl", "dgst", "-sha256", "-verify", str(key), "-signature", str(signature), str(manifest_path)], capture_output=True, timeout=15)
+    if result.returncode:
+        set_error("ota", "signature", "Invalid OTA signature")
+        raise VerificationError("Invalid OTA manifest signature")
+    manifest = json.loads(manifest_path.read_text())
+    if manifest.get("schema") != 1 or manifest.get("device_id") != device_id():
+        raise ValueError("Unsupported OTA schema or wrong target device")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,63}", str(manifest.get("version", ""))):
+        raise ValueError("Invalid OTA version")
+    files = manifest.get("files")
+    if not isinstance(files, dict) or not files or set(files) - {"kernel", "dtb", "rootfs"} or manifest.get("debs"):
+        raise ValueError("Only signed kernel, DTB and regular-file rootfs overlays are supported; use a transactional image system for .deb scripts")
+    payloads = {}
+    for kind, entry in files.items():
+        if not isinstance(entry, dict) or not re.fullmatch(r"[0-9a-fA-F]{64}", str(entry.get("sha256", ""))):
+            raise ValueError("Mandatory SHA-256 missing for " + kind)
+        name = safe_rel(entry.get("path"))
+        path = work / name
+        if name in ("manifest.json", "manifest.sig") or not path.is_file() or sha256_file(path).lower() != entry["sha256"].lower():
+            raise VerificationError("Missing payload or SHA-256 mismatch for " + kind)
+        payloads[kind] = path
+    return manifest, payloads
 
 
-def install_bundle_tar(pkg_path, source_label, do_reboot=False):
-    dev = get_device_info()
-    work = tempfile.mkdtemp(prefix="atrios_ota_")
-    mnt = None
+def validate_boot_payloads(payloads):
+    if "kernel" in payloads:
+        path = payloads["kernel"]
+        with path.open("rb") as stream:
+            header = stream.read(64)
+        size = int.from_bytes(header[16:24], "little")
+        # image_size includes zero-initialized BSS and may exceed the file size.
+        if len(header) != 64 or header[56:60] != b"ARMd" or not 64 <= size <= 128 * 1024 * 1024 or path.stat().st_size > 128 * 1024 * 1024:
+            raise ValueError("Invalid ARM64 kernel Image header or size")
+    if "dtb" in payloads:
+        path = payloads["dtb"]
+        with path.open("rb") as stream:
+            header = stream.read(40)
+        size = int.from_bytes(header[4:8], "big")
+        if len(header) != 40 or header[:4] != b"\xd0\x0d\xfe\xed" or not 40 <= size <= path.stat().st_size:
+            raise ValueError("Invalid DTB header or size")
+
+
+def inspect_boot_mount(root_source, boot_source, fstype, device_type, label):
+    match = re.fullmatch(r"(/dev/mmcblk[0-9]+)p2", root_source)
+    if not match or boot_source != match[1] + "p1" or fstype != "vfat" or device_type != "MMC" or label != "BOOT":
+        raise RuntimeError("Refusing OTA: /boot must be BOOT on the same eMMC as root")
+
+
+def ensure_boot_mounted():
+    def inspect():
+        return subprocess.run(["findmnt", "-n", "-o", "FSTYPE", "--mountpoint", str(BOOT_DIR)], capture_output=True, text=True)
+    result = inspect()
+    if result.returncode:
+        subprocess.run(["mount", str(BOOT_DIR)], check=True)
+        result = inspect()
+    if result.returncode or result.stdout.strip() != "vfat":
+        raise RuntimeError("Refusing OTA: /boot must be the mounted FAT boot partition")
+    root_source = os.path.realpath(subprocess.check_output(["findmnt", "-n", "-o", "SOURCE", "--mountpoint", "/"], text=True).strip())
+    boot_source = os.path.realpath(subprocess.check_output(["findmnt", "-n", "-o", "SOURCE", "--mountpoint", str(BOOT_DIR)], text=True).strip())
+    disk = re.fullmatch(r"(/dev/(mmcblk[0-9]+))p2", root_source)
+    if not disk:
+        raise RuntimeError("Refusing OTA: root is not an eMMC partition 2")
+    device_type = Path("/sys/class/block", disk[2], "device/type").read_text().strip()
+    label = subprocess.check_output(["blkid", "-s", "LABEL", "-o", "value", boot_source], text=True).strip()
+    inspect_boot_mount(root_source, boot_source, result.stdout.strip(), device_type, label)
+
+
+def atomic_copy(src, dst):
+    dst = Path(dst)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix=".ota-", dir=dst.parent)
+    os.close(fd)
     try:
-        print(f"[AtriOS-OTA] Extracting {pkg_path}...")
-        with tarfile.open(pkg_path, "r:*") as tf:
-            tf.extractall(work)
-
-        manifest_path = os.path.join(work, "manifest.json")
-        if not os.path.exists(manifest_path):
-            raise RuntimeError("Invalid OTA bundle: missing manifest.json")
-
-        with open(manifest_path, "r", encoding="utf-8") as f:
-            manifest = json.load(f)
-
-        target_dev = manifest.get("device_id")
-        if target_dev and dev["id"] != "unknown" and target_dev != dev["id"]:
-            raise RuntimeError(f"Device mismatch: bundle is for '{target_dev}', this board is '{dev['id']}'")
-
-        version = manifest.get("version", "unknown")
-        files = manifest.get("files", {})
-
-        # Verify all SHA-256 checksums before touching flash
-        for key, entry in files.items():
-            rel = entry.get("path") if isinstance(entry, dict) else entry
-            expected_sha = entry.get("sha256") if isinstance(entry, dict) else None
-            fpath = os.path.join(work, rel)
-            if not os.path.exists(fpath):
-                raise RuntimeError(f"Missing payload file '{rel}' for '{key}'")
-            if expected_sha:
-                actual_sha = sha256_file(fpath)
-                if actual_sha.lower() != expected_sha.lower():
-                    raise RuntimeError(f"SHA-256 mismatch for '{rel}': {actual_sha} != {expected_sha}")
-        print(f"[AtriOS-OTA] Verified bundle v{version} (checksums OK).")
-
-        # Apply kernel / DTB to /boot and mmcblk1p1
-        if "kernel" in files or "dtb" in files:
-            if os.path.exists(BOOT_PART):
-                mnt = mount_boot_part()
-
-            if "kernel" in files:
-                k_rel = files["kernel"]["path"] if isinstance(files["kernel"], dict) else files["kernel"]
-                k_src = os.path.join(work, k_rel)
-                print("[AtriOS-OTA] Updating kernel Image...")
-                backup_and_copy(k_src, os.path.join(BOOT_DIR, "Image"))
-                if mnt:
-                    backup_and_copy(k_src, os.path.join(mnt, "Image"))
-
-            if "dtb" in files:
-                d_rel = files["dtb"]["path"] if isinstance(files["dtb"], dict) else files["dtb"]
-                d_src = os.path.join(work, d_rel)
-                dtb_name = manifest.get("dtb_name", "meson-sm1-yandex-station-max.dtb")
-                print(f"[AtriOS-OTA] Updating DTB ({dtb_name})...")
-                backup_and_copy(d_src, os.path.join(BOOT_DIR, dtb_name))
-                if mnt:
-                    backup_and_copy(d_src, os.path.join(mnt, dtb_name))
-                    if os.path.exists(os.path.join(mnt, "dtb.img")):
-                        backup_and_copy(d_src, os.path.join(mnt, "dtb.img"))
-
-        # Apply rootfs overlay tar if present
-        if "rootfs" in files:
-            r_rel = files["rootfs"]["path"] if isinstance(files["rootfs"], dict) else files["rootfs"]
-            r_src = os.path.join(work, r_rel)
-            print("[AtriOS-OTA] Applying rootfs update...")
-            with tarfile.open(r_src, "r:*") as rtf:
-                rtf.extractall("/")
-            subprocess.call(["depmod", "-a"])
-
-        # Install .deb packages if listed
-        for deb_entry in manifest.get("debs", []):
-            d_rel = deb_entry["path"] if isinstance(deb_entry, dict) else deb_entry
-            d_sha = deb_entry.get("sha256") if isinstance(deb_entry, dict) else None
-            d_path = os.path.join(work, d_rel)
-            if not os.path.exists(d_path):
-                raise RuntimeError(f"Missing deb '{d_rel}'")
-            if d_sha and sha256_file(d_path).lower() != d_sha.lower():
-                raise RuntimeError(f"SHA-256 mismatch for deb '{d_rel}'")
-            print(f"[AtriOS-OTA] Installing package {d_rel}...")
-            subprocess.check_call(["dpkg", "-i", d_path])
-
-        with open(VERSION_FILE, "w", encoding="utf-8") as f:
-            f.write(version + "\n")
-        save_state(version, "ok", source_label)
-        subprocess.call(["sync"])
-        print(f"[AtriOS-OTA] Update to v{version} completed successfully.")
-
-        if do_reboot:
-            print("[AtriOS-OTA] Rebooting...")
-            subprocess.call(["reboot"])
+        shutil.copy2(src, name)
+        with open(name, "rb") as stream:
+            os.fsync(stream.fileno())
+        os.replace(name, dst)
+        sync_dir(dst.parent)
     finally:
-        umount_boot_part(mnt)
-        shutil.rmtree(work, ignore_errors=True)
+        if os.path.exists(name):
+            os.unlink(name)
 
 
-def cmd_install(target, do_reboot=False):
-    tmp_dl = None
-    pkg_path = target
+def rollback_transaction():
+    if not JOURNAL.exists():
+        raise RuntimeError("No OTA transaction available for rollback")
+    state = json.loads(JOURNAL.read_text())
+    if state.get("boot"):
+        ensure_boot_mounted()
+    state["status"] = "rolling_back"
+    atomic_json(JOURNAL, state)
+    backup_dir = Path(state["backup_dir"])
+    for entry in reversed(state["entries"]):
+        dest = Path(entry["destination"])
+        if entry["existed"]:
+            atomic_copy(backup_dir / entry["backup"], dest)
+        elif dest.exists():
+            dest.unlink()
+            sync_dir(dest.parent)
+    state["status"] = "rolled_back"
+    # A failed replacement must not discard the previous successful update's
+    # rollback contract. Keep it in the WAL until restoration is durable.
+    previous = state.get("previous")
+    atomic_json(JOURNAL, previous if previous else state)
+    atomic_json(STATE_FILE, {"status": "rolled_back", "version": current_version()})
+
+
+def install_bundle_tar(pkg_path, source_label, do_reboot=False, expected_version=None):
+    cfg = load_config()
+    if JOURNAL.exists() and json.loads(JOURNAL.read_text()).get("status") in ("installing", "rolling_back"):
+        raise RuntimeError("Interrupted update exists; run atrios ota recover first")
+    with tempfile.TemporaryDirectory(prefix="atrios-ota-") as tmp:
+        # Installer metadata must never share names with authenticated payloads.
+        work = Path(tmp) / "payload"
+        work.mkdir()
+        extract_safe(pkg_path, work)
+        manifest, payloads = verify_bundle(work, cfg)
+        validate_boot_payloads(payloads)
+        if version_key(manifest["version"]) < version_key(current_version()):
+            raise VerificationError("Refusing an OTA downgrade")
+        if expected_version is not None and manifest["version"].removeprefix("v") != expected_version.removeprefix("v"):
+            raise VerificationError("Signed manifest version does not match GitHub release")
+        plan = []
+        if "rootfs" in payloads:
+            overlay = Path(tmp) / "overlay"
+            overlay.mkdir()
+            extract_safe(payloads["rootfs"], overlay)
+            for src in sorted(overlay.rglob("*")):
+                if not src.is_file():
+                    continue
+                rel = src.relative_to(overlay)
+                dest = (ROOT_DIR / rel).resolve()
+                try:
+                    resolved_rel = dest.relative_to(ROOT_DIR.resolve())
+                except ValueError:
+                    raise ValueError("Rootfs destination escapes target root") from None
+                if resolved_rel.parts[0] in ("proc", "sys", "dev", "run", "tmp", "boot") or str(resolved_rel).startswith("var/run/") or str(resolved_rel).startswith("var/lib/atrios/ota-"):
+                    raise ValueError("Forbidden rootfs update destination: " + str(rel))
+                plan.append((src, dest))
+        if "kernel" in payloads:
+            release = manifest.get("kernel_release", "")
+            if not re.fullmatch(r"[A-Za-z0-9._+-]{1,128}", release):
+                raise ValueError("kernel_release is required")
+            if release != os.uname().release:
+                module_dirs = {str(dst.relative_to(ROOT_DIR)).split("/modules/", 1)[-1].split("/", 1)[0] for _, dst in plan if "/modules/" in str(dst)}
+                if release not in module_dirs:
+                    raise ValueError("New kernel release requires matching modules in rootfs overlay")
+            plan.append((payloads["kernel"], BOOT_DIR / "Image"))
+        if "dtb" in payloads:
+            name = manifest.get("dtb_name", "meson-sm1-yandex-station-max.dtb")
+            if safe_rel(name) != name or "/" in name or not name.endswith(".dtb"):
+                raise ValueError("Invalid DTB name")
+            plan.extend([(payloads["dtb"], BOOT_DIR / name), (payloads["dtb"], BOOT_DIR / "dtb.img")])
+        if not plan:
+            raise ValueError("OTA bundle contains no installable files")
+        if "kernel" in payloads or "dtb" in payloads:
+            ensure_boot_mounted()
+        destinations = [str(dst) for _, dst in plan] + [str(VERSION_FILE)]
+        if len(set(destinations)) != len(destinations):
+            raise ValueError("Duplicate OTA destinations")
+        for _, dst in plan:
+            if dst.is_symlink() or (dst.exists() and not dst.is_file()):
+                raise ValueError("Refusing non-regular OTA destination: " + str(dst))
+        # Preflight all destinations and rollback storage before modifying anything.
+        required = sum(dst.stat().st_size for _, dst in plan if dst.exists())
+        BACKUP_DIR.parent.mkdir(parents=True, exist_ok=True)
+        if shutil.disk_usage(BACKUP_DIR.parent).free < required + 16 * 1024 * 1024:
+            raise OSError(errno.ENOSPC, "Insufficient rollback storage")
+        for src, dst in plan:
+            parent = dst.parent
+            while not parent.exists():
+                parent = parent.parent
+            if shutil.disk_usage(parent).free < src.stat().st_size + 1024 * 1024:
+                raise OSError(errno.ENOSPC, "Insufficient space for " + str(dst))
+        version_src = Path(tmp) / "new-version"
+        version_src.write_text(manifest["version"] + "\n")
+        plan.append((version_src, VERSION_FILE))
+        previous = json.loads(JOURNAL.read_text()) if JOURNAL.exists() else None
+        transaction_backup = Path(tempfile.mkdtemp(prefix=BACKUP_DIR.name + "-", dir=BACKUP_DIR.parent))
+        state = {"status": "installing", "previous": previous, "backup_dir": str(transaction_backup), "version": manifest["version"], "source": source_label, "boot": "kernel" in payloads or "dtb" in payloads, "entries": []}
+        atomic_json(JOURNAL, state)
+        try:
+            for index, (src, dst) in enumerate(plan):
+                existed = dst.exists()
+                backup = str(index)
+                if existed:
+                    atomic_copy(dst, transaction_backup / backup)
+                state["entries"].append({"destination": str(dst), "existed": existed, "backup": backup})
+                atomic_json(JOURNAL, state)
+                atomic_copy(src, dst)
+            state["status"] = "installed"
+            state.pop("previous", None)
+            atomic_json(JOURNAL, state)
+            atomic_json(STATE_FILE, {"version": manifest["version"], "status": "installed", "source": source_label})
+            set_error("ota")
+            # Old backups remain valid until the new durable transaction succeeds.
+            if previous and previous.get("backup_dir"):
+                old_backup = Path(previous["backup_dir"])
+                if old_backup.parent == BACKUP_DIR.parent and old_backup.name.startswith(BACKUP_DIR.name + "-"):
+                    shutil.rmtree(old_backup, ignore_errors=True)
+        except BaseException:
+            rollback_transaction()
+            raise
+    if do_reboot:
+        subprocess.run(["reboot"], check=True)
+
+
+def latest_release(cfg=None):
+    cfg = cfg or load_config()
+    data = request_json("https://api.github.com/repos/" + cfg["repository"] + "/releases/latest", headers={"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"})
+    if data.get("draft") or data.get("prerelease"):
+        raise ValueError("Only stable published releases are accepted")
+    name = "AtriOS-" + device_id() + "-ota.tar.gz"
+    asset = next((a for a in data.get("assets", []) if a.get("name") == name), None)
+    if not asset:
+        raise ValueError("Release has no bundle for this board: " + name)
+    url = asset.get("browser_download_url", "")
+    require_https(url)
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.hostname != "github.com" or not parsed.path.startswith("/" + cfg["repository"] + "/releases/download/"):
+        raise ValueError("Unexpected GitHub release asset URL")
+    if not isinstance(asset.get("size"), int) or not 0 < asset["size"] <= MAX_DOWNLOAD:
+        raise ValueError("Invalid release asset size")
+    tag = str(data.get("tag_name", ""))
+    if not re.fullmatch(r"v?[A-Za-z0-9][A-Za-z0-9._+-]{0,63}", tag):
+        raise ValueError("Invalid release tag")
+    digest = asset.get("digest", "")
+    if not re.fullmatch(r"sha256:[0-9a-fA-F]{64}", digest or ""):
+        sidecar = next((a for a in data.get("assets", []) if a.get("name") == name + ".sha256"), None)
+        if not sidecar or sidecar.get("browser_download_url") != url + ".sha256":
+            raise ValueError("Release has no SHA-256 digest")
+        text = request_bytes(url + ".sha256", limit=1024).decode("ascii")
+        match = re.fullmatch(r"([0-9a-fA-F]{64})[ \t]+\*?" + re.escape(name) + r"\s*", text)
+        if not match:
+            raise ValueError("Invalid release checksum file")
+        digest = "sha256:" + match[1]
+    return {"tag": tag, "version": tag.removeprefix("v"), "asset": name, "url": url, "size": asset["size"], "sha256": digest.split(":", 1)[1].lower()}
+
+
+def download_release(release):
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    target = CACHE_DIR / (release["tag"] + "-" + release["asset"])
+    if target.is_file() and sha256_file(target) == release["sha256"]:
+        return target
+    if shutil.disk_usage(CACHE_DIR).free < release["size"] + 16 * 1024 * 1024:
+        raise OSError(errno.ENOSPC, "Insufficient update download storage")
+    fd, temporary = tempfile.mkstemp(prefix=".download-", dir=CACHE_DIR)
     try:
-        if target.startswith("http://") or target.startswith("https://"):
-            suffix = ".swu" if target.endswith(".swu") else ".tar.gz"
-            fd, tmp_dl = tempfile.mkstemp(prefix="atrios_dl_", suffix=suffix)
-            os.close(fd)
-            print(f"[AtriOS-OTA] Downloading {target}...")
-            urllib.request.urlretrieve(target, tmp_dl)
-            pkg_path = tmp_dl
-
-        if not os.path.exists(pkg_path):
-            raise RuntimeError(f"File not found: {pkg_path}")
-
-        if pkg_path.endswith(".swu"):
-            swu = shutil.which("swupdate")
-            if not swu:
-                raise RuntimeError("'.swu' image given, but 'swupdate' binary is not installed; use '.tar.gz' OTA bundle or install swupdate")
-            print(f"[AtriOS-OTA] Running swupdate -i {pkg_path}...")
-            subprocess.check_call([swu, "-v", "-i", pkg_path])
-            save_state("swupdate", "ok", target)
-            subprocess.call(["sync"])
-            if do_reboot:
-                subprocess.call(["reboot"])
-        else:
-            install_bundle_tar(pkg_path, target, do_reboot=do_reboot)
+        size = 0
+        digest = hashlib.sha256()
+        deadline = time.monotonic() + 1800
+        with os.fdopen(fd, "wb") as out, open_https(release["url"], timeout=30, total_timeout=1800, cancel=_stop_requested.is_set) as response:
+            while True:
+                if _stop_requested.is_set():
+                    raise InterruptedError("Update download cancelled")
+                if time.monotonic() > deadline:
+                    raise TimeoutError("Update download deadline exceeded")
+                chunk = getattr(response, "read1", response.read)(65536)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > release["size"] or size > MAX_DOWNLOAD:
+                    raise ValueError("Oversized release download")
+                out.write(chunk)
+                digest.update(chunk)
+            out.flush()
+            os.fsync(out.fileno())
+        if size != release["size"] or digest.hexdigest() != release["sha256"]:
+            raise VerificationError("Release download SHA-256/size mismatch")
+        os.replace(temporary, target)
+        sync_dir(CACHE_DIR)
+        atomic_json(STATE_FILE, {**release, "status": "downloaded", "path": str(target)})
+        set_error("ota")
+        return target
     finally:
-        if tmp_dl and os.path.exists(tmp_dl):
-            os.remove(tmp_dl)
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
 
-def cmd_rollback(do_reboot=False):
-    mnt = None
-    restored = []
-    try:
-        for fn in os.listdir(BOOT_DIR):
-            if fn.endswith(".bak"):
-                orig = fn[:-4]
-                shutil.copy2(os.path.join(BOOT_DIR, fn), os.path.join(BOOT_DIR, orig))
-                restored.append(f"/boot/{orig}")
+def check_and_download(install=False, do_reboot=False):
+    release = latest_release()
+    if version_key(release["version"]) <= version_key(current_version()):
+        print("AtriOS is up to date")
+        set_error("ota")
+        return None
+    path = download_release(release)
+    print("Downloaded:", path)
+    if install:
+        install_bundle_tar(path, release["url"], do_reboot, expected_version=release["version"])
+    return path
 
-        if os.path.exists(BOOT_PART):
-            mnt = mount_boot_part()
-            for fn in os.listdir(mnt):
-                if fn.endswith(".bak"):
-                    orig = fn[:-4]
-                    shutil.copy2(os.path.join(mnt, fn), os.path.join(mnt, orig))
-                    restored.append(f"{BOOT_PART}:{orig}")
 
-        subprocess.call(["sync"])
-        if not restored:
-            print("[AtriOS-OTA] No .bak backups found for rollback.")
-            return 1
-        print("[AtriOS-OTA] Rolled back:", ", ".join(restored))
-        if do_reboot:
-            subprocess.call(["reboot"])
-        return 0
-    finally:
-        umount_boot_part(mnt)
+def run_daemon():
+    stopped = False
+    def stop(*_):
+        nonlocal stopped
+        stopped = True
+        _stop_requested.set()
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+    while not stopped:
+        delay = 60
+        try:
+            cfg = load_config()
+            if cfg.get("enabled", True):
+                with update_lock():
+                    check_and_download()
+            delay = max(300, min(86400, int(cfg["interval_seconds"])))
+        except urllib.error.HTTPError as exc:
+            # A repository with no published release is normal during provisioning.
+            if exc.code != 404:
+                set_error("ota", "update", str(exc))
+            print("[OTA]", exc, flush=True)
+        except Exception as exc:
+            set_error("ota", error_kind(exc), str(exc))
+            print("[OTA]", exc, flush=True)
+        deadline = time.monotonic() + delay
+        while not stopped and time.monotonic() < deadline:
+            time.sleep(min(1, max(0, deadline - time.monotonic())))
 
 
 def main():
     args = sys.argv[1:]
-    do_reboot = "--reboot" in args
-    args = [a for a in args if a != "--reboot"]
-
-    if not args or args[0] in ("-h", "--help", "help"):
-        print(__doc__.strip())
+    reboot = "--reboot" in args
+    args = [arg for arg in args if arg != "--reboot"]
+    cmd = args[0] if args else "status"
+    if cmd == "daemon":
+        run_daemon()
         return 0
-
-    sub = args[0]
-    if sub == "status":
-        cmd_status()
+    if cmd == "status":
+        print(json.dumps({"version": current_version(), "config": load_config(), "last": json.loads(STATE_FILE.read_text()) if STATE_FILE.exists() else None}, indent=2))
         return 0
-    if sub == "install" and len(args) >= 2:
-        cmd_install(args[1], do_reboot=do_reboot)
-        return 0
-    if sub == "rollback":
-        return cmd_rollback(do_reboot=do_reboot)
-
-    print(__doc__.strip(), file=sys.stderr)
-    return 1
+    with update_lock():
+        if cmd == "check":
+            print(json.dumps(latest_release(), indent=2))
+        elif cmd in ("download", "update"):
+            check_and_download(install=cmd == "update", do_reboot=reboot)
+        elif cmd == "install" and len(args) == 2:
+            # Local signed bundles only; remote releases use check/download/update.
+            install_bundle_tar(Path(args[1]), args[1], reboot)
+        elif cmd == "rollback":
+            rollback_transaction()
+            if reboot:
+                subprocess.run(["reboot"], check=True)
+        elif cmd == "recover":
+            if JOURNAL.exists() and json.loads(JOURNAL.read_text()).get("status") in ("installing", "rolling_back"):
+                rollback_transaction()
+        else:
+            print(__doc__)
+            return 1
+    return 0
 
 
 if __name__ == "__main__":
     try:
         sys.exit(main())
     except Exception as exc:
-        print(f"[AtriOS-OTA] ERROR: {exc}", file=sys.stderr)
+        set_error("ota", error_kind(exc), str(exc))
+        print("[AtriOS-OTA] ERROR:", exc, file=sys.stderr)
         sys.exit(1)

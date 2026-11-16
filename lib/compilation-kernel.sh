@@ -10,10 +10,11 @@ build_kernel() {
 
     # 1. Resolve Kernel Source in cache/kernel or Clone from Git
     if [ ! -d "$kernel_dir" ]; then
-        if [ -d "/home/lmods/linux-7.3.1" ]; then
-            display_alert "INFO" "Linking existing local kernel tree into" "$kernel_dir"
+        if [ -n "${KERNEL_SOURCE_DIR:-}" ]; then
+            [ -f "$KERNEL_SOURCE_DIR/Makefile" ] || exit_with_error "Invalid KERNEL_SOURCE_DIR: $KERNEL_SOURCE_DIR"
+            display_alert "INFO" "Linking configured local kernel tree into" "$kernel_dir"
             mkdir -p "$PROJECT_ROOT/cache"
-            ln -sfn "/home/lmods/linux-7.3.1" "$kernel_dir"
+            ln -sfn "$(realpath "$KERNEL_SOURCE_DIR")" "$kernel_dir"
         else
             local git_url="${KERNEL_GIT_URL:-https://github.com/torvalds/linux.git}"
             local git_branch="${KERNEL_BRANCH:-master}"
@@ -31,15 +32,15 @@ build_kernel() {
     local dts_src="$PROJECT_ROOT/$UBOOT_SOURCE_DIR/dts/${DTS_NAME}.dts"
     local out_dir="$PROJECT_ROOT/output/images"
 
+    [ -s "$defconfig_src" ] || exit_with_error "Kernel defconfig missing: $defconfig_src"
+    [ -s "$dts_src" ] || exit_with_error "Kernel DTS missing: $dts_src"
     export ARCH=arm64
     export CROSS_COMPILE="${CROSS_COMPILE:-aarch64-linux-gnu-}"
 
-    # 2. Inject DTS into kernel tree if provided by board
-    if [ -f "$dts_src" ]; then
-        display_alert "INFO" "Injecting Device Tree:" "${DTS_NAME}.dts"
-        mkdir -p "$kernel_dir/arch/arm64/boot/dts/amlogic"
-        cp "$dts_src" "$kernel_dir/arch/arm64/boot/dts/amlogic/"
-    fi
+    # Stage current repository sources and build rules without deleting foreign files.
+    # Replaced files are retained under kernel/.atrios-source-backups/.
+    python3 "$PROJECT_ROOT/lib/kernel-tree.py" "$kernel_dir" \
+        "$PROJECT_ROOT/drivers/atrios" "$dts_src" "$defconfig_src"
 
     # 2.5 Apply kernel patches if available
     local patches_dir="$PROJECT_ROOT/$UBOOT_SOURCE_DIR/patches/linux-7.0"
@@ -47,15 +48,9 @@ build_kernel() {
         for patch_file in "$patches_dir"/*.patch; do
             if [ -f "$patch_file" ]; then
                 display_alert "INFO" "Applying kernel patch:" "$(basename "$patch_file")"
-                (cd "$kernel_dir" && patch -p1 -N -r - < "$patch_file" 2>/dev/null || true)
+                apply_kernel_patch "$kernel_dir" "$patch_file"
             fi
         done
-    fi
-
-    # 3. Configure kernel
-    if [ -f "$defconfig_src" ]; then
-        display_alert "INFO" "Applying kernel defconfig:" "${KERNEL_DEFCONFIG}"
-        cp "$defconfig_src" "$kernel_dir/.config"
     fi
 
     # 4. Build Kernel Image & DTBs
@@ -73,11 +68,23 @@ build_kernel() {
 
     [ -f "$built_image" ] || exit_with_error "Kernel Image build failed: $built_image not found"
     
-    cp "$built_image" "$out_dir/Image"
+    mkdir -p "$(dirname "$KERNEL_IMAGE")" "$(dirname "$DTB_IMAGE")"
+    cp "$built_image" "$KERNEL_IMAGE"
     display_alert "OK" "Kernel Image successfully compiled:" "$out_dir/Image"
 
-    if [ -f "$built_dtb" ]; then
-        cp "$built_dtb" "$out_dir/${DTS_NAME}.dtb"
-        display_alert "OK" "Device Tree compiled:" "$out_dir/${DTS_NAME}.dtb"
+    [ -s "$built_dtb" ] || exit_with_error "Kernel DTB build failed: $built_dtb not found"
+    cp "$built_dtb" "$DTB_IMAGE"
+    display_alert "OK" "Device Tree compiled:" "$DTB_IMAGE"
+}
+
+# Reject a patch that is neither cleanly applicable nor already applied.
+apply_kernel_patch() {
+    local kernel_dir="$1" patch_file="$2"
+    if patch --batch --dry-run --forward -d "$kernel_dir" -p1 < "$patch_file" >/dev/null 2>&1; then
+        patch --batch --forward -d "$kernel_dir" -p1 < "$patch_file"
+    elif patch --batch --dry-run --reverse -d "$kernel_dir" -p1 < "$patch_file" >/dev/null 2>&1; then
+        display_alert INFO "Patch already applied:" "$(basename "$patch_file")"
+    else
+        exit_with_error "Kernel patch is incompatible or partially applied: $patch_file"
     fi
 }

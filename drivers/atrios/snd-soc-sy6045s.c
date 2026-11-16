@@ -448,6 +448,7 @@ static int sy6045s_apply_settings(struct sy6045s_priv *sy, const char *data,
 	const char *end = data + size;
 	u8 block[36];
 	int block_len = 0;
+	int ret;
 	int line_num = 1;
 	int blocks_written = 0;
 
@@ -458,8 +459,10 @@ static int sy6045s_apply_settings(struct sy6045s_priv *sy, const char *data,
 
 		if (c == '#' || c == 'd' || c == '\n' || c == '\r') {
 			if (block_len > 0) {
-				sy6045s_write_block(sy, block[0],
+				ret = sy6045s_write_block(sy, block[0],
 						    block_len - 1, &block[1]);
+				if (ret < 0)
+					return ret;
 				blocks_written++;
 				block_len = 0;
 			}
@@ -467,8 +470,10 @@ static int sy6045s_apply_settings(struct sy6045s_priv *sy, const char *data,
 			size_t pos = 1;
 
 			if (block_len > 0) {
-				sy6045s_write_block(sy, block[0],
+				ret = sy6045s_write_block(sy, block[0],
 						    block_len - 1, &block[1]);
+				if (ret < 0)
+					return ret;
 				blocks_written++;
 				block_len = 0;
 			}
@@ -515,8 +520,10 @@ static int sy6045s_apply_settings(struct sy6045s_priv *sy, const char *data,
 	}
 
 	if (block_len > 0) {
-		sy6045s_write_block(sy, block[0],
+		ret = sy6045s_write_block(sy, block[0],
 				    block_len - 1, &block[1]);
+		if (ret < 0)
+			return ret;
 		blocks_written++;
 	}
 

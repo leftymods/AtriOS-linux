@@ -18,7 +18,7 @@
 #include <linux/platform_device.h>
 #include <linux/of.h>
 #include <linux/gpio/consumer.h>
-#include <linux/workqueue.h>
+#include <linux/spinlock.h>
 #include <linux/hrtimer.h>
 #include <linux/ktime.h>
 #include <linux/jiffies.h>
@@ -35,7 +35,9 @@ struct rotary_volume {
 	struct device *dev;
 	struct gpio_descs *gpios;
 	struct input_dev *input;
-	struct work_struct work;
+	spinlock_t state_lock;
+	int irqs[EXPECTED_GPIOS];
+	unsigned int requested_irqs;
 	struct hrtimer poll_hrtimer;
 	bool use_irq;
 	unsigned int scan_period_ms;
@@ -156,21 +158,18 @@ static void rotary_process_state(struct rotary_volume *rv, unsigned int state,
 	}
 }
 
-static void rotary_volume_work(struct work_struct *work)
-{
-	struct rotary_volume *rv = container_of(work, struct rotary_volume, work);
-	int v0 = 0, v1 = 0;
-	unsigned int state = rotary_read_state_cansleep(rv, &v0, &v1);
-
-	rotary_process_state(rv, state, v0, v1);
-}
-
 static irqreturn_t rotary_volume_irq(int irq, void *dev_id)
 {
 	struct rotary_volume *rv = dev_id;
+	unsigned long flags;
+	unsigned int state;
+	int v0, v1;
 
+	spin_lock_irqsave(&rv->state_lock, flags);
+	state = rotary_read_state_atomic(rv, &v0, &v1);
 	rv->irq_count++;
-	queue_work(system_dfl_wq, &rv->work);
+	rotary_process_state(rv, state, v0, v1);
+	spin_unlock_irqrestore(&rv->state_lock, flags);
 	return IRQ_HANDLED;
 }
 
@@ -241,6 +240,12 @@ static int rotary_volume_probe(struct platform_device *pdev)
 		return -EINVAL;
 	}
 
+	/* The edge sampler and hrtimer must never access sleeping GPIOs. */
+	for (i = 0; i < rv->gpios->ndescs; i++)
+		if (gpiod_cansleep(rv->gpios->desc[i]))
+			return dev_err_probe(dev, -EOPNOTSUPP,
+					     "rotary requires non-sleeping GPIOs\n");
+
 	count = of_property_count_u32_elems(dev->of_node, "key-codes");
 	if (count != (int)rv->gpios->ndescs) {
 		dev_err(dev, "[ROTARY] ERROR: unexpected key-codes count %d (expected %u)\n",
@@ -275,7 +280,7 @@ static int rotary_volume_probe(struct platform_device *pdev)
 		return ret;
 	}
 
-	INIT_WORK(&rv->work, rotary_volume_work);
+	spin_lock_init(&rv->state_lock);
 	platform_set_drvdata(pdev, rv);
 
 	rv->scan_period_ms = 1;
@@ -299,8 +304,8 @@ static int rotary_volume_probe(struct platform_device *pdev)
 			rv->use_irq = false;
 			break;
 		}
-		ret = devm_request_threaded_irq(dev, irq, rotary_volume_irq,
-						NULL, IRQF_TRIGGER_FALLING | IRQF_TRIGGER_RISING,
+		ret = devm_request_irq(dev, irq, rotary_volume_irq,
+						IRQF_TRIGGER_FALLING | IRQF_TRIGGER_RISING,
 						DRV_NAME, rv);
 		if (ret) {
 			dev_info(dev, "[ROTARY] request_irq(%d) failed (%d) -> using hrtimer polling (%ums)\n",
@@ -308,6 +313,14 @@ static int rotary_volume_probe(struct platform_device *pdev)
 			rv->use_irq = false;
 			break;
 		}
+		rv->irqs[rv->requested_irqs++] = irq;
+	}
+
+	if (!rv->use_irq) {
+		while (rv->requested_irqs)
+			devm_free_irq(dev, rv->irqs[--rv->requested_irqs], rv);
+		rv->prev_state = rotary_read_state_atomic(rv, NULL, NULL);
+		rv->step_accum = 0;
 	}
 
 	ret = sysfs_create_group(&dev->kobj, &rotary_volume_attr_group);
@@ -336,8 +349,10 @@ static int rotary_volume_remove(struct platform_device *pdev)
 
 	if (rv) {
 		sysfs_remove_group(&pdev->dev.kobj, &rotary_volume_attr_group);
+		while (rv->requested_irqs)
+			devm_free_irq(&pdev->dev,
+				rv->irqs[--rv->requested_irqs], rv);
 		hrtimer_cancel(&rv->poll_hrtimer);
-		cancel_work_sync(&rv->work);
 	}
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 11, 0)
 	return 0;

@@ -66,6 +66,12 @@ static const struct backlight_ops ring_bl_ops = {
 
 static int ring_fb_mmap(struct fb_info *info, struct vm_area_struct *vma)
 {
+	unsigned long size = vma->vm_end - vma->vm_start;
+	unsigned long pages = PAGE_ALIGN(info->screen_size) >> PAGE_SHIFT;
+
+	if (vma->vm_pgoff >= pages ||
+	    size > ((pages - vma->vm_pgoff) << PAGE_SHIFT))
+		return -EINVAL;
 	return remap_vmalloc_range(vma, info->screen_buffer, vma->vm_pgoff);
 }
 
@@ -111,6 +117,7 @@ static void ring_fb_destroy(struct fb_info *info)
 {
 	if (info->screen_buffer)
 		vfree(info->screen_buffer);
+	framebuffer_release(info);
 }
 
 static int ring_fb_check_var(struct fb_var_screeninfo *var, struct fb_info *info)
@@ -341,7 +348,7 @@ static int __init led_ring_init(void)
 		return -ENOMEM;
 	}
 
-	info->screen_buffer = vzalloc(FB_SIZE);
+	info->screen_buffer = vmalloc_user(FB_SIZE);
 	if (!info->screen_buffer) {
 		pr_err("[LED_RING] ERROR: failed to allocate video memory\n");
 		ret = -ENOMEM;
@@ -408,6 +415,8 @@ err_unreg_bl:
 	backlight_device_unregister(ring_bl);
 err_unreg_fb:
 	unregister_framebuffer(info);
+	ring_fb = NULL;
+	return ret;
 err_free_video:
 	vfree(info->screen_buffer);
 err_release:
@@ -432,7 +441,7 @@ static void __exit led_ring_exit(void)
 
 	unregister_reboot_notifier(&led_ring_reboot_nb);
 	unregister_framebuffer(ring_fb);
-	framebuffer_release(ring_fb);
+	ring_fb = NULL;
 }
 
 module_init(led_ring_init);

@@ -75,8 +75,8 @@ def sync_once(quiet=False):
 
 
 def set_timezone(tz_name):
-    target = os.path.join(ZONEINFO_DIR, tz_name)
-    if not os.path.exists(target):
+    target = os.path.realpath(os.path.join(ZONEINFO_DIR, tz_name))
+    if not target.startswith(os.path.realpath(ZONEINFO_DIR) + os.sep) or not os.path.isfile(target):
         print(f"Error: timezone '{tz_name}' not found in {ZONEINFO_DIR}", file=sys.stderr)
         sys.exit(1)
     try:

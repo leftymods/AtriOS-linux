@@ -52,7 +52,8 @@ class TestR1AmlBurnBoundaries:
             "ack_len": 512,
         }
         ok, reply = self.engine.process_chunk(hdr, payload)
-        assert ok is True, f"Zero-length chunk failed: {reply}"
+        assert ok is False
+        assert b"Invalid chunk length" in reply
 
     def test_r1_boundary_single_byte_payload(self):
         """Verify checksum and processing of 1-byte payload (sub-word boundary)."""

@@ -53,6 +53,8 @@ struct gpio_keypad {
 	int use_irq; /* 1: irq mode ; 0: polling mode */
 	int scan_period;
 	int current_irq;
+	unsigned int requested_irqs;
+	bool stopping;
 	int count;
 	int index;
 	u32 pwrkey_code;
@@ -75,6 +77,8 @@ static irqreturn_t gpio_irq_handler(int irq, void *data)
 {
 	struct gpio_keypad *keypad = (struct gpio_keypad *)data;
 
+	if (READ_ONCE(keypad->stopping))
+		return IRQ_HANDLED;
 	keypad->current_irq = irq;
 	keypad->count++;
 	if (debug)
@@ -147,6 +151,8 @@ static void polling_timer_handler(unsigned long data)
 	int i;
 	int gpio_val;
 
+	if (READ_ONCE(keypad->stopping))
+		return;
 	if (keypad->use_irq) {
 		keypad->current_key = get_current_key(keypad);
 		if (!keypad->current_key)
@@ -369,10 +375,14 @@ static int meson_gpio_kp_probe(struct platform_device *pdev)
 				keypad->use_irq = 0;
 				break;
 			}
+			keypad->requested_irqs++;
 		}
 	}
 
 	if (!keypad->use_irq) {
+		while (keypad->requested_irqs)
+			devm_free_irq(&pdev->dev,
+				keypad->key[--keypad->requested_irqs].irq_num, keypad);
 		dev_info(&pdev->dev,
 			 "[KEYPAD] Probed OK in polling mode (scan_period=%dms, keys=%d)\n",
 			 keypad->scan_period, keypad->key_size);
@@ -394,16 +404,23 @@ static int meson_gpio_kp_remove(struct platform_device *pdev)
 #endif
 {
 	struct gpio_keypad *keypad;
+	unsigned int i;
 
 	keypad = platform_get_drvdata(pdev);
 	sysfs_remove_group(&pdev->dev.kobj, &gpio_kp_attr_group);
 	device_init_wakeup(&pdev->dev, false);
-	input_unregister_device(keypad->input_dev);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
-	timer_delete_sync(&keypad->polling_timer);
+	WRITE_ONCE(keypad->stopping, true);
+	for (i = 0; i < keypad->requested_irqs; i++)
+		disable_irq(keypad->key[i].irq_num);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 2, 0)
+	timer_shutdown_sync(&keypad->polling_timer);
 #else
 	del_timer_sync(&keypad->polling_timer);
 #endif
+	while (keypad->requested_irqs)
+		devm_free_irq(&pdev->dev,
+			keypad->key[--keypad->requested_irqs].irq_num, keypad);
+	input_unregister_device(keypad->input_dev);
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 11, 0)
 	return 0;
 #endif

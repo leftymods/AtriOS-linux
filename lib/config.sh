@@ -42,9 +42,19 @@ load_board_config() {
     IMAGE_FORMAT="${IMAGE_FORMAT:-emmc}"
     IMAGE_FILENAME="${OS_NAME}-${RELEASE_NAME}-${BOARD}-emmc.img"
     BOOTLOADER_BIN="${BOOTLOADER_BIN:-device/yandex/station_max/upgrade/u-boot.bin.sd.bin}"
-    KERNEL_IMAGE="${KERNEL_IMAGE:-cache/kernel/arch/arm64/boot/Image}"
-    DTB_IMAGE="${DTB_IMAGE:-output/images/meson-sm1-yandex-station-max.dtb}"
+    KERNEL_IMAGE="${KERNEL_IMAGE:-output/images/Image}"
+    DTB_IMAGE="${DTB_IMAGE:-output/images/${DTS_NAME}.dtb}"
     ROOTFS_IMAGE="${ROOTFS_IMAGE:-output/images/rootfs-debian-micro.ext4}"
+
+    [[ "$BOARD" =~ ^[a-z0-9][a-z0-9-]*$ ]] || exit_with_error "Invalid board identifier: $BOARD"
+    [[ "$DTS_NAME" =~ ^[a-zA-Z0-9._-]+$ ]] || exit_with_error "Invalid DTB identifier: $DTS_NAME"
+    local path_var
+    for path_var in BOOTLOADER_BIN KERNEL_IMAGE DTB_IMAGE ROOTFS_IMAGE; do
+        if [[ "${!path_var}" != /* ]]; then
+            printf -v "$path_var" '%s/%s' "$PROJECT_ROOT" "${!path_var}"
+        fi
+    done
+    export BOARD ARCH CROSS_COMPILE
 
     display_alert "INFO" "OS / Release:" "${OS_NAME} ${RELEASE_NAME} (v${RELEASE_VERSION})"
     display_alert "INFO" "Target board:" "${BOARD_NAME} (${BOARD})"

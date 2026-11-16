@@ -108,6 +108,8 @@ EOF
         *)
             if [ -f "$PROJECT_ROOT/config/boards/${arg}.conf" ]; then
                 BOARD="$arg"
+            else
+                exit_with_error "Unknown argument: $arg" "Use --help for supported options"
             fi
             ;;
     esac
@@ -119,18 +121,9 @@ load_board_config "$BOARD"
 # Execute requested target
 case "$TARGET" in
     image|emmc)
-        # Ensure packages and rootfs are prepared
-        display_alert "INFO" "Checking required components for image..."
-        if [ ! -f "$PROJECT_ROOT/output/packages/atrios-u-boot-${BOARD}_1.0_arm64.deb" ] || \
-           [ ! -f "$PROJECT_ROOT/output/packages/atrios-linux-image-7.3.1_7.3.1-1_arm64.deb" ]; then
-            display_alert "INFO" "Packages missing, building .deb packages first..."
-            build_all_packages
-        fi
-
-        if [ ! -f "$PROJECT_ROOT/$ROOTFS_IMAGE" ]; then
-            display_alert "INFO" "RootFS missing ($ROOTFS_IMAGE), building Super Micro Debian RootFS..."
-            build_debian_micro_rootfs
-        fi
+        # Rebuild dependencies together: existence alone does not prove freshness.
+        build_all_packages
+        build_debian_micro_rootfs
 
         build_emmc_image
         ;;
@@ -138,6 +131,7 @@ case "$TARGET" in
         build_all_packages
         ;;
     rootfs)
+        build_all_packages
         build_debian_micro_rootfs
         ;;
     kernel)

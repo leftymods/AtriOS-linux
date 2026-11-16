@@ -1,0 +1,6 @@
+{
+  "repository": "leftymods/AtriOS-linux",
+  "enabled": true,
+  "interval_seconds": 21600,
+  "public_key": "/etc/atrios/ota-public.pem"
+}

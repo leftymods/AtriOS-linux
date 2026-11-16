@@ -45,11 +45,11 @@ class TestR1AmlBurnProtocol:
         assert ok is True, "low_power command failed"
         assert reply == "success", f"low_power reply '{reply}' != 'success'"
 
-    def test_r1_disk_initial_handshake_success(self):
-        """Verify 'disk_initial' command initializes eMMC storage and returns 'success'."""
+    def test_r1_disk_initial_honest_unsupported(self):
+        """Unimplemented partitioning must never report success."""
         ok, reply = self.engine.process_bulkcmd("disk_initial 1")
-        assert ok is True, "disk_initial command failed"
-        assert reply == "success", f"disk_initial reply '{reply}' != 'success'"
+        assert ok is False
+        assert reply == "failed:unsupported"
 
     def test_r1_write_media_header_packing(self):
         """Verify CmdData_WriteMedia 32-byte descriptor packing and unpacking."""

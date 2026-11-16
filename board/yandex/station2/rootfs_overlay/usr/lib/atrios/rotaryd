@@ -27,6 +27,7 @@ import re
 import math
 import fcntl
 import threading
+from atrios_status import active_error
 
 def find_fb_by_name(keywords):
     for path in sorted(glob.glob("/sys/class/graphics/fb*/name")):
@@ -552,9 +553,27 @@ def _render_loop():
     last_anim_time = time.time()
     last_drawn = None
     override_active = False
+    error_active = False
 
     while True:
         now = time.time()
+        error = active_error()
+        if error or mic_muted:
+            if not error_active:
+                _enter_volume_ring_override()
+                error_active = True
+            # Solid red retains microphone-mute meaning; errors pulse amber.
+            level = 90 if mic_muted else (100 if int(now * 2) % 2 == 0 else 12)
+            color = (0, 0, level) if mic_muted else (0, level // 2, level)
+            set_ring_frame(bytes(color) * NUM_LEDS)
+            _render_wake.wait(timeout=0.25)
+            _render_wake.clear()
+            continue
+        if error_active:
+            clear_ring()
+            _exit_volume_ring_override()
+            error_active = False
+            override_active = False
         target = current_volume
         lvt = last_volume_time
         active = (lvt > 0 or abs(display_volume - target) > 0.05)
@@ -636,7 +655,7 @@ def main():
     try:
         while True:
             fds_to_watch = list(open_fds.keys())
-            rlist, _, _ = select.select(fds_to_watch, [], [], 0.05) if fds_to_watch else ([], [], 0.05)
+            rlist, _, _ = select.select(fds_to_watch, [], [], 0.05)
             now = time.time()
 
             for fd in rlist:

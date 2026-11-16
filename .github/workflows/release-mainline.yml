@@ -1,0 +1,171 @@
+name: Release signed mainline firmware
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag (v1.2.3)
+        required: true
+        type: string
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-mainline-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build ${{ matrix.board }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        board: [station-max, yndxsttion53]
+    env:
+      BOARD: ${{ matrix.board }}
+      RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          fetch-depth: 0
+      - name: Validate existing release tag
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+(\.[0-9]+){0,3}$ ]]
+          git show-ref --verify "refs/tags/$RELEASE_TAG"
+          test "$(git rev-list -n 1 "$RELEASE_TAG")" = "$(git rev-parse HEAD)"
+      - name: Install mainline build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            bc bison flex libssl-dev libelf-dev libncurses-dev libgnutls28-dev uuid-dev device-tree-compiler \
+            python3 python3-pytest python3-yaml python3-pyelftools python3-setuptools \
+            swig openssl ca-certificates git make patch rsync file xz-utils \
+            debootstrap debian-archive-keyring qemu-user-static binfmt-support \
+            dosfstools mtools fdisk u-boot-tools kmod dpkg-dev
+          sudo update-binfmts --enable qemu-aarch64
+      - name: Provision OTA signing key and image trust anchor
+        env:
+          OTA_SIGNING_KEY: ${{ secrets.OTA_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$OTA_SIGNING_KEY" || { echo 'OTA_SIGNING_KEY secret is required'; exit 1; }
+          umask 077
+          printf '%s\n' "$OTA_SIGNING_KEY" > "$RUNNER_TEMP/ota-signing.pem"
+          openssl rsa -in "$RUNNER_TEMP/ota-signing.pem" -check -noout >/dev/null
+          mkdir -p board/yandex/station2/rootfs_overlay/etc/atrios
+          openssl rsa -in "$RUNNER_TEMP/ota-signing.pem" -pubout \
+            -out board/yandex/station2/rootfs_overlay/etc/atrios/ota-public.pem
+          chmod 644 board/yandex/station2/rootfs_overlay/etc/atrios/ota-public.pem
+          printf '%s\n' "${RELEASE_TAG#v}" > board/yandex/station2/rootfs_overlay/etc/atrios-version
+          sed -i "s/^RELEASE_VERSION=.*/RELEASE_VERSION=\"${RELEASE_TAG#v}\"/" config/system.conf
+      - name: Run local build and release regressions
+        run: python3 -m pytest -q tests/test_build_regressions.py tests/test_release_bundle.py
+      - name: Build complete mainline image and current modules
+        run: bash ./compile.sh "BOARD=$BOARD" TARGET=image
+      - name: Create signed OTA bundle
+        run: |
+          set -euo pipefail
+          KERNEL_RELEASE="$(cat cache/kernel/include/config/kernel.release)"
+          export OTA_OVERLAY="$RUNNER_TEMP/ota-overlay"
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          import shutil
+          source = Path('output/rootfs_debian_staging')
+          target = Path(os.environ['OTA_OVERLAY'])
+          target.mkdir()
+          # Use the built staging tree after command modes have been normalized.
+          # Select runtime code/config, not Debian libraries or rootfs symlinks.
+          for name in ['usr/lib/atrios', 'usr/bin/atrios', 'etc/atrios', 'etc/init.d']:
+              src, dst = source / name, target / name
+              dst.parent.mkdir(parents=True, exist_ok=True)
+              if src.is_dir():
+                  shutil.copytree(src, dst, symlinks=True)
+              else:
+                  shutil.copy2(src, dst, follow_symlinks=False)
+          PY
+          python3 tools/create_ota_bundle.py \
+            --board "$BOARD" --version "${RELEASE_TAG#v}" \
+            --kernel-release "$KERNEL_RELEASE" \
+            --kernel output/images/Image \
+            --dtb output/images/meson-sm1-yandex-station-max.dtb \
+            --rootfs "$OTA_OVERLAY" \
+            --modules "output/rootfs_debian_staging/usr/lib/modules/$KERNEL_RELEASE" \
+            --signing-key "$RUNNER_TEMP/ota-signing.pem" \
+            --output-dir output/releases
+      - name: Stage public assets
+        run: |
+          set -euo pipefail
+          mkdir -p output/release-assets
+          cp "output/images/AtriOS-Nebula-$BOARD-emmc.img" \
+            "output/images/AtriOS-Nebula-$BOARD-emmc.img.sha256" \
+            "output/releases/AtriOS-$BOARD-ota.tar.gz" \
+            "output/releases/AtriOS-$BOARD-ota.tar.gz.sha256" output/release-assets/
+          (cd output/release-assets && sha256sum "AtriOS-Nebula-$BOARD-emmc.img" > "AtriOS-Nebula-$BOARD-emmc.img.sha256")
+      - name: Upload public release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: atrios-release-${{ matrix.board }}
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+          path: output/release-assets/*
+      - name: Remove private signing key
+        if: always()
+        run: rm -f -- "$RUNNER_TEMP/ota-signing.pem"
+
+  publish:
+    name: Publish verified assets to GitHub Releases
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: atrios-release-*
+          path: release-assets
+          merge-multiple: true
+      - name: Verify asset checksums and publish complete release
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+(\.[0-9]+){0,3}$ ]]
+          git ls-remote --exit-code --tags origin "refs/tags/$RELEASE_TAG" >/dev/null
+          for board in station-max yndxsttion53; do
+            test -s "release-assets/AtriOS-$board-ota.tar.gz"
+            test -s "release-assets/AtriOS-Nebula-$board-emmc.img"
+            test -s "release-assets/AtriOS-$board-ota.tar.gz.sha256"
+            test -s "release-assets/AtriOS-Nebula-$board-emmc.img.sha256"
+          done
+          # Compare every uploaded artifact with its detached digest.
+          for sidecar in release-assets/*.sha256; do
+            asset="${sidecar%.sha256}"
+            expected="$(awk 'NR == 1 { print $1 }' "$sidecar")"
+            [[ "$expected" =~ ^[0-9a-f]{64}$ ]]
+            actual="$(sha256sum "$asset" | cut -d' ' -f1)"
+            test "$actual" = "$expected"
+          done
+          if draft="$(gh release view "$RELEASE_TAG" --json isDraft -q .isDraft 2>/dev/null)"; then
+            test "$draft" = true || { echo 'Refusing to replace an already published release'; exit 1; }
+          else
+            gh release create "$RELEASE_TAG" --verify-tag --draft \
+              --title "AtriOS $RELEASE_TAG" --generate-notes
+          fi
+          gh release upload "$RELEASE_TAG" release-assets/* --clobber
+          gh release edit "$RELEASE_TAG" --draft=false

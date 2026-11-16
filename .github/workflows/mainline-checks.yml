@@ -1,0 +1,34 @@
+name: Mainline build checks
+on:
+  workflow_dispatch:
+  push:
+    branches: [mainline]
+  pull_request:
+    branches: [mainline]
+permissions:
+  contents: read
+concurrency:
+  group: mainline-checks-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  regressions:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-pytest python3-yaml openssl gcc patch kmod dpkg-dev dosfstools mtools fdisk u-boot-tools
+      - name: Check build, drivers, HTTPS, updates and C protocol regressions
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          python3 -B -m pytest -p no:cacheprovider -q \
+            tests/test_build_regressions.py tests/test_driver_regressions.py \
+            tests/test_runtime_regressions.py tests/test_https_transport_integration.py \
+            tests/test_ota_regressions.py tests/test_release_bundle.py \
+            tests/tier2_boundaries/test_aml_c_regression.py \
+            tests/tier1_features/test_r1_aml_burn_protocol.py \
+            tests/tier2_boundaries/test_r1_aml_burn_boundaries.py \
+            tests/tier4_scenarios/test_e2e_aml_burn_simulation.py

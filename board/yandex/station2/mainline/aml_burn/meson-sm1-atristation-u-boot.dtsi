@@ -1,0 +1,12 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+#include "meson-sm1-u-boot.dtsi"
+
+/* Recovery uses the USB2 device controller; Linux keeps its host policy. */
+&usb {
+ dr_mode = "peripheral";
+};
+
+&dwc2 {
+ status = "okay";
+ dr_mode = "peripheral";
+};

@@ -92,20 +92,26 @@ case "$CMD" in
       fi
       echo "Connecting to '$SSID'..."
       mkdir -p /etc/wpa_supplicant
-      CONF="/etc/wpa_supplicant/wpa_supplicant.conf"
+      CONF="/etc/wpa_supplicant.conf"
+      umask 077
+      TMP_CONF=$(mktemp /etc/.wpa_supplicant.XXXXXX) || exit 1
+      trap 'rm -f "$TMP_CONF"' EXIT HUP INT TERM
+      printf '%s\n' 'ctrl_interface=/var/run/wpa_supplicant' 'update_config=1' > "$TMP_CONF"
       if [ -n "$PASS" ]; then
-        wpa_passphrase "$SSID" "$PASS" > "$CONF" 2>/dev/null || {
-          echo "network={" > "$CONF"
-          echo "    ssid=\"$SSID\"" >> "$CONF"
-          echo "    psk=\"$PASS\"" >> "$CONF"
-          echo "}" >> "$CONF"
-        }
+        if ! wpa_passphrase "$SSID" "$PASS" >> "$TMP_CONF" 2>/dev/null; then
+          echo "Invalid SSID or WPA passphrase; configuration unchanged." >&2
+          exit 1
+        fi
+        # wpa_passphrase includes the cleartext secret in a comment.
+        sed -i '/^[[:space:]]*#psk=/d' "$TMP_CONF"
       else
-        echo "network={" > "$CONF"
-        echo "    ssid=\"$SSID\"" >> "$CONF"
-        echo "    key_mgmt=NONE" >> "$CONF"
-        echo "}" >> "$CONF"
+        SSID_HEX=$(printf '%s' "$SSID" | od -An -tx1 | tr -d ' \n')
+        [ -n "$SSID_HEX" ] && [ ${#SSID_HEX} -le 64 ] || exit 1
+        printf 'network={\n    ssid=%s\n    key_mgmt=NONE\n}\n' "$SSID_HEX" >> "$TMP_CONF"
       fi
+      chmod 600 "$TMP_CONF"
+      mv -f "$TMP_CONF" "$CONF" || exit 1
+      trap - EXIT HUP INT TERM
       killall wpa_supplicant udhcpc 2>/dev/null || true
       ip link set wlan0 up
       wpa_supplicant -B -i wlan0 -c "$CONF" -D nl80211,wext
@@ -156,7 +162,7 @@ case "$CMD" in
           fi
         fi
       # 2. Controller in H5 mode (BT_RC == 2) - Try vendor rtk_hciattach if available
-      elif [ "$BT_RC" -eq 2 ] && [ -x /usr/bin/rtk_hciattach ]; then
+      elif [ "${BT_RC:-0}" -eq 2 ] && [ -x /usr/bin/rtk_hciattach ]; then
         echo "Launching Realtek rtk_hciattach on $BT_TTY (H5 mode)..."
         /usr/bin/rtk_hciattach -n -s 115200 "$BT_TTY" rtk_h5 2>/dev/null &
         sleep 1

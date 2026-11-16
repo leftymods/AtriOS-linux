@@ -13,6 +13,7 @@ import sys
 import os
 import time
 import glob
+from atrios_status import active_error
 
 WIDTH = 25
 HEIGHT = 16
@@ -215,11 +216,30 @@ def get_screen_mode():
         pass
     return "clock"
 
+def render_error(code):
+    buf = bytearray(FRAME_SIZE)
+    # E followed by two digits, same readable 5x9 font as the clock.
+    glyphs = dict(FONT_LARGE_5X9)
+    glyphs["E"] = [31, 16, 16, 16, 30, 16, 16, 16, 31]
+    for char, x0 in zip("E%02d" % max(1, min(99, int(code))), (4, 10, 16)):
+        for y, bits in enumerate(glyphs[char]):
+            for x in range(5):
+                if bits & (1 << (4 - x)):
+                    set_pixel(buf, x0 + x, y + 3, 180)
+    send_frame(buf)
+
+
 def main():
     last_rendered = ""
     last_bt = None
     last_tz = None
     while True:
+        error = active_error()
+        if error:
+            render_error(error["code"])
+            last_rendered = ""
+            time.sleep(0.5)
+            continue
         if get_screen_mode() != "clock":
             last_rendered = ""
             time.sleep(0.5)

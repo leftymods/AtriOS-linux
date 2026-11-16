@@ -14,6 +14,7 @@ import argparse
 import math
 
 import glob
+from atrios_status import active_error
 
 def find_fb(names, default):
     for f in sorted(glob.glob("/sys/class/graphics/fb*")):
@@ -128,6 +129,9 @@ def screen_set_pixel(buf, x, y, brightness):
         buf[offset + 2] = val
 
 def screen_send_frame(buf):
+    if active_error():
+        # screend owns the matrix until the fault clears, including animated jobs.
+        return False
     try:
         with open(FB_SCREEN, "wb") as f:
             f.write(buf[:SCR_SIZE])
@@ -504,6 +508,9 @@ def screen_ticker(text, brightness=220, speed=0.07):
 
 # --- Ring Methods (72 bytes /dev/fb5) ---
 def ring_send_frame(frame):
+    if active_error() or os.path.exists("/var/run/atrios/ring_override"):
+        # rotaryd owns error/microphone-mute/volume indication.
+        return False
     try:
         with open(FB_RING, "wb") as f:
             f.write(frame[:RING_SIZE])

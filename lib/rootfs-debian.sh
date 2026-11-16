@@ -11,12 +11,18 @@ build_debian_micro_rootfs() {
     check_tool debootstrap
     check_tool mke2fs
     check_tool rsync
+    check_tool qemu-aarch64-static
+    check_tool chroot
+    [ -f "${KERNEL_DEB:-}" ] && [ -f "${UBOOT_DEB:-}" ] || \
+        exit_with_error "Build current kernel and U-Boot packages before rootfs"
 
     local cache_dir="$PROJECT_ROOT/cache/rootfs_debian_base"
     local stage_dir="$PROJECT_ROOT/output/rootfs_debian_staging"
-    local rootfs_img="$PROJECT_ROOT/output/images/rootfs-debian-micro.ext4"
-    local debian_mirror="${DEBIAN_MIRROR:-http://deb.debian.org/debian}"
+    local rootfs_img="$ROOTFS_IMAGE"
+    local debian_mirror="${DEBIAN_MIRROR:-https://deb.debian.org/debian}"
     local suite="bookworm"
+    local base_packages="ca-certificates,openssl,python3,fish,kmod,util-linux,coreutils,passwd"
+    local base_profile="${suite}|${ARCH}|${debian_mirror}|${base_packages}"
 
     mkdir -p "$PROJECT_ROOT/cache" "$PROJECT_ROOT/output/images"
 
@@ -24,15 +30,17 @@ build_debian_micro_rootfs() {
     sudo service binfmt-support status >/dev/null 2>&1 || sudo service binfmt-support start 2>/dev/null || true
 
     # 1. Bootstrap base if not cached
-    if [ ! -f "$cache_dir/etc/debian_version" ]; then
+    if [ ! -f "$cache_dir/.atrios-base-profile" ] || \
+       [ "$(cat "$cache_dir/.atrios-base-profile" 2>/dev/null)" != "$base_profile" ]; then
         display_alert "INFO" "Downloading minimal Debian ${suite} arm64 base via debootstrap (first stage)..."
         sudo rm -rf "$cache_dir"
         mkdir -p "$cache_dir"
-        sudo debootstrap --no-check-gpg --variant=minbase --arch=arm64 --foreign "$suite" "$cache_dir" "$debian_mirror"
+        sudo debootstrap --variant=minbase --include="$base_packages" --arch="$ARCH" --foreign "$suite" "$cache_dir" "$debian_mirror"
         
         display_alert "INFO" "Configuring target architecture via qemu-aarch64-static (second stage)..."
         sudo cp /usr/bin/qemu-aarch64-static "$cache_dir/usr/bin/"
         sudo chroot "$cache_dir" /debootstrap/debootstrap --second-stage
+        printf '%s\n' "$base_profile" | sudo tee "$cache_dir/.atrios-base-profile" >/dev/null
         
         display_alert "OK" "Debian base bootstrap completed."
     else
@@ -69,6 +77,9 @@ build_debian_micro_rootfs() {
 
     # 3. Configure System & Branding
     display_alert "INFO" "Applying ${OS_NAME} ${RELEASE_NAME} configuration & identity..."
+
+    printf '%s\n' "$BOARD" | sudo tee "$stage_dir/etc/atrios-board" >/dev/null
+    printf '%s\n' "$RELEASE_VERSION" | sudo tee "$stage_dir/etc/atrios-version" >/dev/null
 
     # Hostname & Hosts
     echo "$OS_NAME" | sudo tee "$stage_dir/etc/hostname" >/dev/null
@@ -116,14 +127,9 @@ EOF
     sudo sed -i 's|root:x:0:0:root:/root:/bin/bash|root:x:0:0:root:/root:/usr/bin/fish|' "$stage_dir/etc/passwd" 2>/dev/null || true
     sudo sed -i 's|root:x:0:0:root:/root:/bin/sh|root:x:0:0:root:/root:/usr/bin/fish|' "$stage_dir/etc/passwd" 2>/dev/null || true
 
-    # Ensure permissions and line endings for atrios, fish, and init scripts
-    sudo chmod +x "$stage_dir/usr/bin/atrios" "$stage_dir/usr/bin/fish" 2>/dev/null || true
-    if [ -d "$stage_dir/usr/lib/atrios" ]; then
-        sudo chmod -R +x "$stage_dir/usr/lib/atrios" 2>/dev/null || true
-    fi
-    if [ -d "$stage_dir/etc/init.d" ]; then
-        sudo chmod +x "$stage_dir/etc/init.d/"* 2>/dev/null || true
-    fi
+    # Restore command modes even when an overlay checkout has index mode 0644.
+    # Keep certificates, shared libraries and ordinary /etc data non-executable.
+    prepare_rootfs_command_modes "$stage_dir"
     sudo dos2unix "$stage_dir/usr/bin/atrios" "$stage_dir/etc/fish/config.fish" 2>/dev/null || true
 
     # Ensure /etc/securetty allows serial console login
@@ -152,6 +158,12 @@ mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
 mkdir -p /dev/pts /dev/shm
 mount -t devpts devpts /dev/pts 2>/dev/null || true
 mount -t tmpfs tmpfs /dev/shm 2>/dev/null || true
+# BOOT must be mounted before packages or services can update kernel artifacts.
+mkdir -p /boot /tmp
+if ! mount -a; then
+    echo "[init] Failed to mount filesystems from /etc/fstab" >&2
+    exit 1
+fi
 
 # Silence kernel console logging so runtime dmesg doesn't pollute the interactive shell
 dmesg -n 1 2>/dev/null || true
@@ -205,30 +217,15 @@ INITEOF
     sudo chmod +x "$stage_dir/sbin/init"
     sudo ln -sf sbin/init "$stage_dir/init"
 
-    # 4. Install Kernel Modules
-    display_alert "INFO" "Installing kernel modules into rootfs..."
-    local kver="7.3.1-AtriOS-aml"
-    local mod_dest="$stage_dir/usr/lib/modules/${kver}"
-    sudo mkdir -p "$mod_dest"
-    
-    local kernel_cache="$PROJECT_ROOT/cache/kernel"
-    if [ -d "$kernel_cache" ]; then
-        display_alert "INFO" "Running modules_install from kernel tree..."
-        sudo make -C "$kernel_cache" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- INSTALL_MOD_PATH="$stage_dir" modules_install 2>/dev/null || true
-    fi
-    sudo ln -sf usr/lib/modules "$stage_dir/lib/modules" 2>/dev/null || true
-
-    # 5. Pre-stage and install .deb update packages
-    display_alert "INFO" "Staging .deb packages for on-device updates..."
+    # Install only packages just built for this board; never install stale globs.
+    display_alert INFO "Installing current kernel and U-Boot packages..."
+    sudo rm -rf "$stage_dir/usr/lib/modules"
     sudo mkdir -p "$stage_dir/root/packages"
-    sudo cp -f "$PROJECT_ROOT/output/packages"/*.deb "$stage_dir/root/packages/" 2>/dev/null || true
-
-    # Install the packages into rootfs database
-    display_alert "INFO" "Pre-registering update packages in dpkg database..."
-    for deb in "$stage_dir/root/packages"/*.deb; do
-        [ -f "$deb" ] || continue
+    for deb in "$KERNEL_DEB" "$UBOOT_DEB"; do
         local deb_base="$(basename "$deb")"
-        sudo chroot "$stage_dir" /usr/bin/dpkg -i "/root/packages/$deb_base" 2>/dev/null || true
+        sudo cp -f "$deb" "$stage_dir/root/packages/$deb_base"
+        sudo chroot "$stage_dir" /usr/bin/env ATRIOS_IMAGE_BUILD=1 \
+            /usr/bin/dpkg -i "/root/packages/$deb_base"
     done
 
     # 6. Aggressive Micro-Stripping
@@ -250,6 +247,8 @@ INITEOF
     sudo cp /usr/bin/qemu-aarch64-static "$stage_dir/usr/bin/"
     sudo chroot "$stage_dir" /bin/sh -c "/bin/dash -c 'echo Dash test: OK'"
     sudo chroot "$stage_dir" /bin/sh -c "/usr/bin/fish --version"
+    sudo chroot "$stage_dir" /usr/bin/python3 -c 'import ssl; ssl.create_default_context()'
+    sudo chroot "$stage_dir" /bin/sh -c 'test -s /etc/ssl/certs/ca-certificates.crt'
     sudo chroot "$stage_dir" /bin/sh -c "test -x /sbin/init && echo Init script: OK"
 
     # Remove qemu binary before packing
@@ -259,9 +258,19 @@ INITEOF
     display_alert "INFO" "Generating ext4 image (${rootfs_img})..."
     rm -f "$rootfs_img"
     # Sized to 1024MB (matches partition 2 size on disk image)
-    truncate -s 1024M "$rootfs_img"
+    mkdir -p "$(dirname "$rootfs_img")"
+    truncate -s "$(( ${ROOTFS_PARTITION_SIZE:-2097152} * 512 ))" "$rootfs_img"
     sudo mke2fs -q -F -t ext4 -L "ROOTFS" -d "$stage_dir" "$rootfs_img" >/dev/null
 
     local final_size="$(stat -c %s "$rootfs_img")"
     display_alert "OK" "Super Micro Debian RootFS created successfully:" "${rootfs_img} (${final_size} bytes)"
+}
+
+prepare_rootfs_command_modes() {
+    local stage_dir="$1" command_dir
+    for command_dir in usr/bin usr/sbin usr/lib/atrios etc/init.d; do
+        if [ -d "$stage_dir/$command_dir" ]; then
+            sudo find "$stage_dir/$command_dir" -type f -exec chmod a+x {} +
+        fi
+    done
 }

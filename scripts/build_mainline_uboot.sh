@@ -8,7 +8,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 UBOOT_SRC="${UBOOT_SRC:-$PROJECT_ROOT/cache/uboot}"
-FIP_TOOL_DIR="$PROJECT_ROOT/cache/fip"
+FIP_TOOL_DIR="${FIP_TOOL_DIR:-$PROJECT_ROOT/cache/fip}"
 BOARD_DIR="$PROJECT_ROOT/board/yandex/station2/mainline"
 OUTPUT_DIR="$PROJECT_ROOT/device/yandex/station_max/upgrade"
 
@@ -36,12 +36,20 @@ fi
 echo "[2/4] Injecting Station Max DTS into U-Boot..."
 mkdir -p "$UBOOT_SRC/dts/upstream/src/arm64/amlogic" "$UBOOT_SRC/arch/arm/dts"
 cp "$BOARD_DIR/dts/meson-sm1-yandex-station-max.dts" "$UBOOT_SRC/dts/upstream/src/arm64/amlogic/meson-sm1-atristation.dts"
+cp "$BOARD_DIR/aml_burn/meson-sm1-atristation-u-boot.dtsi" "$UBOOT_SRC/arch/arm/dts/meson-sm1-atristation-u-boot.dtsi"
+
+# Install the sources actually audited and build the repository-owned config.
+bash "$BOARD_DIR/aml_burn/install.sh" "$UBOOT_SRC"
+cp "$BOARD_DIR/uboot_station_max_defconfig" "$UBOOT_SRC/configs/atrios_station_max_defconfig"
 
 # 3. Compile Mainline U-Boot
-echo "[3/4] Compiling Mainline U-Boot with atristation_defconfig..."
+echo "[3/4] Compiling Mainline U-Boot with atrios_station_max_defconfig..."
 (
     cd "$UBOOT_SRC"
-    make atristation_defconfig
+    make atrios_station_max_defconfig
+    for option in CONFIG_CMD_AML_BURN CONFIG_USB_FUNCTION_AML_BURN CONFIG_USB_DWC3_GADGET; do
+        grep -qx "${option}=y" .config || { echo "ERROR: missing $option" >&2; exit 1; }
+    done
     make -j"$(nproc 2>/dev/null || echo 4)"
 )
 
@@ -55,8 +63,9 @@ echo "      Generated Mainline U-Boot: $MAINLINE_UBOOT_BIN ($(stat -c %s "$MAINL
 # 4. Sign and package with LibreELEC amlogic-boot-fip (sei610 profile)
 echo "[4/4] Signing with SEI610 FIP..."
 if [ ! -d "$FIP_TOOL_DIR/sei610" ]; then
-    if [ -d "/home/lmods/AtriOS/cache/sources/amlogic-boot-fip" ]; then
-        ln -sfn "/home/lmods/AtriOS/cache/sources/amlogic-boot-fip" "$FIP_TOOL_DIR"
+    if [ -e "$FIP_TOOL_DIR" ]; then
+        echo "ERROR: incomplete FIP tool tree: $FIP_TOOL_DIR" >&2
+        exit 1
     else
         echo "Cloning amlogic-boot-fip..."
         git clone --depth 1 https://github.com/LibreELEC/amlogic-boot-fip.git "$FIP_TOOL_DIR"

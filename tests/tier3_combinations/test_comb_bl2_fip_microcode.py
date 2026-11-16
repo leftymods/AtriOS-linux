@@ -1,3 +1,4 @@
+from common.acs_fixture import make_acs
 """Tier 3: Cross-Feature Combinations - BL2, ACS Timing Table & FIP Microcode Staging."""
 
 import hashlib
@@ -68,12 +69,8 @@ class TestCombBl2FipMicrocode:
         payload = bytearray(128 * 1024)
 
         # Place ACS block in BL2 section
-        payload[57344 : 57344 + 5] = b"acs__"
-        payload[57344 + 5 : 57344 + 10] = b"ddrs_"
-        payload[57344 + 10 : 57344 + 15] = b"pll__"
-        # Set DramType = 2 (LPDDR4) for Board ID = 4
-        payload[57344 + 32] = 2  # DramType LPDDR4
-        payload[57344 + 33] = 4  # Board ID 4
+        acs = make_acs()
+        payload[57344:57344 + len(acs)] = acs
 
         # Place valid FIP TOC at offset 0x10000 (64KB)
         fip_start = 0x10000

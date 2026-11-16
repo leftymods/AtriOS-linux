@@ -1,0 +1,16 @@
+#!/bin/sh
+# The station polls GitHub over HTTPS and downloads updates; it exposes no port.
+DAEMON=/usr/lib/atrios/ota
+PID=/var/run/atrios/update.pid
+case "$1" in
+  start)
+    mkdir -p /var/run/atrios /var/log
+    start-stop-daemon -S -b -m -p "$PID" -x /usr/bin/python3 -- "$DAEMON" daemon
+    ;;
+  stop)
+    start-stop-daemon -K -p "$PID" -x /usr/bin/python3
+    rm -f "$PID"
+    ;;
+  restart) "$0" stop; "$0" start ;;
+  *) echo "Usage: $0 {start|stop|restart}"; exit 1 ;;
+esac

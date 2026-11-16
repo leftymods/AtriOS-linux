@@ -1,4 +1,5 @@
-"""Tier 4: Real-World Application Scenarios - End-to-End AML USB Burning Simulation."""
+from common.acs_fixture import make_acs
+"""Python framing-model scenarios, not USB/hardware or C implementation tests."""
 
 import hashlib
 import struct
@@ -12,7 +13,7 @@ from common.aml_burn_inspector import AcsBinParser, AmlProtocolEngine, FipTocPar
 @pytest.mark.aml_burn
 @pytest.mark.milestone("M4")
 class TestE2EAmlBurnSimulation:
-    """Authoritative opaque-box end-to-end burning flow simulation across IPL, SPL, and TPL."""
+    """Reference framing model only; actual C ABI is tested separately."""
 
     @pytest.fixture(autouse=True)
     def setup(self):
@@ -31,10 +32,10 @@ class TestE2EAmlBurnSimulation:
         5. SPL: BL2 reads ACS table (Board ID 4, LPDDR4), trains DRAM, loads U-Boot.
         6. TPL: Mainline U-Boot enumerates USB gadget VID 0x1B8E, PID 0xC003, Stage 16.
         7. TPL: Host issues 'low_power' -> U-Boot returns 'success' (no 1% stall!).
-        8. TPL: Host issues 'disk_initial 1' -> U-Boot partitions eMMC storage.
+        8. Unsupported partitioning commands fail explicitly.
         9. TPL: Host streams partition chunks via AM_REQ_DOWNLOAD with ADDSUM checksums.
         10. TPL: Device handles keepalive 'Continue:32' during flash writes.
-        11. TPL: Host verifies partition SHA-1, issues 'save_setting' and 'burn_complete 1'.
+        11. Unsupported verification/finalization commands fail explicitly.
         """
         # ==================== Stage 1: IPL (BootROM) ====================
         host_stage = self.engine.STAGE_IPL
@@ -64,14 +65,7 @@ class TestE2EAmlBurnSimulation:
         assert diff == 0, "Diff must be 0 for successful DDR fw loading"
 
         # Simulate ACS check for Board ID 4
-        synthetic_acs = (
-            b"acs__\x00\x00\x00"
-            b"ddrs_\x00\x00\x00"
-            b"pll__\x00\x00\x00"
-            + b"\x00" * 16
-            + bytes([self.acs_parser.DRAM_TYPE_LPDDR4, self.acs_parser.BOARD_ID_STATION_MAX])
-            + b"\x00" * 4000
-        )
+        synthetic_acs = make_acs()
         acs_ok, acs_msg = self.acs_parser.verify_lpddr4_support(synthetic_acs)
         assert acs_ok is True, acs_msg
 
@@ -87,8 +81,8 @@ class TestE2EAmlBurnSimulation:
 
         # Handshake 2: 'disk_initial'
         di_ok, di_reply = self.engine.process_bulkcmd("disk_initial 1")
-        assert di_ok is True
-        assert di_reply == "success"
+        assert di_ok is False
+        assert di_reply == "failed:unsupported"
 
         # Handshake 3: 'bootloader_is_old'
         old_ok, old_reply = self.engine.process_bulkcmd("bootloader_is_old")
@@ -134,17 +128,17 @@ class TestE2EAmlBurnSimulation:
         # Verify Partition SHA-1
         expected_sha1 = hashlib.sha1(partition_data).hexdigest()
         v_ok, v_reply = self.engine.process_bulkcmd(f"verify sha1sum {expected_sha1}")
-        assert v_ok is True
-        assert v_reply == "success"
+        assert v_ok is False
+        assert v_reply == "failed:unsupported"
 
         # Finalize settings and complete burn
         save_ok, save_reply = self.engine.process_bulkcmd("save_setting")
-        assert save_ok is True
-        assert save_reply == "success"
+        assert save_ok is False
+        assert save_reply == "failed:unsupported"
 
         done_ok, done_reply = self.engine.process_bulkcmd("burn_complete 1")
-        assert done_ok is True
-        assert done_reply == "success"
+        assert done_ok is False
+        assert done_reply == "failed:unsupported"
 
     def test_e2e_reproduce_and_verify_low_power_stall_fix(self):
         """Verify that 'low_power' returns 'success' within 50ms, resolving the 1% hang."""

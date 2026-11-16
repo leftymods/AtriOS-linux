@@ -79,6 +79,7 @@ static int tas5825m_apply_settings(struct tas5825m_priv *tas, const char *data,
 	const char *end = data + size;
 	u8 block[36];
 	int block_len = 0;
+	int ret;
 
 	while (p < end) {
 		const char *nl = memchr(p, '\n', end - p);
@@ -87,16 +88,20 @@ static int tas5825m_apply_settings(struct tas5825m_priv *tas, const char *data,
 
 		if (c == '#' || c == '\n' || c == '\r') {
 			if (block_len > 0) {
-				tas5825m_write_block(tas, block[0],
+				ret = tas5825m_write_block(tas, block[0],
 						     block_len - 1, &block[1]);
+				if (ret < 0)
+					return ret;
 				block_len = 0;
 			}
 		} else if (c == 'd') {
 			unsigned int delay_ms = 0;
 
 			if (block_len > 0) {
-				tas5825m_write_block(tas, block[0],
+				ret = tas5825m_write_block(tas, block[0],
 						     block_len - 1, &block[1]);
+				if (ret < 0)
+					return ret;
 				block_len = 0;
 			}
 			if (sscanf(p, "d %u", &delay_ms) == 1 && delay_ms > 0)
@@ -105,8 +110,10 @@ static int tas5825m_apply_settings(struct tas5825m_priv *tas, const char *data,
 			size_t pos = 1;
 
 			if (block_len > 0) {
-				tas5825m_write_block(tas, block[0],
+				ret = tas5825m_write_block(tas, block[0],
 						     block_len - 1, &block[1]);
+				if (ret < 0)
+					return ret;
 				block_len = 0;
 			}
 			while (pos + 2 < len) {
@@ -145,8 +152,10 @@ static int tas5825m_apply_settings(struct tas5825m_priv *tas, const char *data,
 	}
 
 	if (block_len > 0) {
-		tas5825m_write_block(tas, block[0],
+		ret = tas5825m_write_block(tas, block[0],
 				     block_len - 1, &block[1]);
+		if (ret < 0)
+			return ret;
 	}
 
 	return 0;

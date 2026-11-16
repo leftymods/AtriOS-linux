@@ -689,6 +689,12 @@ static void qls_fb_destroy(struct fb_info *info)
 
 static int qls_fb_mmap(struct fb_info *info, struct vm_area_struct *vma)
 {
+	unsigned long size = vma->vm_end - vma->vm_start;
+	unsigned long pages = PAGE_ALIGN(info->screen_size) >> PAGE_SHIFT;
+
+	if (vma->vm_pgoff >= pages ||
+	    size > ((pages - vma->vm_pgoff) << PAGE_SHIFT))
+		return -EINVAL;
 	return remap_vmalloc_range(vma, info->screen_buffer, vma->vm_pgoff);
 }
 
@@ -805,6 +811,7 @@ static int qls_load_firmware_update(struct qls_priv *qls)
 	char manifest_name[] = "yandex-led-screen.bin.manifest";
 	char fw_name[] = "yandex-led-screen.bin";
 	int ret, parsed;
+	char *manifest;
 	u8 min_api, max_api, version;
 	u16 crc16;
 
@@ -816,14 +823,22 @@ static int qls_load_firmware_update(struct qls_priv *qls)
 		return 0;
 	}
 
-	parsed = sscanf(manifest_fw->data,
+	if (!manifest_fw->size || manifest_fw->size > 256) {
+		release_firmware(manifest_fw);
+		return -EINVAL;
+	}
+	manifest = kmemdup_nul(manifest_fw->data, manifest_fw->size, GFP_KERNEL);
+	release_firmware(manifest_fw);
+	if (!manifest)
+		return -ENOMEM;
+	parsed = sscanf(manifest,
 			"%hu.%hhu.%hhu.%hhu.%hu.%hhu",
 			&qls->fw_version,
 			&min_api, &max_api,
 			&version, &crc16, &qls->fw_crc);
-	release_firmware(manifest_fw);
+	kfree(manifest);
 
-	if (parsed < 3) {
+	if (parsed != 6) {
 		dev_err(&qls->spi->dev,
 			"[QLS] failed to parse firmware manifest\n");
 		return -EINVAL;
@@ -1157,7 +1172,7 @@ static int qls_probe(struct spi_device *spi)
 			 ret, sa->respbuf);
 	}
 
-	qls->videomemory = vzalloc(qls->xres * qls->yres * QLS_BPP);
+	qls->videomemory = vmalloc_user(qls->xres * qls->yres * QLS_BPP);
 	if (!qls->videomemory)
 		return -ENOMEM;
 
@@ -1212,8 +1227,13 @@ static int qls_probe(struct spi_device *spi)
 	bl = devm_backlight_device_register(&spi->dev, "quasar_led_screen",
 					    &spi->dev, qls,
 					    &qls_bl_ops, &bl_props);
-	if (IS_ERR(bl))
-		return PTR_ERR(bl);
+	if (IS_ERR(bl)) {
+		ret = PTR_ERR(bl);
+		unregister_framebuffer(info);
+		framebuffer_release(info);
+		qls->fb = NULL;
+		return ret;
+	}
 	qls->bl = bl;
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 10, 0)

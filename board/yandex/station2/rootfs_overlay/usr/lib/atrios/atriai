@@ -1,18 +1,22 @@
 #!/usr/bin/env python3
 """
 AtriAI Thin-Client Runtime for AtriOS (Yandex Station 2 / Max)
-Pure Python 3 stdlib implementation of the leftymods/AtriAI column protocol:
+Pure Python 3 stdlib outbound HTTPS client:
 - Captures 16 kHz mono PCM16 via arecord
 - Local RMS energy VAD (silence/speech segmentation, respects mic_muted)
-- Streams audio to AtriAI server over WebSocket (/voice)
+- POSTs WAV to /asr, text to /chat and /tts over verified HTTPS
 - Plays returned WAV response via aplay and logs ASR/route/answer events
 """
 
 import array
-import base64
+import io
+import queue
+import threading
+import wave
+from atrios_https import require_https, request_json, request_bytes
+from atrios_status import set_error, error_kind
 from collections import deque
 import glob
-import hashlib
 import json
 import math
 import os
@@ -43,7 +47,9 @@ RING_OVERRIDE_FILE = "/var/run/atrios/ring_override"
 
 DEFAULT_CONFIG = {
     "enabled": False,
-    "server": "ws://192.168.1.106:8090/voice",
+    "server": "https://192.168.1.106:8090",
+    "ca_file": "",
+    "token": "",
     "wake_word": "Atri",
     "vad_threshold": 650,
     "silence_ms": 600,
@@ -147,7 +153,7 @@ def matches_wake_word(text, wake_word):
         candidates.update(ATRI_WAKE_ALIASES)
     if "алиса" in candidates or "alice" in candidates:
         candidates.update(ALICE_WAKE_ALIASES)
-    return any(c in norm for c in candidates)
+    return any(re.search(r"(?<!\w)" + re.escape(c) + r"(?!\w)", norm) for c in candidates)
 
 
 def load_config():
@@ -160,6 +166,11 @@ def load_config():
                 cfg.update(data)
     except Exception:
         pass
+    # Migrate the old endpoint address, while requiring real TLS certificates.
+    parsed = urllib.parse.urlsplit(str(cfg.get("server", "")))
+    if parsed.scheme in ("ws", "wss", "http"):
+        path = "" if parsed.path.rstrip("/") == "/voice" else parsed.path.rstrip("/")
+        cfg["server"] = urllib.parse.urlunsplit(("https", parsed.netloc, path, parsed.query, ""))
     return cfg
 
 
@@ -205,127 +216,6 @@ def pcm16_rms(chunk):
     samples = struct.unpack(f"<{count}h", chunk[:count * 2])
     s = sum(x * x for x in samples)
     return math.sqrt(s / count)
-
-
-class SimpleWebSocket:
-    """Minimal RFC 6455 WebSocket client using Python stdlib sockets."""
-
-    def __init__(self, url, timeout=15.0):
-        u = urllib.parse.urlparse(url)
-        if u.scheme not in ("ws", "wss"):
-            raise ValueError(f"Unsupported scheme: {u.scheme}")
-        host = u.hostname
-        port = u.port or (443 if u.scheme == "wss" else 80)
-        path = u.path or "/"
-        if u.query:
-            path += "?" + u.query
-
-        raw = socket.create_connection((host, port), timeout=timeout)
-        if u.scheme == "wss":
-            import ssl
-            ctx = ssl.create_default_context()
-            raw = ctx.wrap_socket(raw, server_hostname=host)
-        self.sock = raw
-        self.sock.settimeout(timeout)
-
-        key = base64.b64encode(os.urandom(16)).decode()
-        req = (
-            f"GET {path} HTTP/1.1\r\n"
-            f"Host: {host}:{port}\r\n"
-            f"Upgrade: websocket\r\n"
-            f"Connection: Upgrade\r\n"
-            f"Sec-WebSocket-Key: {key}\r\n"
-            f"Sec-WebSocket-Version: 13\r\n\r\n"
-        )
-        self.sock.sendall(req.encode())
-
-        buf = b""
-        while b"\r\n\r\n" not in buf:
-            chunk = self.sock.recv(1024)
-            if not chunk:
-                raise ConnectionError("WebSocket handshake failed")
-            buf += chunk
-        header = buf.split(b"\r\n\r\n", 1)[0].decode(errors="ignore")
-        if "101 " not in header.splitlines()[0]:
-            raise ConnectionError(f"WebSocket rejected: {header.splitlines()[0]}")
-        self._extra = buf.split(b"\r\n\r\n", 1)[1]
-
-    def _recv_exact(self, n):
-        out = bytearray()
-        if self._extra:
-            take = min(n, len(self._extra))
-            out.extend(self._extra[:take])
-            self._extra = self._extra[take:]
-        while len(out) < n:
-            chunk = self.sock.recv(n - len(out))
-            if not chunk:
-                raise EOFError("WebSocket closed")
-            out.extend(chunk)
-        return bytes(out)
-
-    def send_frame(self, opcode, payload):
-        mask = os.urandom(4)
-        length = len(payload)
-        header = bytearray([0x80 | opcode])
-        if length < 126:
-            header.append(0x80 | length)
-        elif length < 65536:
-            header.append(0x80 | 126)
-            header.extend(struct.pack("!H", length))
-        else:
-            header.append(0x80 | 127)
-            header.extend(struct.pack("!Q", length))
-        header.extend(mask)
-        masked = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
-        self.sock.sendall(bytes(header) + masked)
-
-    def send_json(self, obj):
-        self.send_frame(0x1, json.dumps(obj).encode("utf-8"))
-
-    def send_bytes(self, data):
-        self.send_frame(0x2, data)
-
-    def recv_frame(self, poll_cancel=None, total_timeout=25.0):
-        deadline = time.time() + total_timeout
-        self.sock.settimeout(0.2)
-        while True:
-            if poll_cancel and poll_cancel():
-                return None, None
-            if time.time() > deadline:
-                raise TimeoutError("timed out")
-            try:
-                b1, b2 = self._recv_exact(2)
-            except socket.timeout:
-                continue
-            opcode = b1 & 0x0F
-            masked = (b2 & 0x80) != 0
-            length = b2 & 0x7F
-            if length == 126:
-                length = struct.unpack("!H", self._recv_exact(2))[0]
-            elif length == 127:
-                length = struct.unpack("!Q", self._recv_exact(8))[0]
-            mask = self._recv_exact(4) if masked else None
-            payload = self._recv_exact(length)
-            if masked and mask:
-                payload = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
-            if opcode == 0x8:  # close
-                return 0x8, b""
-            if opcode == 0x9:  # ping -> pong
-                self.send_frame(0xA, payload)
-                continue
-            if opcode == 0xA:  # pong
-                continue
-            return opcode, payload
-
-    def close(self):
-        try:
-            self.send_frame(0x8, b"")
-        except Exception:
-            pass
-        try:
-            self.sock.close()
-        except Exception:
-            pass
 
 
 def _write_screen_mode(mode):
@@ -403,10 +293,26 @@ def set_vad_visual(phase, force=False):
         _current_screen_tag = screen_tag
 
 
+def validate_wav(data):
+    if len(data) > 8 * 1024 * 1024:
+        raise ValueError("TTS WAV exceeds size limit")
+    try:
+        with wave.open(io.BytesIO(data), "rb") as wav:
+            channels, width, rate, frames = wav.getnchannels(), wav.getsampwidth(), wav.getframerate(), wav.getnframes()
+            if channels not in (1, 2) or width != 2 or not 8000 <= rate <= 96000 or not 0 < frames <= rate * 120:
+                raise ValueError("Unsupported TTS WAV parameters")
+            if len(wav.readframes(frames)) != channels * width * frames:
+                raise ValueError("Truncated TTS WAV")
+    except (wave.Error, EOFError) as exc:
+        raise ValueError("Invalid TTS WAV") from exc
+
+
 def play_audio_bytes(audio_bytes, sample_rate=48000):
     if not audio_bytes:
         return
     is_wav = audio_bytes[:4] == b"RIFF"
+    if is_wav:
+        validate_wav(audio_bytes)
     suffix = ".wav" if is_wav else ".pcm"
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tf:
         tf.write(audio_bytes)
@@ -427,7 +333,9 @@ def play_audio_bytes(audio_bytes, sample_rate=48000):
             time.sleep(0.05)
         if proc.returncode and proc.returncode != -15:
             err = proc.stderr.read().decode("utf-8", errors="replace").strip() if proc.stderr else ""
-            print(f"[atriai] aplay rc={proc.returncode} err={err}", flush=True)
+            set_error("audio", "audio", err or "Audio playback failed")
+            raise RuntimeError(f"aplay rc={proc.returncode}: {err}")
+        set_error("audio")
     finally:
         if proc and proc.poll() is None:
             try:
@@ -531,84 +439,176 @@ def execute_device_command(action):
     play_command_chime(action)
 
 
+def _voice_call(call):
+    """Keep physical cancel/mute responsive during a bounded HTTPS operation."""
+    result = queue.Queue(maxsize=1)
+    def work():
+        try:
+            result.put((True, call()))
+        except Exception as exc:
+            result.put((False, exc))
+    # One request at a time, including a cancelled request awaiting its timeout.
+    if not _voice_slot.acquire(blocking=False):
+        raise RuntimeError("Previous HTTPS request is still finishing; retry shortly")
+    def guarded():
+        try:
+            work()
+        finally:
+            _voice_slot.release()
+    threading.Thread(target=guarded, daemon=True).start()
+    deadline = time.monotonic() + 26
+    while True:
+        if time.monotonic() > deadline:
+            raise TimeoutError("HTTPS voice request deadline exceeded")
+        if consume_button_trigger() or is_mic_muted():
+            raise InterruptedError("Voice request cancelled")
+        try:
+            ok, value = result.get(timeout=0.05)
+        except queue.Empty:
+            check_resume_visual()
+            continue
+        if not ok:
+            raise value
+        return value
+
+
+_voice_slot = threading.BoundedSemaphore(1)
+_DEVICE_COMMANDS = {'next_track': {'next',
+                'next track',
+                'вперед',
+                'дальше',
+                'другой трек',
+                'другую песню',
+                'переключи вперед',
+                'переключи песню',
+                'переключи трек',
+                'перемотай вперед',
+                'след трек',
+                'следующая',
+                'следующая песня',
+                'следующий',
+                'следующий трек',
+                'следующую песню',
+                'трек вперед'},
+ 'pause': {'pause',
+           'stop',
+           'выключи музыку',
+           'на паузу',
+           'останови',
+           'останови музыку',
+           'пауза',
+           'поставь на паузу',
+           'стоп',
+           'хватит играть'},
+ 'play': {'play', 'включи музыку', 'сними с паузы', 'продолжай', 'resume', 'возобнови', 'продолжи', 'играй'},
+ 'prev_track': {'prev',
+                'previous',
+                'верни песню',
+                'верни трек',
+                'назад',
+                'переключи назад',
+                'пред трек',
+                'предыдущая',
+                'предыдущая песня',
+                'предыдущий',
+                'предыдущий трек',
+                'предыдущую песню',
+                'прошлый трек',
+                'трек назад'},
+ 'volume_down': {'quieter',
+                 'volume down',
+                 'громкость вниз',
+                 'звук тише',
+                 'потише',
+                 'сделай потише',
+                 'сделай тише',
+                 'тише',
+                 'убавь',
+                 'убавь громкость',
+                 'убавь звук',
+                 'уменьши громкость',
+                 'уменьши звук'},
+ 'volume_up': {'louder',
+               'volume up',
+               'громкости прибавь',
+               'громкость вверх',
+               'громче',
+               'звук громче',
+               'погромче',
+               'прибавь',
+               'прибавь громкость',
+               'прибавь звук',
+               'сделай громче',
+               'сделай погромче',
+               'увеличь громкость'}}
+
+
+def local_command(text, wake_word):
+    norm = re.sub(r"[^\w\s]", " ", text.lower().replace("\u0451", "\u0435"))
+    norm = " ".join(norm.split())
+    aliases = set(ATRI_WAKE_ALIASES + ALICE_WAKE_ALIASES)
+    aliases.update(w.strip().lower() for w in wake_word.split(",") if w.strip())
+    for word in sorted(aliases, key=len, reverse=True):
+        if norm.startswith(word + " "):
+            norm = norm[len(word):].strip()
+            break
+    fillers = {"please", "\u043f\u043e\u0436\u0430\u043b\u0443\u0439\u0441\u0442\u0430", "\u044d\u0439", "\u0441\u043b\u0443\u0448\u0430\u0439", "\u0434\u0430\u0432\u0430\u0439", "\u043d\u0443"}
+    words = [word for word in norm.split() if word not in fillers]
+    dedup = [word for i, word in enumerate(words) if i == 0 or word != words[i - 1]]
+    candidates = {" ".join(words), " ".join(dedup)}
+    return next((action for action, phrases in _DEVICE_COMMANDS.items() if candidates & phrases), None)
+
+
 def send_phrase_to_server(server_url, pcm_bytes, wake_word=""):
-    ws = SimpleWebSocket(server_url, timeout=25.0)
-    last_asr = ""
-    last_answer = ""
-    audio = bytearray()
-    audio_sr = 48000
-    cancelled = False
-    command_received = False
+    """Client-only HTTPS ASR -> chat -> TTS; no inbound port or WebSocket."""
+    require_https(server_url)
+    if len(pcm_bytes) > SR * 2 * 30 or len(pcm_bytes) % 2:
+        raise ValueError("Invalid or oversized PCM16 phrase")
+    cfg = load_config()
+    headers = {}
+    if cfg.get("token"):
+        headers["Authorization"] = "Bearer " + str(cfg["token"])
+    opts = {"headers": headers, "ca_file": cfg.get("ca_file") or None, "timeout": 25}
+    base = server_url.rstrip("/")
+    wav = io.BytesIO()
+    with wave.open(wav, "wb") as out:
+        out.setnchannels(1)
+        out.setsampwidth(2)
+        out.setframerate(SR)
+        out.writeframes(pcm_bytes)
     try:
-        start_msg = {"type": "start", "sample_rate": SR, "format": "pcm16", "lang": "ru"}
-        if wake_word:
-            start_msg["wake_word"] = wake_word
-        ws.send_json(start_msg)
-        ws.send_bytes(pcm_bytes)
-        ws.send_json({"type": "end"})
-
-        while True:
-            opcode, payload = ws.recv_frame(poll_cancel=consume_button_trigger, total_timeout=25.0)
-            if opcode is None:
-                cancelled = True
-                print("[atriai] funcbutton pressed during server request -> cancelled -> clock", flush=True)
-                try:
-                    ws.send_json({"type": "barge_in"})
-                except Exception:
-                    pass
-                break
-            if opcode == 0x8:
-                break
-            if opcode == 0x1:
-                ev = json.loads(payload.decode("utf-8", errors="ignore"))
-                kind = ev.get("type")
-                if kind == "command":
-                    action = ev.get("action", "")
-                    if action:
-                        command_received = True
-                        print(f"[atriai] command: {action}", flush=True)
-                        execute_device_command(action)
-                elif kind == "asr":
-                    last_asr = ev.get("text", "")
-                    print(f"[atriai] asr: {last_asr}", flush=True)
-                    if not last_asr.strip():
-                        break
-                    if wake_word and not command_received and not matches_wake_word(last_asr, wake_word):
-                        break
-                    if wake_word or command_received:
-                        set_vad_visual("thinking")
-                elif kind == "answer":
-                    last_answer = ev.get("text", "")
-                    print(f"[atriai] answer: {last_answer}", flush=True)
-                    if not last_asr.strip():
-                        break
-                elif kind == "audio_start":
-                    audio_sr = int(ev.get("sample_rate", 48000))
-                elif kind == "audio_end":
-                    break
-            elif opcode == 0x2:
-                audio.extend(payload)
-    finally:
-        ws.close()
-
-    if cancelled:
-        set_vad_visual("idle")
-        return "", ""
-
-    if wake_word and not command_received and not matches_wake_word(last_asr, wake_word):
-        print(f"[atriai] ignored (no wake word '{wake_word}'): {last_asr}", flush=True)
-        set_vad_visual("idle")
-        return last_asr, ""
-
-    if audio:
-        print(f"[atriai] playing audio: {len(audio)} bytes @ {audio_sr} Hz", flush=True)
-        write_status("speaking", last_asr=last_asr, last_answer=last_answer)
+        raw_asr = _voice_call(lambda: request_bytes(base + "/asr", data=wav.getvalue(), headers={**headers, "Content-Type": "audio/wav", "Accept": "application/json"}, ca_file=opts["ca_file"], limit=65536, timeout=25))
+        recognized = json.loads(raw_asr)
+        if not isinstance(recognized, dict) or not isinstance(recognized.get("text"), str):
+            raise ValueError("Invalid ASR response")
+        text = recognized["text"].strip()
+        if not text or (wake_word and not matches_wake_word(text, wake_word)):
+            set_error("voice")
+            return text, ""
+        action = local_command(text, wake_word)
+        if action:
+            execute_device_command(action)
+            set_error("voice")
+            return text, ""
+        set_vad_visual("thinking")
+        response = _voice_call(lambda: request_json(base + "/chat", payload={"text": text}, **opts))
+        answer = response.get("text", "")
+        if not isinstance(answer, str) or not answer.strip():
+            raise ValueError("Empty or invalid chat response")
+        audio = _voice_call(lambda: request_bytes(base + "/tts", data=json.dumps({"text": answer, "emotion": response.get("emotion", "neutral")}).encode(), headers={**headers, "Content-Type": "application/json", "Accept": "audio/wav"}, ca_file=opts["ca_file"], limit=8*1024*1024, timeout=25))
+        validate_wav(audio)
+        write_status("speaking", last_asr=text, last_answer=answer)
         set_vad_visual("speaking")
-        play_audio_bytes(bytes(audio), sample_rate=audio_sr)
-    elif not command_received:
-        print(f"[atriai] no audio bytes received for answer: {last_answer}", flush=True)
-    set_vad_visual("idle")
-    return last_asr, last_answer
+        play_audio_bytes(audio)
+        set_error("voice")
+        return text, answer
+    except InterruptedError:
+        return "", ""
+    except Exception as exc:
+        set_error("voice", error_kind(exc, "server"), str(exc))
+        raise
+    finally:
+        set_vad_visual("idle")
 
 
 def playback_running():
@@ -808,7 +808,7 @@ def run_daemon():
                 restore_volume(duck_orig)
                 duck_orig = None
 
-            if speaking and len(buf) >= min_bytes:
+            if speaking and len(buf) >= min_bytes and not is_mic_muted():
                 write_status("thinking")
                 set_vad_visual("thinking")
                 if force_active:
@@ -851,7 +851,8 @@ def main():
         print("AtriAI disabled.")
     elif cmd == "server" and len(sys.argv) > 2:
         cfg = load_config()
-        cfg["server"] = sys.argv[2]
+        require_https(sys.argv[2])
+        cfg["server"] = sys.argv[2].rstrip("/")
         save_config(cfg)
         print(f"AtriAI server set to {cfg['server']}")
     elif cmd == "wake" and len(sys.argv) > 2:
@@ -865,7 +866,10 @@ def main():
         with open(sys.argv[2], "rb") as f:
             data = f.read()
         if data[:4] == b"RIFF" and len(data) > 44:
-            data = data[44:]
+            with wave.open(io.BytesIO(data), "rb") as wav:
+                if (wav.getnchannels(), wav.getsampwidth(), wav.getframerate()) != (1, 2, SR):
+                    raise ValueError("WAV input must be 16 kHz mono PCM16")
+                data = wav.readframes(wav.getnframes())
         asr, ans = send_phrase_to_server(cfg["server"], data, wake_word=cfg.get("wake_word", ""))
         print(json.dumps({"asr": asr, "answer": ans}, ensure_ascii=False))
     else:

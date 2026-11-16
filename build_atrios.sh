@@ -118,6 +118,13 @@ echo "[0/6] Host compiler: $HOSTCC ($("$HOSTCC" -dumpversion)) / $HOSTCXX, jobs:
 # ---------------------------------------------------------------------------
 # [1/6] Tools and inputs
 # ---------------------------------------------------------------------------
+# Some historical inputs were tracked without executable mode. Restore only
+# the three trusted bundled build tools; no index or source content changes.
+for tool in "$DTC" "$MAKE_EXT4FS" "$AMPACK"; do
+    if [ -f "$tool" ] && [ ! -x "$tool" ]; then
+        chmod u+x "$tool"
+    fi
+done
 for tool in "$DTC" "$MAKE_EXT4FS" "$AMPACK" python3 rsync tar; do
     if [ ! -x "$tool" ] && ! command -v "$tool" >/dev/null 2>&1; then
         echo "[!] Required build tool not found: $tool"
