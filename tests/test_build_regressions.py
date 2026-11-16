@@ -411,3 +411,267 @@ def test_kernel_source_existing_cache_and_local_tree_are_preserved(tmp_path):
                    env={'TARGET': str(target), 'KERNEL_SOURCE_DIR': str(existing)})
     assert result.returncode == 0, result.stderr
     assert target.is_symlink() and target.resolve() == existing
+
+
+CUSTOM_HARDWARE_MODULES = [
+    'gowin_led_device', 'quasar_led_screen', 'quasar_led_ring', 'quasar_pcba_ids',
+    'rotary-volume', 'gpio_keypad', 'zigbee-control', 'ltr308als01', 'leds-is31fl32xx',
+    'snd-soc-sy6045s', 'snd-soc-es8156', 'snd-soc-es7210', 'snd-soc-tas5825m',
+]
+
+
+def run_hardware_module_loader(tmp_path, name, *, canonical_exists=True,
+                               kernel='7.3.1-AtriOS-aml', extra_env=None):
+    source = (ROOT / 'board/yandex/station2/rootfs_overlay/etc/init.d/S01modules').read_text()
+    start = source.index('load_mod() {')
+    end = source.index('\n}\n', start) + len('\n}\n')
+    function = source[start:end]
+    module_dir = tmp_path / 'lib/modules' / kernel
+    canonical = module_dir / 'kernel/drivers/atrios' / (name + '.ko')
+    canonical.parent.mkdir(parents=True)
+    if canonical_exists:
+        canonical.write_bytes(b'new canonical module')
+    obsolete = module_dir / (name + '.ko')
+    obsolete.write_bytes(b'old module retained for rollback')
+    log = tmp_path / 'module-calls.log'
+    mocks = r'''
+modinfo() {
+    printf 'modinfo:%s\n' "$*" >> "$CALL_LOG"
+    [ "${MODINFO_FAIL:-0}" = 0 ] || return 1
+    printf '%s\n' "${MOCK_DEPENDS:-}"
+}
+modprobe() {
+    printf 'modprobe:%s\n' "$*" >> "$CALL_LOG"
+    if [ "${FAIL_DEP:-}" = "$1" ] || [ "${ALL_MODPROBE_FAIL:-0}" = 1 ]; then
+        return 1
+    fi
+    return 0
+}
+insmod() {
+    printf 'insmod:%s\n' "$*" >> "$CALL_LOG"
+    return "${INSMOD_RC:-0}"
+}
+load_mod "$MODNAME"
+'''
+    env = {'KVER': kernel, 'MOD_DIR': str(module_dir), 'MODNAME': name,
+           'CALL_LOG': str(log), 'MOCK_DEPENDS': 'regmap_i2c,snd_soc_core'}
+    env.update(extra_env or {})
+    result = shell(function + mocks, env=env)
+    calls = log.read_text().splitlines() if log.exists() else []
+    # The loader must never delete or quarantine recovery copies.
+    assert obsolete.read_bytes() == b'old module retained for rollback'
+    return result, calls, canonical, obsolete
+
+
+@pytest.mark.parametrize('name', CUSTOM_HARDWARE_MODULES)
+def test_modern_hardware_modules_use_canonical_file_despite_stale_flat_copy(tmp_path, name):
+    result, calls, canonical, obsolete = run_hardware_module_loader(tmp_path, name)
+    assert result.returncode == 0, result.stderr
+    assert calls == [f'modinfo:-F depends {canonical}', 'modprobe:regmap_i2c',
+                     'modprobe:snd_soc_core', f'insmod:{canonical}']
+    assert f'insmod:{obsolete}' not in calls
+    assert f'modprobe:{name}' not in calls  # A stale index cannot select this file.
+
+
+@pytest.mark.parametrize('kernel', ['6.18.37-AtriOS-aml', '7.3.1-AtriOS-aml', '4.90.1'])
+def test_modern_missing_canonical_fails_without_flat_or_index_fallback(tmp_path, kernel):
+    result, calls, _, _ = run_hardware_module_loader(tmp_path, 'quasar_led_ring',
+                                                    canonical_exists=False, kernel=kernel)
+    assert result.returncode != 0
+    assert calls == []
+    assert 'refusing legacy fallback' in result.stderr
+
+
+def test_canonical_dependency_failure_never_loads_old_or_new_driver(tmp_path):
+    result, calls, canonical, obsolete = run_hardware_module_loader(tmp_path, 'quasar_led_ring',
+        extra_env={'FAIL_DEP': 'snd_soc_core'})
+    assert result.returncode != 0
+    assert calls == [f'modinfo:-F depends {canonical}', 'modprobe:regmap_i2c', 'modprobe:snd_soc_core']
+    assert not any(call.startswith('insmod:') for call in calls)
+    assert str(obsolete) not in '\n'.join(calls)
+
+
+def test_canonical_insmod_failure_does_not_try_stale_fallback(tmp_path):
+    result, calls, canonical, obsolete = run_hardware_module_loader(tmp_path, 'gowin_led_device',
+        extra_env={'INSMOD_RC': '17'})
+    assert result.returncode != 0
+    assert calls[-1] == f'insmod:{canonical}'
+    assert f'insmod:{obsolete}' not in calls
+    assert 'modprobe:gowin_led_device' not in calls
+
+
+def test_canonical_metadata_failure_does_not_try_stale_fallback(tmp_path):
+    result, calls, canonical, _ = run_hardware_module_loader(tmp_path, 'gpio_keypad',
+        extra_env={'MODINFO_FAIL': '1'})
+    assert result.returncode != 0
+    assert calls == [f'modinfo:-F depends {canonical}']
+
+
+def test_standard_modules_use_modprobe_not_flat_files(tmp_path):
+    result, calls, _, _ = run_hardware_module_loader(tmp_path, 'snd-soc-dmic')
+    assert result.returncode == 0
+    assert calls == ['modprobe:snd-soc-dmic']
+
+
+def test_only_legacy_49_can_fallback_to_flat_modules(tmp_path):
+    result, calls, _, obsolete = run_hardware_module_loader(tmp_path, 'gowin_led_device',
+        kernel='4.9.113', extra_env={'ALL_MODPROBE_FAIL': '1'})
+    assert result.returncode == 0
+    assert calls == ['modprobe:gowin_led_device', f'insmod:{obsolete}']
+
+
+def test_module_service_shell_syntax_without_running_hardware():
+    script = ROOT / 'board/yandex/station2/rootfs_overlay/etc/init.d/S01modules'
+    result = subprocess.run(['sh', '-n', str(script)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.fixture
+def regulatory_service(tmp_path):
+    source = (ROOT / 'board/yandex/station2/rootfs_overlay/etc/init.d/S02regdb').read_text()
+    functions = source[source.index('select_upstream_regdb() {'):source.index('\ncase ')]
+    firmware = tmp_path / 'firmware'
+    firmware.mkdir()
+    for name, contents in [('regulatory.db-debian', b'debian-db'),
+                           ('regulatory.db.p7s-debian', b'debian-signature'),
+                           ('regulatory.db-upstream', b'upstream-db'),
+                           ('regulatory.db.p7s-upstream', b'upstream-signature')]:
+        (firmware / name).write_bytes(contents)
+    alternatives, admin = tmp_path / 'alternatives', tmp_path / 'admin'
+    alternatives.mkdir(); admin.mkdir()
+    real_alternatives = shutil.which('update-alternatives')
+    assert real_alternatives
+    command = [real_alternatives, '--altdir', str(alternatives), '--admindir', str(admin)]
+    for kind, priority in [('debian', '100'), ('upstream', '50')]:
+        subprocess.run(command + ['--install', str(firmware / 'regulatory.db'), 'regulatory.db',
+            str(firmware / ('regulatory.db-' + kind)), priority, '--slave',
+            str(firmware / 'regulatory.db.p7s'), 'regulatory.db.p7s',
+            str(firmware / ('regulatory.db.p7s-' + kind))], check=True, capture_output=True)
+    assert (firmware / 'regulatory.db').resolve().name == 'regulatory.db-debian'
+    binaries = tmp_path / 'bin'; binaries.mkdir()
+    (binaries / 'update-alternatives').write_text('''#!/bin/sh
+if [ "${FAIL_SELECT:-0}" = 1 ] && [ "$1" = --set ]; then exit 1; fi
+exec "$REAL_ALTERNATIVES" --altdir "$ALT_DIR" --admindir "$ADM_DIR" "$@"
+''')
+    (binaries / 'iw').write_text('''#!/bin/sh
+printf '%s\n' "$*" >> "$IW_LOG"
+[ "$*" = 'reg reload' ] || exit 99
+exit "${IW_RC:-0}"
+''')
+    for name in ['grep', 'readlink']:
+        (binaries / name).symlink_to(shutil.which(name))
+    for path in binaries.iterdir():
+        if not path.is_symlink(): path.chmod(0o755)
+    log = tmp_path / 'iw.log'
+    env = {'REGDB_DIR': str(firmware), 'PATH': str(binaries),
+           'REAL_ALTERNATIVES': real_alternatives, 'ALT_DIR': str(alternatives),
+           'ADM_DIR': str(admin), 'IW_LOG': str(log)}
+    def run(action='start_regdb', **overrides):
+        current = dict(env, **overrides)
+        # Only the extracted production functions run; iw is a logging stub.
+        return subprocess.run(['/bin/sh', '-eu', '-c', functions + '\n' + action],
+            env=dict(os.environ, **current), capture_output=True, text=True)
+    return run, firmware, binaries, log
+
+
+def test_regdb_boot_switches_database_and_slave_signature_together(regulatory_service):
+    run, firmware, _, log = regulatory_service
+    result = run()
+    assert result.returncode == 0, result.stderr
+    assert (firmware / 'regulatory.db').resolve().name == 'regulatory.db-upstream'
+    assert (firmware / 'regulatory.db.p7s').resolve().name == 'regulatory.db.p7s-upstream'
+    assert log.read_text().splitlines() == ['reg reload']
+
+
+def test_regdb_image_configuration_does_not_issue_netlink_requests(regulatory_service):
+    run, firmware, _, log = regulatory_service
+    result = run('select_upstream_regdb')
+    assert result.returncode == 0, result.stderr
+    assert (firmware / 'regulatory.db').resolve().name == 'regulatory.db-upstream'
+    assert (firmware / 'regulatory.db.p7s').resolve().name == 'regulatory.db.p7s-upstream'
+    assert not log.exists()
+
+
+def test_regdb_missing_iw_is_graceful(regulatory_service):
+    run, firmware, binaries, log = regulatory_service
+    (binaries / 'iw').unlink()
+    result = run()
+    assert result.returncode == 0, result.stderr
+    assert (firmware / 'regulatory.db').resolve().name == 'regulatory.db-upstream'
+    assert not log.exists()
+
+
+def test_regdb_absent_package_and_database_are_graceful(regulatory_service, tmp_path):
+    run, _, binaries, log = regulatory_service
+    (binaries / 'update-alternatives').unlink()
+    result = run(REGDB_DIR=str(tmp_path / 'absent-firmware'))
+    assert result.returncode == 0, result.stderr
+    assert not log.exists()
+
+
+@pytest.mark.parametrize('failure', ['selection', 'partial-signature'])
+def test_regdb_pair_selection_failure_does_not_reload_debian_database(regulatory_service, failure):
+    run, firmware, _, log = regulatory_service
+    if failure == 'partial-signature':
+        (firmware / 'regulatory.db.p7s-upstream').unlink()
+    result = run(FAIL_SELECT='1' if failure == 'selection' else '0')
+    assert result.returncode == 0
+    assert (firmware / 'regulatory.db').resolve().name == 'regulatory.db-debian'
+    assert (firmware / 'regulatory.db.p7s').resolve().name == 'regulatory.db.p7s-debian'
+    assert not log.exists()
+
+
+def test_regdb_unsupported_reload_preserves_boot_success(regulatory_service):
+    run, _, _, log = regulatory_service
+    result = run(IW_RC='1')
+    assert result.returncode == 0
+    assert log.read_text().splitlines() == ['reg reload']
+
+
+def test_regdb_service_shell_syntax_without_executing_hardware():
+    script = ROOT / 'board/yandex/station2/rootfs_overlay/etc/init.d/S02regdb'
+    result = subprocess.run(['sh', '-n', str(script)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_common_regdb_service_installs_without_station_overlay(tmp_path):
+    binaries = tmp_path / 'bin'
+    binaries.mkdir()
+    (binaries / 'sudo').write_text('#!/bin/sh\nexec "$@"\n')
+    (binaries / 'sudo').chmod(0o755)
+    stage = tmp_path / 'custom-rootfs'
+    result = shell(library('rootfs-debian.sh') + 'install_common_rootfs_services "$STAGE"',
+        env={'PROJECT_ROOT': str(ROOT), 'STAGE': str(stage),
+             'PATH': str(binaries) + os.pathsep + os.environ['PATH']})
+    assert result.returncode == 0, result.stderr
+    generic = ROOT / 'lib/runtime/S02regdb'
+    installed = stage / 'etc/init.d/S02regdb'
+    assert installed.read_bytes() == generic.read_bytes()
+    assert installed.stat().st_mode & 0o777 == 0o755
+    # Station OTA remains a regular file, with the same generic behavior.
+    station = ROOT / 'board/yandex/station2/rootfs_overlay/etc/init.d/S02regdb'
+    assert not station.is_symlink() and station.read_bytes() == generic.read_bytes()
+
+
+def test_board_profile_cannot_emit_artifacts_for_a_different_id(tmp_path):
+    boards = tmp_path / 'config/boards'
+    boards.mkdir(parents=True)
+    (boards / 'requested.conf').write_text('BOARD="forgotten-template-id"\n')
+    result = shell(library('config.sh') + 'load_board_config requested',
+        env={'PROJECT_ROOT': str(tmp_path), 'BOARD': 'requested'})
+    assert result.returncode != 0
+    assert 'Board profile identity mismatch' in result.stdout
+
+
+@pytest.mark.parametrize('override,expected', [('', '1.1.1'), ('2.7.4', '2.7.4')])
+def test_release_version_default_and_explicit_override_reach_child_process(override, expected):
+    command = library('config.sh') + '''
+load_board_config yndxsttion53
+printf 'PARENT_VERSION=%s\\n' "$RELEASE_VERSION"
+/bin/sh -c 'printf "CHILD_VERSION=%s\\n" "$RELEASE_VERSION"'
+'''
+    result = shell(command, env={'PROJECT_ROOT': str(ROOT), 'BOARD': 'yndxsttion53',
+                                'RELEASE_VERSION': override})
+    assert result.returncode == 0, result.stderr
+    assert 'PARENT_VERSION=' + expected in result.stdout
+    assert 'CHILD_VERSION=' + expected in result.stdout

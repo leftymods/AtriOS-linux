@@ -21,7 +21,7 @@ build_debian_micro_rootfs() {
     local rootfs_img="$ROOTFS_IMAGE"
     local debian_mirror="${DEBIAN_MIRROR:-https://deb.debian.org/debian}"
     local suite="bookworm"
-    local base_packages="ca-certificates,openssl,python3,fish,kmod,util-linux,coreutils,passwd"
+    local base_packages="ca-certificates,openssl,python3,fish,kmod,util-linux,coreutils,passwd,wireless-regdb,iw"
     local base_profile="${suite}|${ARCH}|${debian_mirror}|${base_packages}"
 
     mkdir -p "$PROJECT_ROOT/cache" "$PROJECT_ROOT/output/images"
@@ -60,6 +60,8 @@ build_debian_micro_rootfs() {
         sudo rsync -aK "$PROJECT_ROOT/$ROOTFS_OVERLAY/" "$stage_dir/"
     fi
 
+    install_common_rootfs_services "$stage_dir"
+
     # Ensure standard Debian UsrMerge symlinks are preserved (lib -> usr/lib, etc.)
     for d in bin sbin lib; do
         if [ -d "$stage_dir/$d" ] && [ ! -L "$stage_dir/$d" ]; then
@@ -74,6 +76,10 @@ build_debian_micro_rootfs() {
     if [ ! -e "$stage_dir/usr/lib/ld-linux-aarch64.so.1" ]; then
         sudo ln -sf aarch64-linux-gnu/ld-linux-aarch64.so.1 "$stage_dir/usr/lib/ld-linux-aarch64.so.1" 2>/dev/null || true
     fi
+
+    # Debian defaults to its own signing key, absent from the mainline kernel.
+    # Select the upstream db/signature pair without issuing host netlink calls.
+    sudo chroot "$stage_dir" /bin/sh /etc/init.d/S02regdb select-upstream
 
     # 3. Configure System & Branding
     display_alert "INFO" "Applying ${OS_NAME} ${RELEASE_NAME} configuration & identity..."
@@ -249,6 +255,7 @@ INITEOF
     sudo chroot "$stage_dir" /bin/sh -c "/usr/bin/fish --version"
     sudo chroot "$stage_dir" /usr/bin/python3 -c 'import ssl; ssl.create_default_context()'
     sudo chroot "$stage_dir" /bin/sh -c 'test -s /etc/ssl/certs/ca-certificates.crt'
+    sudo chroot "$stage_dir" /bin/sh -c 'test -s /lib/firmware/regulatory.db && test -s /lib/firmware/regulatory.db.p7s'
     sudo chroot "$stage_dir" /bin/sh -c "test -x /sbin/init && echo Init script: OK"
 
     # Remove qemu binary before packing
@@ -273,4 +280,9 @@ prepare_rootfs_command_modes() {
             sudo find "$stage_dir/$command_dir" -type f -exec chmod a+x {} +
         fi
     done
+}
+
+install_common_rootfs_services() {
+    local stage_dir="$1"
+    sudo install -D -m 755 "$PROJECT_ROOT/lib/runtime/S02regdb" "$stage_dir/etc/init.d/S02regdb"
 }

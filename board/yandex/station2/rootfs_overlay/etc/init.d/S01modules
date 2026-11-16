@@ -6,40 +6,80 @@ MOD_DIR="/lib/modules/$KVER"
 
 load_mod() {
   mod="$1"
-  if [ -f "$MOD_DIR/${mod}.ko" ]; then
-    insmod "$MOD_DIR/${mod}.ko" 2>/dev/null || modprobe "$mod" 2>/dev/null || true
-  else
-    modprobe "$mod" 2>/dev/null || true
-  fi
+  case "$mod" in
+    ''|-*|*[!A-Za-z0-9_-]*) echo "[AtriOS] Invalid module name: $mod" >&2; return 1 ;;
+  esac
+
+  # Only the vendor 4.9 image uses flat modules without reliable indices.
+  case "$KVER" in
+    4.9|4.9.*|4.9-*)
+      modprobe "$mod" 2>/dev/null && return 0
+      [ -f "$MOD_DIR/$mod.ko" ] || return 1
+      insmod "$MOD_DIR/$mod.ko"
+      return $?
+      ;;
+  esac
+
+  case "$mod" in
+    gowin_led_device|quasar_led_screen|quasar_led_ring|quasar_pcba_ids|rotary-volume|gpio_keypad|zigbee-control|ltr308als01|leds-is31fl32xx|snd-soc-sy6045s|snd-soc-es8156|snd-soc-es7210|snd-soc-tas5825m)
+      canonical="$MOD_DIR/kernel/drivers/atrios/$mod.ko"
+      if [ ! -f "$canonical" ]; then
+        echo "[AtriOS] Missing current module: $canonical; refusing legacy fallback" >&2
+        return 1
+      fi
+      dependencies=$(modinfo -F depends "$canonical") || return 1
+      case "$dependencies" in
+        *[!A-Za-z0-9_,[:space:]-]*) echo "[AtriOS] Invalid dependencies for $mod" >&2; return 1 ;;
+      esac
+      for dependency in $(printf '%s' "$dependencies" | tr ',' ' '); do
+        case "$dependency" in -*) return 1 ;; esac
+        if ! modprobe "$dependency"; then
+          echo "[AtriOS] Dependency $dependency failed for $canonical" >&2
+          return 1
+        fi
+      done
+      # An obsolete flat file or stale modules.dep must never select this driver.
+      insmod "$canonical"
+      ;;
+    *) modprobe "$mod" ;;
+  esac
 }
 
 case "$1" in
   start)
     echo "[AtriOS] Loading hardware drivers (kernel $KVER)..."
     depmod -a 2>/dev/null || true
+    custom_failed=0
 
     # 1. Audio drivers & codecs
     load_mod snd-soc-dmic
     load_mod snd-soc-pcm1774
     load_mod snd-soc-pcm1774-i2c
-    load_mod snd-soc-es7210
-    load_mod snd-soc-es8156
-    load_mod snd-soc-sy6045s
-    load_mod snd-soc-tas5825m
+    load_mod snd-soc-es7210 || custom_failed=1
+    load_mod snd-soc-es8156 || custom_failed=1
+    load_mod snd-soc-sy6045s || custom_failed=1
+    load_mod snd-soc-tas5825m || custom_failed=1
 
     # 2. Rotary knob & sensors
-    load_mod rotary-volume
-    load_mod gpio_keypad
-    load_mod quasar_pcba_ids
-    load_mod ltr308als01
+    load_mod rotary-volume || custom_failed=1
+    load_mod gpio_keypad || custom_failed=1
+    load_mod quasar_pcba_ids || custom_failed=1
+    load_mod ltr308als01 || custom_failed=1
 
     # 3. Displays: Gowin 25x16 screen & IS31FL32xx LED ring
-    load_mod gowin_led_device
-    load_mod quasar_led_screen
-    load_mod leds-is31fl32xx
-    load_mod quasar_led_ring
+    load_mod gowin_led_device || custom_failed=1
+    load_mod quasar_led_screen || custom_failed=1
+    load_mod leds-is31fl32xx || custom_failed=1
+    load_mod quasar_led_ring || custom_failed=1
     for t in /sys/class/leds/*ring*/trigger /sys/class/leds/*led_ring*/trigger; do
       [ -f "$t" ] && echo led_ring_fb > "$t" 2>/dev/null || true
+    done
+
+    # Framebuffer consoles must not draw text on the LED framebuffers.
+    # Keep this independent of the number of LED trigger files present.
+    for vt in /sys/class/vtconsole/vtcon*; do
+      [ -f "$vt/name" ] && grep -q "frame buffer" "$vt/name" || continue
+      [ -f "$vt/bind" ] && echo 0 > "$vt/bind" 2>/dev/null || true
     done
 
     # 4. Wireless (Realtek RTL8822CS) - Power up SDIO & BT reset GPIO
@@ -68,12 +108,16 @@ case "$1" in
     load_mod btrtl
 
     # 5. Zigbee
-    load_mod zigbee-control
+    load_mod zigbee-control || custom_failed=1
 
     # Unblock rfkill and bring up wlan0
     rfkill unblock all 2>/dev/null || true
     ip link set wlan0 up 2>/dev/null || true
 
+    if [ "$custom_failed" -ne 0 ]; then
+      echo "[AtriOS] Current hardware module loading failed; old flat modules were not used." >&2
+      exit 1
+    fi
     echo "[AtriOS] Drivers loaded."
     ;;
   stop)

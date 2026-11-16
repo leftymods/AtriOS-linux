@@ -1,0 +1,38 @@
+#!/bin/sh
+# Reload the signed upstream database after the root filesystem is available.
+REGDB_DIR=/lib/firmware
+
+select_upstream_regdb() {
+  upstream="$REGDB_DIR/regulatory.db-upstream"
+  upstream_signature="$REGDB_DIR/regulatory.db.p7s-upstream"
+  command -v update-alternatives >/dev/null 2>&1 || return 1
+  [ -s "$upstream" ] && [ -s "$upstream_signature" ] || return 1
+  update-alternatives --list regulatory.db 2>/dev/null | grep -Fx "$upstream" >/dev/null || return 1
+  # The signature is a slave of the same alternative: always switch the pair.
+  update-alternatives --set regulatory.db "$upstream" || return 1
+  [ "$(readlink -f "$REGDB_DIR/regulatory.db")" = "$(readlink -f "$upstream")" ] &&
+    [ "$(readlink -f "$REGDB_DIR/regulatory.db.p7s")" = "$(readlink -f "$upstream_signature")" ]
+}
+
+start_regdb() {
+  if [ -e "$REGDB_DIR/regulatory.db-upstream" ] || [ -e "$REGDB_DIR/regulatory.db.p7s-upstream" ]; then
+    if ! select_upstream_regdb; then
+      echo "[AtriOS] Cannot select the signed upstream regulatory database; reload skipped." >&2
+      return 0
+    fi
+  fi
+  command -v iw >/dev/null 2>&1 || return 0
+  [ -s "$REGDB_DIR/regulatory.db" ] && [ -s "$REGDB_DIR/regulatory.db.p7s" ] || return 0
+  # Do not set a country or restart a network interface.
+  if ! iw reg reload; then
+    echo "[AtriOS] Regulatory database reload unavailable; network state unchanged." >&2
+  fi
+  return 0
+}
+
+case "${1:-start}" in
+  start|restart|reload) start_regdb ;;
+  select-upstream) select_upstream_regdb ;;
+  stop) exit 0 ;;
+  *) echo "Usage: $0 {start|stop|restart|reload|select-upstream}" >&2; exit 1 ;;
+esac

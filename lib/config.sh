@@ -7,6 +7,7 @@ load_board_config() {
     local target_board="${1:-$BOARD}"
     local conf_file="$PROJECT_ROOT/config/boards/${target_board}.conf"
     local system_conf="$PROJECT_ROOT/config/system.conf"
+    local release_version_override="${RELEASE_VERSION:-}"
 
     # 1. Load System & Release Configuration
     if [ -f "$system_conf" ]; then
@@ -14,10 +15,10 @@ load_board_config() {
         source "$system_conf"
     fi
 
-    # Allow CLI / environment override of release
+    # RELEASE selects the name; preserve an explicit caller version override.
     OS_NAME="${OS_NAME:-AtriOS}"
     RELEASE_NAME="${RELEASE:-${RELEASE_NAME:-Nebula}}"
-    RELEASE_VERSION="${RELEASE_VERSION:-1.0}"
+    RELEASE_VERSION="${release_version_override:-${RELEASE_VERSION:-1.1.1}}"
 
     if [ ! -f "$conf_file" ]; then
         exit_with_error "Board configuration not found: $conf_file"
@@ -26,6 +27,8 @@ load_board_config() {
     # 2. Source board configuration
     # shellcheck source=/dev/null
     source "$conf_file"
+    [ "$BOARD" = "$target_board" ] || \
+        exit_with_error "Board profile identity mismatch: requested $target_board, configured $BOARD"
 
     # 3. Source family configuration if defined
     if [ -n "${BOARDFAMILY:-}" ]; then
@@ -41,7 +44,7 @@ load_board_config() {
     CROSS_COMPILE="${CROSS_COMPILE:-aarch64-linux-gnu-}"
     IMAGE_FORMAT="${IMAGE_FORMAT:-emmc}"
     IMAGE_FILENAME="${OS_NAME}-${RELEASE_NAME}-${BOARD}-emmc.img"
-    BOOTLOADER_BIN="${BOOTLOADER_BIN:-device/yandex/station_max/upgrade/u-boot.bin.sd.bin}"
+    BOOTLOADER_BIN="${BOOTLOADER_BIN:-${UPGRADE_DIR:?UPGRADE_DIR must be configured}/u-boot.bin.sd.bin}"
     KERNEL_IMAGE="${KERNEL_IMAGE:-output/images/Image}"
     DTB_IMAGE="${DTB_IMAGE:-output/images/${DTS_NAME}.dtb}"
     ROOTFS_IMAGE="${ROOTFS_IMAGE:-output/images/rootfs-debian-micro.ext4}"
@@ -54,7 +57,7 @@ load_board_config() {
             printf -v "$path_var" '%s/%s' "$PROJECT_ROOT" "${!path_var}"
         fi
     done
-    export BOARD ARCH CROSS_COMPILE
+    export BOARD ARCH CROSS_COMPILE RELEASE_VERSION
 
     display_alert "INFO" "OS / Release:" "${OS_NAME} ${RELEASE_NAME} (v${RELEASE_VERSION})"
     display_alert "INFO" "Target board:" "${BOARD_NAME} (${BOARD})"
