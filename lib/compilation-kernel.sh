@@ -54,11 +54,13 @@ build_kernel() {
     fi
 
     # 4. Build Kernel Image & DTBs
-    display_alert "INFO" "Compiling Linux kernel (Image & DTBs) using $(nproc) jobs..."
+    local build_jobs="${BUILD_JOBS:-$(nproc)}"
+    [[ "$build_jobs" =~ ^[1-9][0-9]*$ ]] || exit_with_error "Invalid BUILD_JOBS: $build_jobs"
+    display_alert "INFO" "Compiling Linux kernel (Image & DTBs) using $build_jobs jobs..."
     (
         cd "$kernel_dir"
         make olddefconfig
-        make -j"$(nproc)" Image dtbs modules
+        make -j"$build_jobs" Image dtbs modules
     )
 
     # 5. Copy built artifacts to output directory

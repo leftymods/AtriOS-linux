@@ -176,3 +176,20 @@ def test_http_error_releases_response_and_socket(local_tls, connections):
         https.request_bytes(base + "/http-error", ca_file=ca, timeout=2)
     assert caught.value.code == 404
     assert caught.value.fp is None or caught.value.fp.closed
+
+
+def test_python312_handler_uses_context_hostname_verification(monkeypatch):
+    import ssl
+    context = ssl.create_default_context()
+    handler = https.DeadlineHandler(context, 1)
+    if hasattr(handler, "_check_hostname"):
+        del handler._check_hostname
+    captured = {}
+    def fake_open(connection, request, **kwargs):
+        captured.update(kwargs)
+        return "handled"
+    monkeypatch.setattr(handler, "do_open", fake_open)
+    assert handler.https_open(object()) == "handled"
+    assert captured == {"context": context}
+    assert context.check_hostname is True
+    assert context.verify_mode == ssl.CERT_REQUIRED

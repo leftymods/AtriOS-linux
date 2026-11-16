@@ -1,0 +1,2 @@
+# Unified patch data preserves target line endings and context indentation.
+board/yandex/station2/mainline/patches/linux-7.0/*.patch -text -whitespace

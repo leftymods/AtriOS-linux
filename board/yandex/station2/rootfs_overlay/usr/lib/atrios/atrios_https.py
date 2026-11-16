@@ -86,7 +86,9 @@ class DeadlineHandler(urllib.request.HTTPSHandler):
             conn = DeadlineConnection(*args, deadline=self.deadline, cancel=self.cancel, **kwargs)
             self.connections.append(conn)
             return conn
-        return self.do_open(connection, req, context=self._context, check_hostname=self._check_hostname)
+        # Hostname verification is owned by our mandatory SSLContext. Python
+        # 3.12 removed HTTPSHandler._check_hostname and the connection argument.
+        return self.do_open(connection, req, context=self._context)
 
     def finish(self):
         for conn in self.connections:

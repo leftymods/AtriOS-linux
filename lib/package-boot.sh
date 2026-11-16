@@ -10,13 +10,32 @@ atrios_root_disk() {
     esac
 }
 
+# SOURCE may be /dev/root with no device node; sysfs retains the real partition.
+atrios_resolve_root_source() {
+    root_source=$(findmnt -nro SOURCE /) || return 1
+    canonical_source=$(readlink -f "$root_source" 2>/dev/null) || canonical_source=""
+    if atrios_root_disk "$canonical_source" >/dev/null 2>&1; then
+        printf '%s\n' "$canonical_source"
+        return 0
+    fi
+    root_devno=$(findmnt -nro MAJ:MIN /) || return 1
+    case "$root_devno" in
+        *[!0-9:]*|:*|*:) echo "Invalid root device number: $root_devno" >&2; return 1 ;;
+    esac
+    case "$root_devno" in *:*:*) return 1 ;; *:*) ;; *) return 1 ;; esac
+    root_sysfs=$(readlink -f "/sys/dev/block/$root_devno") || return 1
+    [ -n "$root_sysfs" ] || return 1
+    root_source="/dev/${root_sysfs##*/}"
+    atrios_root_disk "$root_source" >/dev/null || return 1
+    printf '%s\n' "$root_source"
+}
+
 atrios_boot_target() {
     actual_board=$(cat /etc/atrios-board) || return 1
     [ "$actual_board" = "$BOARD" ] || {
         echo "Package targets $BOARD, installed board is $actual_board" >&2; return 1;
     }
-    root_source=$(findmnt -nro SOURCE /) || return 1
-    root_source=$(readlink -f "$root_source") || return 1
+    root_source=$(atrios_resolve_root_source) || return 1
     TARGET_DEV=$(atrios_root_disk "$root_source") || return 1
     disk_name=${TARGET_DEV##*/}
     [ -b "$TARGET_DEV" ] && [ "$(cat "/sys/class/block/$disk_name/device/type")" = MMC ] || {

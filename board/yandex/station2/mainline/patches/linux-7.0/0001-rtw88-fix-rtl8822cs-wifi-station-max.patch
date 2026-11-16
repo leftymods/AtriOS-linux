@@ -1,7 +1,6 @@
-diff -uprN a/drivers/net/wireless/realtek/rtw88/coex.c b/drivers/net/wireless/realtek/rtw88/coex.c
 --- a/drivers/net/wireless/realtek/rtw88/coex.c
 +++ b/drivers/net/wireless/realtek/rtw88/coex.c
-@@ -2742,10 +2742,30 @@ static void __rtw_coex_init_hw_config(st
+@@ -2742,10 +2742,34 @@
  		rtw_dbg(rtwdev, RTW_DBG_COEX, "[BTCoex], %s(): RF Off\n",
  			__func__);
  	} else if (wifi_only) {
@@ -17,11 +16,13 @@ diff -uprN a/drivers/net/wireless/realtek/rtw88/coex.c b/drivers/net/wireless/re
  				    true);
 -		coex->stop_dm = true;
 +		/* Simultaneous WL + BT coexistence on RTL8822CS:
-+		 * 0x73 = 0x04 (WL path control without forcing GNT_BT low)
++		 * 0x73 = 0x06 (preserve BIT(1) as in halbtc8822ewifionly + BIT(2) WL ctrl, BIT(3)=0)
 +		 * indirect 0x38 = 0xff00 (GNT_WL=SW_HIGH, GNT_BT=SW_HIGH)
++		 * RF_PATH_B 0x1 = 0x42000 (enable BT at S1, never force GNT_BT=0)
++		 * RF_PATH_A 0x2[0] = 0 (WLS0_EN_GNT_CHECK=0: allow WLS0 TX when GNT_BT=1)
 +		 * COEX_TABLE0/1 = 0xffffffff (allow both WL and BT traffic)
 +		 */
-+		rtw_write8(rtwdev, 0x73, 0x04);
++		rtw_write8(rtwdev, 0x73, 0x06);
 +		rtw_coex_write_indirect_reg(rtwdev, 0x38, 0xffff, 0xff00);
 +		rtw_coex_write_indirect_reg(rtwdev, 0xa0, 0xffff, 0xffff);
 +		rtw_coex_write_indirect_reg(rtwdev, 0xa4, 0xffff, 0xffff);
@@ -29,12 +30,14 @@ diff -uprN a/drivers/net/wireless/realtek/rtw88/coex.c b/drivers/net/wireless/re
 +		rtw_write32(rtwdev, REG_BT_COEX_TABLE1, 0xffffffff);
 +		rtw_write32(rtwdev, REG_BT_COEX_BRK_TABLE, 0xf0ffffff);
 +		rtw_write8(rtwdev, REG_BT_COEX_TABLE_H, 0x03);
-+		pr_info("[RTW88] wl+bt coexistence hardware configured (0x73=0x04, 0x38=0xff00, tbl=0xffffffff)\n");
++		rtw_write_rf(rtwdev, RF_PATH_B, 0x1, 0xfffff, 0x42000);
++		rtw_write_rf(rtwdev, RF_PATH_A, RF_WLSEL, 0x1, 0x0);
++		pr_info("[RTW88] wl+bt coexistence hardware configured (0x73=0x06, 0x38=0xff00, rfA2=0, rfB1=0x42000)\n");
 +		return;
  	} else {
  		rtw_coex_set_ant_path(rtwdev, true, COEX_SET_ANT_INIT);
  		rtw_coex_write_scbd(rtwdev, COEX_SCBD_ACTIVE | COEX_SCBD_ONOFF,
-@@ -2777,8 +2797,13 @@ void rtw_coex_power_on_setting(struct rt
+@@ -2777,8 +2801,13 @@
  	rtw_coex_monitor_bt_enable(rtwdev);
  	rtw_coex_set_rfe_type(rtwdev);
  
@@ -50,7 +53,7 @@ diff -uprN a/drivers/net/wireless/realtek/rtw88/coex.c b/drivers/net/wireless/re
  
  	rtw_coex_table(rtwdev, true, table_case);
  	/* red x issue */
-@@ -2821,8 +2846,8 @@ void rtw_coex_ips_notify(struct rtw_dev
+@@ -2821,8 +2850,8 @@
  		rtw_dbg(rtwdev, RTW_DBG_COEX, "[BTCoex], IPS LEAVE notify\n");
  
  		rtw_coex_write_scbd(rtwdev, COEX_SCBD_ACTIVE | COEX_SCBD_ONOFF, true);
@@ -61,9 +64,8 @@ diff -uprN a/drivers/net/wireless/realtek/rtw88/coex.c b/drivers/net/wireless/re
  
  		coex_stat->wl_under_ips = false;
  	}
-diff -uprN a/drivers/net/wireless/realtek/rtw88/efuse.c b/drivers/net/wireless/realtek/rtw88/efuse.c
---- a/drivers/net/wireless/realtek/rtw88/efuse.c	2026-11-09 12:09:52.128756269 +0300
-+++ b/drivers/net/wireless/realtek/rtw88/efuse.c	2026-11-09 12:09:52.144103923 +0300
+--- a/drivers/net/wireless/realtek/rtw88/efuse.c
++++ b/drivers/net/wireless/realtek/rtw88/efuse.c
 @@ -3,6 +3,7 @@
   */
  
@@ -72,7 +74,7 @@ diff -uprN a/drivers/net/wireless/realtek/rtw88/efuse.c b/drivers/net/wireless/r
  
  #include "main.h"
  #include "efuse.h"
-@@ -17,107 +18,106 @@ static void switch_efuse_bank(struct rtw
+@@ -17,107 +18,106 @@
  			 RTW_EFUSE_BANK_WIFI);
  }
  
@@ -133,7 +135,6 @@ diff -uprN a/drivers/net/wireless/realtek/rtw88/efuse.c b/drivers/net/wireless/r
 -			blk_idx = get_efuse_blk_idx_1_byte(hdr1);
 -			word_en = hdr1 & 0xf;
 -			phy_idx += 1;
--		}
 +		if (phy_idx >= physical_size - protect_size)
 +			break;
 +
@@ -143,10 +144,8 @@ diff -uprN a/drivers/net/wireless/realtek/rtw88/efuse.c b/drivers/net/wireless/r
 +
 +		blk_idx = ((hdr2 & 0xf0) >> 4) | ((hdr & 0x0f) << 4);
 +		word_en = hdr2 & 0x0f;
- 
- 		for (i = 0; i < 4; i++) {
--			if (invalid_efuse_content(word_en, i))
--				continue;
++
++		for (i = 0; i < 4; i++) {
 +			if (!((word_en >> i) & 1)) {
 +				log_idx = (blk_idx << 3) + (i << 1);
 +
@@ -155,7 +154,16 @@ diff -uprN a/drivers/net/wireless/realtek/rtw88/efuse.c b/drivers/net/wireless/r
 +
 +				if (phy_idx + 1 >= physical_size)
 +					return -EINVAL;
- 
++
++				log_map[log_idx] = phy_map[phy_idx++];
++				log_map[log_idx + 1] = phy_map[phy_idx++];
++			}
+ 		}
+-
+-		for (i = 0; i < 4; i++) {
+-			if (invalid_efuse_content(word_en, i))
+-				continue;
+-
 -			log_idx = block_idx_to_logical_idx(blk_idx, i);
 -			if (phy_idx + 1 > physical_size - protect_size ||
 -			    log_idx + 1 > logical_size)
@@ -164,11 +172,9 @@ diff -uprN a/drivers/net/wireless/realtek/rtw88/efuse.c b/drivers/net/wireless/r
 -			log_map[log_idx] = phy_map[phy_idx];
 -			log_map[log_idx + 1] = phy_map[phy_idx + 1];
 -			phy_idx += 2;
-+				log_map[log_idx] = phy_map[phy_idx++];
-+				log_map[log_idx + 1] = phy_map[phy_idx++];
-+			}
- 		}
- 	}
+-		}
+-	}
++	}
 +
 +	pr_info("[RTW88] logical efuse decoded: parsed up to phy_idx=%u\n", phy_idx);
  	return 0;
@@ -186,10 +192,13 @@ diff -uprN a/drivers/net/wireless/realtek/rtw88/efuse.c b/drivers/net/wireless/r
 -	rtw_chip_efuse_grant_on(rtwdev);
 -
 -	switch_efuse_bank(rtwdev);
-+	pr_info("[RTW88] dump_efuse: start 8822E physical dump, size=%u\n", size);
- 
+-
 -	/* disable 2.5V LDO */
 -	chip->ops->cfg_ldo25(rtwdev, false);
+-
+-	efuse_ctl = rtw_read32(rtwdev, REG_EFUSE_CTRL);
++	pr_info("[RTW88] dump_efuse: start 8822E physical dump, size=%u\n", size);
++
 +	orig_00 = rtw_read16(rtwdev, 0x0000);
 +	if (!(orig_00 & BIT(15))) {
 +		/* Enable eFuse power / isolation when chip is in idle state */
@@ -199,17 +208,17 @@ diff -uprN a/drivers/net/wireless/realtek/rtw88/efuse.c b/drivers/net/wireless/r
 +		rtw_write16_set(rtwdev, 0x0000, BIT(15));
 +		rtw_write16_clr(rtwdev, 0x0000, BIT(8));
 +	}
- 
--	efuse_ctl = rtw_read32(rtwdev, REG_EFUSE_CTRL);
++
 +	rtw_write32_set(rtwdev, 0x00a4, BIT(19));
  
  	for (addr = 0; addr < size; addr++) {
 -		efuse_ctl &= ~(BIT_MASK_EF_DATA | BITS_EF_ADDR);
 -		efuse_ctl |= (addr & BIT_MASK_EF_ADDR) << BIT_SHIFT_EF_ADDR;
 -		rtw_write32(rtwdev, REG_EFUSE_CTRL, efuse_ctl & (~BIT_EF_FLAG));
-+		rtw_write32(rtwdev, REG_EFUSE_CTRL, (addr & 0x7ff) << 16);
- 
+-
 -		cnt = 1000000;
++		rtw_write32(rtwdev, REG_EFUSE_CTRL, (addr & 0x7ff) << 16);
++
 +		cnt = 20000;
  		do {
  			udelay(1);
@@ -220,14 +229,17 @@ diff -uprN a/drivers/net/wireless/realtek/rtw88/efuse.c b/drivers/net/wireless/r
 +				rtw_write32_clr(rtwdev, 0x00a4, BIT(19));
  				return -EBUSY;
 -		} while (!(efuse_ctl & BIT_EF_FLAG));
+-
+-		*(map + addr) = (u8)(efuse_ctl & BIT_MASK_EF_DATA);
+-	}
+-
+-	rtw_chip_efuse_grant_off(rtwdev);
 +			}
 +		} while (!(efuse_ctl & BIT(29)));
- 
--		*(map + addr) = (u8)(efuse_ctl & BIT_MASK_EF_DATA);
++
 +		*(map + addr) = (u8)(efuse_ctl & 0xff);
- 	}
- 
--	rtw_chip_efuse_grant_off(rtwdev);
++	}
++
 +	rtw_write32_clr(rtwdev, 0x00a4, BIT(19));
 +
 +	if (!(orig_00 & BIT(15))) {
@@ -243,7 +255,7 @@ diff -uprN a/drivers/net/wireless/realtek/rtw88/efuse.c b/drivers/net/wireless/r
  
  	return 0;
  }
-@@ -125,20 +125,40 @@ static int rtw_dump_physical_efuse_map(s
+@@ -125,20 +125,40 @@
  int rtw_read8_physical_efuse(struct rtw_dev *rtwdev, u16 addr, u8 *data)
  {
  	u32 efuse_ctl;
@@ -252,6 +264,9 @@ diff -uprN a/drivers/net/wireless/realtek/rtw88/efuse.c b/drivers/net/wireless/r
  
 -	rtw_write32_mask(rtwdev, REG_EFUSE_CTRL, 0x3ff00, addr);
 -	rtw_write32_clr(rtwdev, REG_EFUSE_CTRL, BIT_EF_FLAG);
+-
+-	ret = read_poll_timeout(rtw_read32, efuse_ctl, efuse_ctl & BIT_EF_FLAG,
+-				1000, 100000, false, rtwdev, REG_EFUSE_CTRL);
 +	orig_00 = rtw_read16(rtwdev, 0x0000);
 +	if (!(orig_00 & BIT(15))) {
 +		rtw_write8_set(rtwdev, 0x00cc, BIT(2));
@@ -276,9 +291,7 @@ diff -uprN a/drivers/net/wireless/realtek/rtw88/efuse.c b/drivers/net/wireless/r
 +		rtw_write16_clr(rtwdev, 0x0000, BIT(14));
 +		rtw_write8_clr(rtwdev, 0x00cc, BIT(2));
 +	}
- 
--	ret = read_poll_timeout(rtw_read32, efuse_ctl, efuse_ctl & BIT_EF_FLAG,
--				1000, 100000, false, rtwdev, REG_EFUSE_CTRL);
++
  	if (ret) {
  		*data = EFUSE_READ_FAIL;
  		return ret;
@@ -290,15 +303,14 @@ diff -uprN a/drivers/net/wireless/realtek/rtw88/efuse.c b/drivers/net/wireless/r
  	return 0;
  }
  EXPORT_SYMBOL(rtw_read8_physical_efuse);
-@@ -185,3 +205,4 @@ out_free:
+@@ -185,3 +205,4 @@
  
  	return ret;
  }
 +EXPORT_SYMBOL(rtw_parse_efuse_map);
-diff -uprN a/drivers/net/wireless/realtek/rtw88/fw.c b/drivers/net/wireless/realtek/rtw88/fw.c
---- a/drivers/net/wireless/realtek/rtw88/fw.c	2026-11-09 12:09:52.128799869 +0300
-+++ b/drivers/net/wireless/realtek/rtw88/fw.c	2026-11-09 12:09:52.135577193 +0300
-@@ -2262,6 +2262,9 @@ void rtw_hw_scan_start(struct rtw_dev *r
+--- a/drivers/net/wireless/realtek/rtw88/fw.c
++++ b/drivers/net/wireless/realtek/rtw88/fw.c
+@@ -2262,6 +2262,9 @@
  
  	rtwdev->hal.rcr &= ~BIT_CBSSID_BCN;
  	rtw_write32(rtwdev, REG_RCR, rtwdev->hal.rcr);
@@ -308,7 +320,7 @@ diff -uprN a/drivers/net/wireless/realtek/rtw88/fw.c b/drivers/net/wireless/real
  }
  
  void rtw_hw_scan_complete(struct rtw_dev *rtwdev, struct ieee80211_vif *vif,
-@@ -2281,6 +2284,7 @@ void rtw_hw_scan_complete(struct rtw_dev
+@@ -2281,6 +2284,7 @@
  	rtwdev->hal.rcr |= BIT_CBSSID_BCN;
  	rtw_write32(rtwdev, REG_RCR, rtwdev->hal.rcr);
  
@@ -316,7 +328,7 @@ diff -uprN a/drivers/net/wireless/realtek/rtw88/fw.c b/drivers/net/wireless/real
  	rtw_core_scan_complete(rtwdev, vif, true);
  
  	rtwvif = (struct rtw_vif *)vif->drv_priv;
-@@ -2377,6 +2381,7 @@ void rtw_hw_scan_status_report(struct rt
+@@ -2377,6 +2381,7 @@
  	c2h = get_c2h_from_skb(skb);
  	rc = GET_SCAN_REPORT_RETURN_CODE(c2h->payload);
  	aborted = rc != RTW_SCAN_REPORT_SUCCESS;
@@ -324,10 +336,9 @@ diff -uprN a/drivers/net/wireless/realtek/rtw88/fw.c b/drivers/net/wireless/real
  	rtw_hw_scan_complete(rtwdev, vif, aborted);
  
  	if (aborted)
-diff -uprN a/drivers/net/wireless/realtek/rtw88/mac80211.c b/drivers/net/wireless/realtek/rtw88/mac80211.c
---- a/drivers/net/wireless/realtek/rtw88/mac80211.c	2026-11-09 12:09:52.129060070 +0300
-+++ b/drivers/net/wireless/realtek/rtw88/mac80211.c	2026-11-09 12:09:52.135836894 +0300
-@@ -1,997 +1,988 @@
+--- a/drivers/net/wireless/realtek/rtw88/mac80211.c
++++ b/drivers/net/wireless/realtek/rtw88/mac80211.c
+@@ -1,997 +1,997 @@
 -// SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 -/* Copyright(c) 2018-2019  Realtek Corporation
 - */
@@ -2039,6 +2050,15 @@ diff -uprN a/drivers/net/wireless/realtek/rtw88/mac80211.c b/drivers/net/wireles
 +	rtw_leave_lps_deep(rtwdev);
 +	rtw_coex_connect_notify(rtwdev, COEX_ASSOCIATE_START);
 +	rtw_chip_prepare_tx(rtwdev);
++	pr_info("[RTW88-PREP] ch=%d txempty=0x%04x txpause=0x%02x igi=0x%08x rf0=%05x/%05x 820=0x%08x 824=0x%08x\n",
++		rtwdev->hal.current_channel,
++		rtw_read16(rtwdev, REG_TXPKT_EMPTY),
++		rtw_read8(rtwdev, REG_TXPAUSE),
++		rtw_read32(rtwdev, 0x1d70),
++		rtw_read_rf(rtwdev, RF_PATH_A, 0x00, RFREG_MASK),
++		rtw_read_rf(rtwdev, RF_PATH_B, 0x00, RFREG_MASK),
++		rtw_read32(rtwdev, 0x820),
++		rtw_read32(rtwdev, 0x824));
 +	mutex_unlock(&rtwdev->mutex);
 +}
 +
@@ -2313,10 +2333,17 @@ diff -uprN a/drivers/net/wireless/realtek/rtw88/mac80211.c b/drivers/net/wireles
 +#endif
 +};
 +EXPORT_SYMBOL(rtw_ops);
-diff -uprN a/drivers/net/wireless/realtek/rtw88/main.c b/drivers/net/wireless/realtek/rtw88/main.c
---- a/drivers/net/wireless/realtek/rtw88/main.c	2026-11-09 12:09:52.129191470 +0300
-+++ b/drivers/net/wireless/realtek/rtw88/main.c	2026-11-09 12:09:52.142124516 +0300
-@@ -1760,6 +1760,8 @@ static void __update_firmware_feature(st
+--- a/drivers/net/wireless/realtek/rtw88/main.c
++++ b/drivers/net/wireless/realtek/rtw88/main.c
+@@ -1499,6 +1499,7 @@
+ 	rtw_phy_dig_reset(rtwdev);
+ 	clear_bit(RTW_FLAG_SCANNING, rtwdev->flags);
+ 	clear_bit(RTW_FLAG_DIG_DISABLE, rtwdev->flags);
++	rtwdev->need_rfk = true;
+ 
+ 	rtw_core_fw_scan_notify(rtwdev, false);
+ 
+@@ -1760,6 +1761,8 @@
  
  	feature = le32_to_cpu(fw_hdr->feature);
  	fw->feature = feature & FW_FEATURE_SIG ? feature : 0;
@@ -2325,7 +2352,7 @@ diff -uprN a/drivers/net/wireless/realtek/rtw88/main.c b/drivers/net/wireless/re
  
  	if (rtwdev->chip->id == RTW_CHIP_TYPE_8822C &&
  	    RTW_FW_SUIT_VER_CODE(rtwdev->fw) < RTW_FW_VER_CODE(9, 9, 13))
-@@ -1890,7 +1892,7 @@ static int rtw_chip_parameter_setup(stru
+@@ -1890,7 +1893,7 @@
  	hal->chip_version = rtw_read32(rtwdev, REG_SYS_CFG1);
  	hal->cut_version = BIT_GET_CHIP_VER(hal->chip_version);
  	hal->mp_chip = (hal->chip_version & BIT_RTL_ID) ? 0 : 1;
@@ -2334,7 +2361,7 @@ diff -uprN a/drivers/net/wireless/realtek/rtw88/main.c b/drivers/net/wireless/re
  		hal->rf_type = RF_2T2R;
  		hal->rf_path_num = 2;
  		hal->antenna_tx = BB_PATH_AB;
-@@ -2044,8 +2046,6 @@ static int rtw_chip_efuse_info_setup(str
+@@ -2044,8 +2047,6 @@
  		efuse->channel_plan = 0x7f;
  	if (efuse->rf_board_option == 0xff)
  		efuse->rf_board_option = 0;
@@ -2343,23 +2370,22 @@ diff -uprN a/drivers/net/wireless/realtek/rtw88/main.c b/drivers/net/wireless/re
  	if (efuse->regd == 0xff)
  		efuse->regd = 0;
  	if (efuse->tx_bb_swing_setting_2g == 0xff)
-@@ -2053,7 +2053,11 @@ static int rtw_chip_efuse_info_setup(str
+@@ -2053,7 +2054,11 @@
  	if (efuse->tx_bb_swing_setting_5g == 0xff)
  		efuse->tx_bb_swing_setting_5g = 0;
  
 -	efuse->btcoex = (efuse->rf_board_option & 0xe0) == 0x20;
-+	/* Station Max RTL8822CS: 2 physical antennas, standalone UART BT (ttyAML1) */
-+	efuse->share_ant = false;
-+	efuse->btcoex = false;
++	/* Station Max RTL8822ES: 2 antennas, BT shares S1 (Path B) */
++	efuse->share_ant = true;
++	efuse->btcoex = true;
 +	pr_info("[RTW88-INIT] chip=8822c 2T2R (tx=0x%x rx=0x%x share_ant=%d btcoex=%d)\n",
 +		rtwdev->hal.antenna_tx, rtwdev->hal.antenna_rx, efuse->share_ant, efuse->btcoex);
  	efuse->ext_pa_2g = efuse->pa_type_2g & BIT(4) ? 1 : 0;
  	efuse->ext_lna_2g = efuse->lna_type_2g & BIT(3) ? 1 : 0;
  	efuse->ext_pa_5g = efuse->pa_type_5g & BIT(0) ? 1 : 0;
-diff -uprN a/drivers/net/wireless/realtek/rtw88/phy.c b/drivers/net/wireless/realtek/rtw88/phy.c
---- a/drivers/net/wireless/realtek/rtw88/phy.c	2026-11-09 12:09:52.129407171 +0300
-+++ b/drivers/net/wireless/realtek/rtw88/phy.c	2026-11-09 12:09:52.136062794 +0300
-@@ -1183,7 +1183,7 @@ static bool check_positive(struct rtw_de
+--- a/drivers/net/wireless/realtek/rtw88/phy.c
++++ b/drivers/net/wireless/realtek/rtw88/phy.c
+@@ -1183,7 +1183,7 @@
  		if ((cond.rfe & BIT(3)) && cond2.type_apa != drv_cond2.type_apa)
  			return false;
  	} else {
@@ -2368,16 +2394,16 @@ diff -uprN a/drivers/net/wireless/realtek/rtw88/phy.c b/drivers/net/wireless/rea
  			return false;
  	}
  
-@@ -1198,6 +1198,8 @@ void rtw_parse_tbl_phy_cond(struct rtw_d
+@@ -1197,6 +1197,8 @@
+ 	struct rtw_phy_cond pos_cond = {};
  	struct rtw_phy_cond2 pos_cond2 = {};
  	bool is_matched = true, is_skipped = false;
- 
-+	u32 count = 0;
 +
++	u32 count = 0;
+ 
  	BUILD_BUG_ON(sizeof(union phy_table_tile) != sizeof(struct phy_cfg_pair));
  
- 	for (; p < end; p++) {
-@@ -1231,8 +1233,10 @@ void rtw_parse_tbl_phy_cond(struct rtw_d
+@@ -1231,8 +1233,10 @@
  			}
  		} else if (is_matched) {
  			(*tbl->do_cfg)(rtwdev, tbl, p->cfg.addr, p->cfg.data);
@@ -2388,14 +2414,86 @@ diff -uprN a/drivers/net/wireless/realtek/rtw88/phy.c b/drivers/net/wireless/rea
  }
  EXPORT_SYMBOL(rtw_parse_tbl_phy_cond);
  
-diff -uprN a/drivers/net/wireless/realtek/rtw88/rtw8822c.c b/drivers/net/wireless/realtek/rtw88/rtw8822c.c
---- a/drivers/net/wireless/realtek/rtw88/rtw8822c.c	2026-11-09 12:09:52.132226981 +0300
-+++ b/drivers/net/wireless/realtek/rtw88/rtw8822c.c	2026-11-09 12:09:52.138472303 +0300
-@@ -49,8 +49,17 @@ static int rtw8822c_read_efuse(struct rt
+@@ -2279,13 +2283,13 @@
+ 			   enum rtw_bandwidth bandwidth, u8 channel, u8 regd)
+ {
+ 	struct rtw_power_params pwr_param = {0};
+-	u8 tx_power;
++	s16 total_pwr;
+ 	s8 offset;
+ 
+ 	rtw_get_tx_power_params(rtwdev, rf_path, rate, bandwidth,
+ 				channel, regd, &pwr_param);
+ 
+-	tx_power = pwr_param.pwr_base;
++	total_pwr = (s16)pwr_param.pwr_base;
+ 	offset = min3(pwr_param.pwr_offset,
+ 		      pwr_param.pwr_limit,
+ 		      pwr_param.pwr_sar);
+@@ -2293,12 +2297,10 @@
+ 	if (rtwdev->chip->en_dis_dpd)
+ 		offset += rtw_phy_get_dis_dpd_by_rate_diff(rtwdev, rate);
+ 
+-	tx_power += offset + pwr_param.pwr_remnant;
+-
+-	if (tx_power > rtwdev->chip->max_power_index)
+-		tx_power = rtwdev->chip->max_power_index;
+-
+-	return tx_power;
++	total_pwr += offset + pwr_param.pwr_remnant;
++	total_pwr = clamp_t(s16, total_pwr, 0, rtwdev->chip->max_power_index);
++
++	return (u8)total_pwr;
+ }
+ EXPORT_SYMBOL(rtw_phy_get_tx_power_index);
+ 
+--- a/drivers/net/wireless/realtek/rtw88/rtw8822c.c
++++ b/drivers/net/wireless/realtek/rtw88/rtw8822c.c
+@@ -41,6 +41,36 @@
+ 	ether_addr_copy(efuse->addr, map->s.mac_addr);
+ }
+ 
++static void rtw8822c_sanitize_txpwr_idx(struct rtw_txpwr_idx *pwr)
++{
++	u8 *raw_2g = (u8 *)&pwr->pwr_idx_2g;
++	u8 *raw_5g = (u8 *)&pwr->pwr_idx_5g;
++	int g;
++
++	for (g = 0; g < ARRAY_SIZE(pwr->pwr_idx_2g.cck_base); g++)
++		if (pwr->pwr_idx_2g.cck_base[g] == 0x00 ||
++		    pwr->pwr_idx_2g.cck_base[g] > 0x7f)
++			pwr->pwr_idx_2g.cck_base[g] = 0x2a;
++
++	for (g = 0; g < ARRAY_SIZE(pwr->pwr_idx_2g.bw40_base); g++)
++		if (pwr->pwr_idx_2g.bw40_base[g] == 0x00 ||
++		    pwr->pwr_idx_2g.bw40_base[g] > 0x7f)
++			pwr->pwr_idx_2g.bw40_base[g] = 0x2a;
++
++	for (g = 11; g <= 14; g++)
++		if (raw_2g[g] == 0xff)
++			raw_2g[g] = 0x00;
++
++	for (g = 0; g < ARRAY_SIZE(pwr->pwr_idx_5g.bw40_base); g++)
++		if (pwr->pwr_idx_5g.bw40_base[g] == 0x00 ||
++		    pwr->pwr_idx_5g.bw40_base[g] > 0x7f)
++			pwr->pwr_idx_5g.bw40_base[g] = 0x2a;
++
++	for (g = 14; g <= 26; g++)
++		if (raw_5g[g] == 0xff)
++			raw_5g[g] = 0x00;
++}
++
+ static int rtw8822c_read_efuse(struct rtw_dev *rtwdev, u8 *log_map)
+ {
+ 	struct rtw_efuse *efuse = &rtwdev->efuse;
+@@ -49,8 +79,20 @@
  
  	map = (struct rtw8822c_efuse *)log_map;
  
-+	print_hex_dump(KERN_INFO, "[RTW88-EFUSE] ", DUMP_PREFIX_OFFSET, 16, 1, log_map + 0xb0, 0x40, false);
++	print_hex_dump(KERN_INFO, "[RTW88-EFUSE-10] ", DUMP_PREFIX_OFFSET,
++		       16, 1, log_map + 0x10, 0x30, false);
++	print_hex_dump(KERN_INFO, "[RTW88-EFUSE-B0] ", DUMP_PREFIX_OFFSET,
++		       16, 1, log_map + 0xb0, 0x30, false);
 +	pr_info("[RTW88-EFUSE-VAL] rfe_option=0x%02x rf_ant=0x%02x board_opt=0x%02x chan_plan=0x%02x 0xce_hi=0x%02x\n",
 +		map->rfe_option, map->rf_antenna_option, map->rf_board_option, map->channel_plan, (log_map[0xce] >> 4));
  	efuse->usb_mode_switch = u8_get_bits(map->usb_mode, BIT(7));
@@ -2409,8 +2507,368 @@ diff -uprN a/drivers/net/wireless/realtek/rtw88/rtw8822c.c b/drivers/net/wireles
  	efuse->rf_board_option = map->rf_board_option;
  	efuse->crystal_cap = map->xtal_k & XCAP_MASK;
  	efuse->channel_plan = map->channel_plan;
-@@ -1837,11 +1846,26 @@ static void rtw8822c_do_gapk(struct rtw_
+@@ -58,14 +100,21 @@
+ 	efuse->country_code[1] = map->country_code[1];
+ 	efuse->bt_setting = map->rf_bt_setting;
+ 	efuse->regd = map->rf_board_option & 0x7;
+-	efuse->thermal_meter[RF_PATH_A] = map->path_a_thermal;
+-	efuse->thermal_meter[RF_PATH_B] = map->path_b_thermal;
++	efuse->thermal_meter[RF_PATH_A] =
++		(map->path_a_thermal == 0xff || map->path_a_thermal == 0x00) ?
++		0x20 : map->path_a_thermal;
++	efuse->thermal_meter[RF_PATH_B] =
++		(map->path_b_thermal == 0xff || map->path_b_thermal == 0x00) ?
++		0x20 : map->path_b_thermal;
+ 	efuse->thermal_meter_k =
+-			(map->path_a_thermal + map->path_b_thermal) >> 1;
++		(efuse->thermal_meter[RF_PATH_A] +
++		 efuse->thermal_meter[RF_PATH_B]) >> 1;
+ 	efuse->power_track_type = (map->tx_pwr_calibrate_rate >> 4) & 0xf;
  
+-	for (i = 0; i < 4; i++)
++	for (i = 0; i < 4; i++) {
+ 		efuse->txpwr_idx_table[i] = map->txpwr_idx_table[i];
++		rtw8822c_sanitize_txpwr_idx(&efuse->txpwr_idx_table[i]);
++	}
+ 
+ 	switch (rtw_hci_type(rtwdev)) {
+ 	case RTW_HCI_TYPE_PCIE:
+@@ -1835,13 +1884,365 @@
+ 	rtw8822c_rfk_handshake(rtwdev, false);
+ }
+ 
++static void rtw8822e_wdack(struct rtw_dev *rtwdev, u32 reg, u32 mask, u32 val)
++{
++	rtw_write32_mask(rtwdev, reg, mask, val);
++	rtw_write32_mask(rtwdev, reg, mask, val);
++}
++
++static void rtw8822e_dack_set_val(struct rtw_dev *rtwdev, bool from_reg)
++{
++	u32 val = from_reg ? 0x1 : 0x0;
++
++	rtw8822e_wdack(rtwdev, 0x38d0, BIT(0), val);
++	rtw8822e_wdack(rtwdev, 0x38e4, BIT(0), val);
++	rtw8822e_wdack(rtwdev, 0x39d0, BIT(0), val);
++	rtw8822e_wdack(rtwdev, 0x39e4, BIT(0), val);
++}
++
++static void rtw8822e_dac_fifo_reset(struct rtw_dev *rtwdev)
++{
++	static const u32 regs[] = {0x3800, 0x382c, 0x3900, 0x392c};
++	int i;
++
++	for (i = 0; i < ARRAY_SIZE(regs); i++)
++		rtw_write32_mask(rtwdev, regs[i], BIT(21), 0x0);
++	for (i = 0; i < ARRAY_SIZE(regs); i++)
++		rtw_write32_mask(rtwdev, regs[i], BIT(21), 0x1);
++}
++
++static void rtw8822e_addck_path(struct rtw_dev *rtwdev, u8 path)
++{
++	u32 reg_base = (path == RF_PATH_A) ? 0x1800 : 0x4100;
++	u32 afe_off = (path == RF_PATH_A) ? 0x0 : 0x100;
++	u32 addc_i, addc_q, ic, qc, c = 0;
++
++	rtw_write32_mask(rtwdev, reg_base + 0x30, BIT(30), 0x0);
++	rtw_write32_mask(rtwdev, reg_base + 0x60, 0xf0000000, 0xf);
++	rtw_write32_mask(rtwdev, reg_base + 0x60, BIT(26), 0x0);
++	rtw_write32_mask(rtwdev, reg_base + 0x60, BIT(12), 0x0);
++	rtw_write32_mask(rtwdev, reg_base + 0x10, BIT(19), 0x1);
++
++	rtw8822e_wdack(rtwdev, 0x381c + afe_off, 0x60000, 0x3);
++	rtw8822e_wdack(rtwdev, 0x381c + afe_off, BIT(16), 0x0);
++	rtw8822e_wdack(rtwdev, 0x381c + afe_off, BIT(16), 0x1);
++	rtw8822e_wdack(rtwdev, 0x381c + afe_off, BIT(16), 0x1);
++
++	while (rtw_read32_mask(rtwdev, 0x3878 + afe_off, BIT(12)) == 0 ||
++	       rtw_read32_mask(rtwdev, 0x38a8 + afe_off, BIT(12)) == 0) {
++		c++;
++		udelay(1);
++		if (c > 10000) {
++			rtw_warn(rtwdev, "[RTW88-DACK] path %u ADDCK timeout\n",
++				 path);
++			break;
++		}
++	}
++
++	addc_i = rtw_read32_mask(rtwdev, 0x3878 + afe_off, 0xfff);
++	addc_q = rtw_read32_mask(rtwdev, 0x38a8 + afe_off, 0xfff);
++	ic = 0x800 - addc_i;
++	qc = 0x800 - addc_q;
++
++	rtw_write32(rtwdev, reg_base + 0x68,
++		    (ic & 0x3ff) | ((qc & 0x3ff) << 10));
++	rtw_write32_mask(rtwdev, reg_base + 0x10, BIT(19), 0x0);
++	rtw_write32_mask(rtwdev, reg_base + 0x60, BIT(12), 0x1);
++	rtw_write32_mask(rtwdev, reg_base + 0x30, BIT(30), 0x1);
++}
++
++static void rtw8822e_dack_reload_iq(struct rtw_dev *rtwdev, u32 afe_off,
++				    u8 iq_idx, const u8 *msbk,
++				    u16 biask, u8 dadck)
++{
++	u32 base = 0x38c0 + afe_off + (iq_idx ? 0x14 : 0x0);
++	u32 val;
++	int blk;
++
++	for (blk = 0; blk < 4; blk++) {
++		int idx = (3 - blk) * 4;
++
++		val = msbk[idx] |
++		      (msbk[idx + 1] << 8) |
++		      (msbk[idx + 2] << 16) |
++		      (msbk[idx + 3] << 24);
++		rtw8822e_wdack(rtwdev, base + blk * 4, MASKDWORD, val);
++	}
++
++	val = ((u32)biask << 16) | ((u32)dadck << 8);
++	rtw8822e_wdack(rtwdev, base + 0x10, MASKDWORD, val);
++}
++
++static void rtw8822e_dack_path(struct rtw_dev *rtwdev, u8 path)
++{
++	u32 reg_base = (path == RF_PATH_A) ? 0x1800 : 0x4100;
++	u32 afe_off = (path == RF_PATH_A) ? 0x0 : 0x100;
++	u8 msbk[2][16];
++	u8 dadck[2];
++	u16 biask;
++	u32 temp_9b4, c;
++	int i;
++
++	temp_9b4 = rtw_read32(rtwdev, 0x9b4);
++	rtw_write32_mask(rtwdev, 0x9b4, 0x1ff00, 0xdb);
++
++	rtw_write32_mask(rtwdev, reg_base + 0x30, BIT(30), 0x0);
++	rtw_write32_mask(rtwdev, reg_base + 0x60, BIT(30), 0x1);
++	rtw_write32_mask(rtwdev, reg_base + 0x60, BIT(27), 0x0);
++	rtw_write32_mask(rtwdev, reg_base + 0x10, BIT(15), 0x1);
++	rtw_write32_mask(rtwdev, reg_base + 0x18, 0x0c000000, 0x3);
++
++	rtw8822e_wdack(rtwdev, 0x3804 + afe_off, 0x3ff00000, 0x58);
++	rtw8822e_wdack(rtwdev, 0x3830 + afe_off, 0x3ff00000, 0x58);
++	rtw8822e_dac_fifo_reset(rtwdev);
++
++	rtw8822e_wdack(rtwdev, 0x380c + afe_off, BIT(1), 0x0);
++	rtw8822e_wdack(rtwdev, 0x3804 + afe_off, BIT(0), 0x1);
++
++	udelay(1);
++	c = 0;
++	while (rtw_read32_mask(rtwdev, 0x385c + afe_off, BIT(1)) == 0 ||
++	       rtw_read32_mask(rtwdev, 0x388c + afe_off, BIT(1)) == 0) {
++		c++;
++		udelay(1);
++		if (c > 10000) {
++			rtw_warn(rtwdev, "[RTW88-DACK] path %u MSBK timeout\n",
++				 path);
++			break;
++		}
++	}
++
++	rtw_write32_mask(rtwdev, reg_base + 0x18, 0x0c000000, 0x0);
++	rtw8822e_wdack(rtwdev, 0x380c + afe_off, BIT(1), 0x1);
++
++	udelay(1);
++	c = 0;
++	while (rtw_read32_mask(rtwdev, 0x3870 + afe_off, BIT(2)) == 0 ||
++	       rtw_read32_mask(rtwdev, 0x38a0 + afe_off, BIT(2)) == 0) {
++		c++;
++		udelay(1);
++		if (c > 10000) {
++			rtw_warn(rtwdev, "[RTW88-DACK] path %u DCK timeout\n",
++				 path);
++			break;
++		}
++	}
++
++	rtw8822e_wdack(rtwdev, 0x3804 + afe_off, BIT(0), 0x0);
++	rtw_write32_mask(rtwdev, reg_base + 0x10, BIT(15), 0x0);
++
++	for (i = 0; i < 16; i++) {
++		rtw8822e_wdack(rtwdev, 0x3800 + afe_off, 0x1e, i);
++		msbk[0][i] = (u8)rtw_read32_mask(rtwdev, 0x3870 + afe_off,
++						 0xff000000);
++		rtw8822e_wdack(rtwdev, 0x382c + afe_off, 0x1e, i);
++		msbk[1][i] = (u8)rtw_read32_mask(rtwdev, 0x38a0 + afe_off,
++						 0xff000000);
++	}
++	biask = (u16)rtw_read32_mask(rtwdev, 0x3878 + afe_off, 0xffc00000);
++	dadck[0] = (u8)rtw_read32_mask(rtwdev, 0x3874 + afe_off, 0xff000000);
++	dadck[1] = (u8)rtw_read32_mask(rtwdev, 0x38a4 + afe_off, 0xff000000);
++
++	rtw8822e_dack_reload_iq(rtwdev, afe_off, 0, msbk[0], biask, dadck[0]);
++	rtw8822e_dack_reload_iq(rtwdev, afe_off, 1, msbk[1], biask, dadck[1]);
++
++	rtw_write32(rtwdev, 0x9b4, temp_9b4);
++	rtw8822e_dac_fifo_reset(rtwdev);
++	rtw_write32_mask(rtwdev, reg_base + 0x30, BIT(30), 0x1);
++}
++
++static void rtw8822e_dac_cal(struct rtw_dev *rtwdev)
++{
++	int tries;
++
++	rtw8822e_addck_path(rtwdev, RF_PATH_A);
++	rtw8822e_addck_path(rtwdev, RF_PATH_B);
++
++	for (tries = 0; tries < 10; tries++) {
++		rtw_write32_mask(rtwdev, 0x1818, BIT(25), 0x0);
++		rtw_write32_mask(rtwdev, 0x1818, BIT(25), 0x1);
++		mdelay(1);
++		rtw_write32_mask(rtwdev, 0x4118, BIT(25), 0x0);
++		rtw_write32_mask(rtwdev, 0x4118, BIT(25), 0x1);
++		mdelay(1);
++
++		rtw8822e_dack_set_val(rtwdev, false);
++		rtw8822e_dack_path(rtwdev, RF_PATH_A);
++		rtw8822e_dack_path(rtwdev, RF_PATH_B);
++
++		if (rtw_read32_mask(rtwdev, 0x3800, BIT(17)) &&
++		    rtw_read32_mask(rtwdev, 0x3900, BIT(17)))
++			break;
++	}
++
++	rtw8822e_dack_set_val(rtwdev, true);
++	pr_info("[RTW88-DACK] tries=%d 0x3800_b17=%u 0x3900_b17=%u\n",
++		tries + 1,
++		rtw_read32_mask(rtwdev, 0x3800, BIT(17)),
++		rtw_read32_mask(rtwdev, 0x3900, BIT(17)));
++}
++
++static void rtw8822c_do_lck(struct rtw_dev *rtwdev);
++
++static u8 rtw8822e_read_efuse_u8(struct rtw_dev *rtwdev, u16 addr)
++{
++	u8 val = 0xff;
++
++	if (rtw_read8_physical_efuse(rtwdev, addr, &val))
++		return 0xff;
++
++	return val;
++}
++
++static void rtw8822e_config_kfree(struct rtw_dev *rtwdev)
++{
++	static const u16 pwr_5g_addr[5][2] = {
++		{0x5dc, 0x5db},
++		{0x5d8, 0x5d7},
++		{0x5d4, 0x5d3},
++		{0x5d0, 0x5cf},
++		{0x5cc, 0x5cb},
++	};
++	static const u8 gain_map[15] = {
++		0, 1, 2, 2, 3, 4, 5, 6, 7, 3, 4, 5, 6, 7, 7
++	};
++	u8 th_a, th_b, p_2gl, p_2gm, p_2gh, p_5g_a, p_5g_b;
++	u8 pa_2ga, pa_2gb, pa_5ga, pa_5gb;
++	u8 bb_gain[8][2] = {};
++	int i, path;
++
++	th_a = rtw8822e_read_efuse_u8(rtwdev, 0x5df);
++	th_b = rtw8822e_read_efuse_u8(rtwdev, 0x5a0);
++	if (th_a != 0xff) {
++		u8 v = th_a & 0x1f;
++		u8 reg_val = ((v & 0x1) << 3) | ((v >> 1) & 0x7);
++
++		rtw_write_rf(rtwdev, RF_PATH_A, 0x43, 0x000f0000, reg_val);
++	}
++	if (th_b != 0xff) {
++		u8 v = th_b & 0x1f;
++		u8 reg_val = ((v & 0x1) << 3) | ((v >> 1) & 0x7);
++
++		rtw_write_rf(rtwdev, RF_PATH_B, 0x43, 0x000f0000, reg_val);
++	}
++
++	p_2gl = rtw8822e_read_efuse_u8(rtwdev, 0x5c4);
++	p_2gm = rtw8822e_read_efuse_u8(rtwdev, 0x5de);
++	p_2gh = rtw8822e_read_efuse_u8(rtwdev, 0x5c2);
++	p_5g_a = rtw8822e_read_efuse_u8(rtwdev, 0x5dc);
++	p_5g_b = rtw8822e_read_efuse_u8(rtwdev, 0x5db);
++
++	if (p_2gl != 0xff || p_2gm != 0xff || p_2gh != 0xff ||
++	    p_5g_a != 0xff || p_5g_b != 0xff) {
++		u8 v2g = (p_2gm == 0xff) ? 0 : p_2gm;
++
++		for (i = 0; i < 3; i++) {
++			bb_gain[i][0] = v2g & 0xf;
++			bb_gain[i][1] = (v2g >> 4) & 0xf;
++		}
++		for (i = 0; i < ARRAY_SIZE(pwr_5g_addr); i++) {
++			u8 va = rtw8822e_read_efuse_u8(rtwdev, pwr_5g_addr[i][0]);
++			u8 vb = rtw8822e_read_efuse_u8(rtwdev, pwr_5g_addr[i][1]);
++
++			bb_gain[i + 3][0] = (va == 0xff) ? 0 : (va & 0x1f);
++			bb_gain[i + 3][1] = (vb == 0xff) ? 0 : (vb & 0x1f);
++		}
++		for (path = 0; path < 2; path++) {
++			rtw_write_rf(rtwdev, path, 0xee, BIT(19), 0x1);
++			for (i = 0; i < ARRAY_SIZE(gain_map); i++) {
++				rtw_write_rf(rtwdev, path, 0x33, RFREG_MASK, i);
++				rtw_write_rf(rtwdev, path, 0x3f, RFREG_MASK,
++					     bb_gain[gain_map[i]][path]);
++			}
++			rtw_write_rf(rtwdev, path, 0xee, BIT(19), 0x0);
++		}
++	}
++
++	pa_2ga = rtw8822e_read_efuse_u8(rtwdev, 0x5c6);
++	pa_2gb = rtw8822e_read_efuse_u8(rtwdev, 0x5c5);
++	pa_5ga = rtw8822e_read_efuse_u8(rtwdev, 0x5c8);
++	pa_5gb = rtw8822e_read_efuse_u8(rtwdev, 0x5c7);
++	if (pa_2ga != 0xff)
++		rtw_write_rf(rtwdev, RF_PATH_A, 0x60, 0x0000f000, pa_2ga & 0xf);
++	if (pa_2gb != 0xff)
++		rtw_write_rf(rtwdev, RF_PATH_B, 0x60, 0x0000f000, pa_2gb & 0xf);
++	if (pa_5ga != 0xff)
++		rtw_write_rf(rtwdev, RF_PATH_A, 0x60, 0x000f0000, pa_5ga & 0xf);
++	if (pa_5gb != 0xff)
++		rtw_write_rf(rtwdev, RF_PATH_B, 0x60, 0x000f0000, pa_5gb & 0xf);
++
++	pr_info("[RTW88-KFREE] therm=%02x/%02x 2g=%02x/%02x/%02x 5gl1=%02x/%02x pa=%02x/%02x/%02x/%02x\n",
++		th_a, th_b, p_2gl, p_2gm, p_2gh, p_5g_a, p_5g_b,
++		pa_2ga, pa_2gb, pa_5ga, pa_5gb);
++}
++
++static void rtw8822e_tssi_afe_init(struct rtw_dev *rtwdev)
++{
++	static const u32 base_regs[] = {0x1800, 0x4100};
++	int i;
++
++	/* RFK init (halrf_rfk_init_8822e.c): keep RX out of uncalibrated IQK */
++	rtw_write32_mask(rtwdev, 0x1cd0, 0xf0000000, 0x7);
++	rtw_write32_mask(rtwdev, 0x1e24, BIT(17), 0x1);
++	rtw_write32_mask(rtwdev, 0x180c, BIT(31), 0x0);
++	rtw_write32_mask(rtwdev, 0x410c, BIT(31), 0x0);
++
++	/* Identity/bypass IQK LUTs on Path A and B (halrf_iqk_8822e.c) */
++	for (i = 0; i < 2; i++) {
++		rtw_write32(rtwdev, 0x1b00, 0x8 | (i << 1));
++		rtw_write32(rtwdev, 0x1b38, 0x20000000);
++		rtw_write32(rtwdev, 0x1b3c, 0x20000000);
++		rtw_write32_mask(rtwdev, 0x1b70, BIT(8), 0x0);
++		rtw_write32_mask(rtwdev, 0x1b70, BIT(0), 0x0);
++	}
++	rtw_write32(rtwdev, 0x1b00, 0x8);
++
++	/* SpurK default (halrf_8822e.c) */
++	rtw_write32_mask(rtwdev, 0x1814, BIT(30), 0x1);
++	rtw_write32_mask(rtwdev, 0x4114, BIT(30), 0x1);
++	rtw_write32_mask(rtwdev, 0x002c, 0x0001e000, 0x8);
++
++	/* Disable TSSI for open-loop TX AGC (halrf_disable_tssi_8822e) */
++	for (i = 0; i < ARRAY_SIZE(base_regs); i++) {
++		u32 b = base_regs[i];
++
++		rtw_write32_mask(rtwdev, b + 0xa4, 0x0003e000, 0x0);
++		rtw_write32_mask(rtwdev, b + 0x0c, 0x08000000, 0x0);
++		rtw_write32_mask(rtwdev, b + 0x0c, 0x40000000, 0x0);
++		rtw_write32_mask(rtwdev, b + 0xa4, 0x10000000, 0x0);
++		rtw_write32_mask(rtwdev, 0x1e7c, 0x40000000, 0x0);
++		rtw_write32_mask(rtwdev, b + 0xa0, 0x0000007f, 0x0);
++	}
++	rtw_write32_mask(rtwdev, 0x1c38, MASKDWORD, 0xffa1005e);
++}
++
  static void rtw8822c_rf_init(struct rtw_dev *rtwdev)
  {
 -	rtw8822c_rf_dac_cal(rtwdev);
@@ -2428,6 +2886,7 @@ diff -uprN a/drivers/net/wireless/realtek/rtw88/rtw8822c.c b/drivers/net/wireles
 -	rtw8822c_thermal_trim(rtwdev);
 -	rtw8822c_power_trim(rtwdev);
 -	rtw8822c_pa_bias(rtwdev);
++	rtw8822c_do_lck(rtwdev);
 +
 +	/* 8822E halrf_rxbb_dc_cal_8822e */
 +	for (path = 0; path < rtwdev->hal.rf_path_num; path++) {
@@ -2437,10 +2896,14 @@ diff -uprN a/drivers/net/wireless/realtek/rtw88/rtw8822c.c b/drivers/net/wireles
 +		udelay(600);
 +		rtw_write_rf(rtwdev, path, 0x92, RFREG_MASK, 0x84800);
 +	}
++
++	rtw8822e_tssi_afe_init(rtwdev);
++	rtw8822e_dac_cal(rtwdev);
++	rtw8822e_config_kfree(rtwdev);
  }
  
  static void rtw8822c_pwrtrack_init(struct rtw_dev *rtwdev)
-@@ -2206,12 +2230,14 @@ static void rtw8822c_set_channel_rf(stru
+@@ -2206,12 +2607,14 @@
  #define RF18_BW_80M		(BIT(12))
  
  	u32 rf_reg18 = 0;
@@ -2456,7 +2919,7 @@ diff -uprN a/drivers/net/wireless/realtek/rtw88/rtw8822c.c b/drivers/net/wireles
  
  	rf_reg18 |= (IS_CH_2G_BAND(channel) ? RF18_BAND_2G : RF18_BAND_5G);
  	rf_reg18 |= (channel & RF18_CHANNEL_MASK);
-@@ -2226,35 +2252,35 @@ static void rtw8822c_set_channel_rf(stru
+@@ -2226,110 +2629,118 @@
  	case RTW_CHANNEL_WIDTH_20:
  	default:
  		rf_reg18 |= RF18_BW_20M;
@@ -2475,7 +2938,7 @@ diff -uprN a/drivers/net/wireless/realtek/rtw88/rtw8822c.c b/drivers/net/wireles
 +		rf_reg1a |= (BIT(13) | BIT(10));
  		break;
  	}
- 
+-
 -	rtw8822c_rstb_3wire(rtwdev, false);
 -
 -	rtw_write_rf(rtwdev, RF_PATH_A, RF_LUTWE2, 0x04, 0x01);
@@ -2487,16 +2950,17 @@ diff -uprN a/drivers/net/wireless/realtek/rtw88/rtw8822c.c b/drivers/net/wireles
 -	rtw_write_rf(rtwdev, RF_PATH_B, RF_LUTWA, 0x1f, 0x12);
 -	rtw_write_rf(rtwdev, RF_PATH_B, RF_LUTWD0, 0xfffff, rf_rxbb);
 -	rtw_write_rf(rtwdev, RF_PATH_B, RF_LUTWE2, 0x04, 0x00);
--
+ 
  	rtw_write_rf(rtwdev, RF_PATH_A, RF_CFGCH, RFREG_MASK, rf_reg18);
  	rtw_write_rf(rtwdev, RF_PATH_B, RF_CFGCH, RFREG_MASK, rf_reg18);
+-
+-	rtw8822c_rstb_3wire(rtwdev, true);
 +	rtw_write_rf(rtwdev, RF_PATH_A, 0xdf, BIT(18),
 +		     IS_CH_2G_BAND(channel) ? 1 : 0);
 +
 +	rtw_write_rf(rtwdev, RF_PATH_A, 0x1a, RFREG_MASK, rf_reg1a);
 +	rtw_write_rf(rtwdev, RF_PATH_B, 0x1a, RFREG_MASK, rf_reg1a);
- 
--	rtw8822c_rstb_3wire(rtwdev, true);
++
 +	if (bw == RTW_CHANNEL_WIDTH_40) {
 +		rtw_write_rf(rtwdev, RF_PATH_A, 0x1a, BIT(0), 0x1);
 +		rtw_write_rf(rtwdev, RF_PATH_B, 0x1a, BIT(0), 0x1);
@@ -2509,10 +2973,19 @@ diff -uprN a/drivers/net/wireless/realtek/rtw88/rtw8822c.c b/drivers/net/wireles
  }
  
  static void rtw8822c_toggle_igi(struct rtw_dev *rtwdev)
-@@ -2268,68 +2294,78 @@ static void rtw8822c_toggle_igi(struct r
- 	rtw_write32_mask(rtwdev, REG_RXIGI, 0x7f00, igi);
- }
+ {
+ 	u32 igi;
  
+-	igi = rtw_read32_mask(rtwdev, REG_RXIGI, 0x7f);
+-	rtw_write32_mask(rtwdev, REG_RXIGI, 0x7f, igi - 2);
+-	rtw_write32_mask(rtwdev, REG_RXIGI, 0x7f00, igi - 2);
+-	rtw_write32_mask(rtwdev, REG_RXIGI, 0x7f, igi);
+-	rtw_write32_mask(rtwdev, REG_RXIGI, 0x7f00, igi);
++	igi = rtw_read32(rtwdev, REG_RXIGI);
++	rtw_write32(rtwdev, REG_RXIGI, igi - 0x202);
++	rtw_write32(rtwdev, REG_RXIGI, igi);
++}
++
 +static void rtw8822e_tx_triangular_shap_cfg(struct rtw_dev *rtwdev, bool is_2g_ch)
 +{
 +	rtw_write32_mask(rtwdev, 0xa74, BIT(31), 0x1);
@@ -2533,8 +3006,8 @@ diff -uprN a/drivers/net/wireless/realtek/rtw88/rtw8822c.c b/drivers/net/wireles
 +		rtw_write32_mask(rtwdev, 0x81c, 0xf000000, 0x7);
 +		rtw_write32_mask(rtwdev, 0x8a0, 0xf0000000, 0x0);
 +	}
-+}
-+
+ }
+ 
  static void rtw8822c_set_channel_bb(struct rtw_dev *rtwdev, u8 channel, u8 bw,
  				    u8 primary_ch_idx)
  {
@@ -2623,7 +3096,7 @@ diff -uprN a/drivers/net/wireless/realtek/rtw88/rtw8822c.c b/drivers/net/wireles
  		}
  		if (channel == 13)
  			rtw_write32_mask(rtwdev, REG_TXDFIR0, 0x70, 0x3);
-@@ -2342,22 +2378,19 @@ static void rtw8822c_set_channel_bb(stru
+@@ -2342,22 +2753,19 @@
  		rtw_write32_clr(rtwdev, REG_TXF4, BIT(20));
  		rtw_write32_mask(rtwdev, REG_CCAMSK, 0x3F000000, 0x22);
  		rtw_write32_mask(rtwdev, REG_TXDFIR0, 0x70, 0x3);
@@ -2655,7 +3128,7 @@ diff -uprN a/drivers/net/wireless/realtek/rtw88/rtw8822c.c b/drivers/net/wireles
  
  		if (channel >= 36 && channel <= 51)
  			rtw_write32_mask(rtwdev, REG_SCOTRK, 0xfff, 0x494);
-@@ -2373,14 +2406,18 @@ static void rtw8822c_set_channel_bb(stru
+@@ -2373,14 +2781,18 @@
  			rtw_write32_mask(rtwdev, REG_SCOTRK, 0xfff, 0x411);
  	}
  
@@ -2675,7 +3148,7 @@ diff -uprN a/drivers/net/wireless/realtek/rtw88/rtw8822c.c b/drivers/net/wireles
  		rtw_write32_mask(rtwdev, REG_SBD, BITS_SUBTUNE, 0x1);
  		rtw_write32_mask(rtwdev, REG_PT_CHSMO, BIT_PT_OPT, 0x0);
  		break;
-@@ -2392,6 +2429,8 @@ static void rtw8822c_set_channel_bb(stru
+@@ -2392,6 +2804,8 @@
  		rtw_write32_mask(rtwdev, REG_TXBWCTL, 0xff00,
  				 (primary_ch_idx | (primary_ch_idx << 4)));
  		rtw_write32_mask(rtwdev, REG_CCK_SOURCE, BIT_NBI_EN, 0x1);
@@ -2684,7 +3157,7 @@ diff -uprN a/drivers/net/wireless/realtek/rtw88/rtw8822c.c b/drivers/net/wireles
  		rtw_write32_mask(rtwdev, REG_SBD, BITS_SUBTUNE, 0x1);
  		rtw_write32_mask(rtwdev, REG_PT_CHSMO, BIT_PT_OPT, 0x1);
  		break;
-@@ -2407,7 +2446,7 @@ static void rtw8822c_set_channel_bb(stru
+@@ -2407,7 +2821,7 @@
  		rtw_write32_mask(rtwdev, REG_DFIRBW, 0x3FF0, 0x2AB);
  		rtw_write32_mask(rtwdev, REG_TXBWCTL, 0xf, 0x0);
  		rtw_write32_mask(rtwdev, REG_TXBWCTL, 0xffc0, 0x1);
@@ -2693,7 +3166,7 @@ diff -uprN a/drivers/net/wireless/realtek/rtw88/rtw8822c.c b/drivers/net/wireles
  		rtw_write32_mask(rtwdev, REG_TXCLK, 0x700000, 0x4);
  		rtw_write32_mask(rtwdev, REG_CCK_SOURCE, BIT_NBI_EN, 0x0);
  		rtw_write32_mask(rtwdev, REG_SBD, BITS_SUBTUNE, 0x1);
-@@ -2417,7 +2456,7 @@ static void rtw8822c_set_channel_bb(stru
+@@ -2417,7 +2831,7 @@
  		rtw_write32_mask(rtwdev, REG_DFIRBW, 0x3FF0, 0x2AB);
  		rtw_write32_mask(rtwdev, REG_TXBWCTL, 0xf, 0x0);
  		rtw_write32_mask(rtwdev, REG_TXBWCTL, 0xffc0, 0x2);
@@ -2702,15 +3175,47 @@ diff -uprN a/drivers/net/wireless/realtek/rtw88/rtw8822c.c b/drivers/net/wireles
  		rtw_write32_mask(rtwdev, REG_TXCLK, 0x700000, 0x5);
  		rtw_write32_mask(rtwdev, REG_CCK_SOURCE, BIT_NBI_EN, 0x0);
  		rtw_write32_mask(rtwdev, REG_SBD, BITS_SUBTUNE, 0x1);
-@@ -2432,6 +2471,7 @@ static void rtw8822c_set_channel(struct
+@@ -2432,7 +2846,9 @@
  	rtw8822c_set_channel_bb(rtwdev, channel, bw, primary_chan_idx);
  	rtw_set_channel_mac(rtwdev, channel, bw, primary_chan_idx);
  	rtw8822c_set_channel_rf(rtwdev, channel, bw);
 +	rtw8822c_bb_reset(rtwdev);
  	rtw8822c_toggle_igi(rtwdev);
++	rtw8822e_dac_fifo_reset(rtwdev);
  }
  
-@@ -2871,6 +2911,14 @@ static void rtw8822c_false_alarm_statist
+ static void rtw8822c_config_cck_rx_path(struct rtw_dev *rtwdev, u8 rx_path)
+@@ -2542,8 +2958,16 @@
+ 		rtw_write32_mask(rtwdev, REG_ORITXCODE2, MASK20BITS, 0x11111);
+ 
+ 	rtw8822c_config_rx_path(rtwdev, rx_path);
+-	rtw8822c_config_tx_path(rtwdev, tx_path, BB_PATH_A, BB_PATH_A,
+-				is_tx2_path);
++	if (tx_path == BB_PATH_AB)
++		rtw8822c_config_tx_path(rtwdev, tx_path,
++					is_tx2_path ? BB_PATH_AB :
++					rtwdev->chip->default_1ss_tx_path,
++					is_tx2_path ? BB_PATH_AB :
++					rtwdev->chip->default_1ss_tx_path,
++					is_tx2_path);
++	else
++		rtw8822c_config_tx_path(rtwdev, tx_path, tx_path, tx_path,
++					is_tx2_path);
+ 
+ 	rtw8822c_toggle_igi(rtwdev);
+ }
+@@ -2701,6 +3125,10 @@
+ 	u32 txref_cck[2] = {0x18a0, 0x41a0};
+ 	u32 txref_ofdm[2] = {0x18e8, 0x41e8};
+ 	u8 path;
++
++	pr_info_ratelimited("[RTW88-TXPWR] cck_ref=%u/%u ofdm_ref=%u/%u\n",
++			    tx_pwr_ref_cck[0], tx_pwr_ref_cck[1],
++			    tx_pwr_ref_ofdm[0], tx_pwr_ref_ofdm[1]);
+ 
+ 	for (path = 0; path < hal->rf_path_num; path++) {
+ 		rtw_write32_mask(rtwdev, 0x1c90, BIT(15), 0);
+@@ -2871,6 +3299,32 @@
  	if (cck_enable)
  		dm_info->total_cca_cnt += dm_info->cck_cca_cnt;
  
@@ -2722,20 +3227,48 @@ diff -uprN a/drivers/net/wireless/realtek/rtw88/rtw8822c.c b/drivers/net/wireles
 +				    dm_info->cck_fa_cnt, dm_info->ofdm_fa_cnt,
 +				    dm_info->cck_ok_cnt, dm_info->ofdm_ok_cnt, dm_info->ht_ok_cnt);
 +
++	pr_info_ratelimited("[RTW88-DIAG] ch=%d ofdm_tx=%u txempty=0x%04x igi=0x%08x rf0=0x%05x/0x%05x rf18=0x%05x/0x%05x\n",
++			    rtwdev->hal.current_channel,
++			    rtw_read32(rtwdev, REG_OFDM_TXCNT),
++			    rtw_read16(rtwdev, REG_TXPKT_EMPTY),
++			    rtw_read32(rtwdev, REG_RXIGI),
++			    rtw_read_rf(rtwdev, RF_PATH_A, 0x00, RFREG_MASK),
++			    rtw_read_rf(rtwdev, RF_PATH_B, 0x00, RFREG_MASK),
++			    rtw_read_rf(rtwdev, RF_PATH_A, 0x18, RFREG_MASK),
++			    rtw_read_rf(rtwdev, RF_PATH_B, 0x18, RFREG_MASK));
++
++	if (dm_info->total_cca_cnt || dm_info->total_fa_cnt ||
++	    dm_info->cck_ok_cnt || dm_info->ofdm_ok_cnt || dm_info->ht_ok_cnt)
++		pr_info_ratelimited("[RTW88-FA] ch=%d cca(cck=%d ofdm=%d) fa(cck=%d ofdm=%d) ok(cck=%d ofdm=%d ht=%d)\n",
++				    rtwdev->hal.current_channel,
++				    dm_info->cck_cca_cnt, dm_info->ofdm_cca_cnt,
++				    dm_info->cck_fa_cnt, dm_info->ofdm_fa_cnt,
++				    dm_info->cck_ok_cnt, dm_info->ofdm_ok_cnt, dm_info->ht_ok_cnt);
++
  	rtw_write32_mask(rtwdev, REG_CCANRX, BIT_CCK_FA_RST, 0);
  	rtw_write32_mask(rtwdev, REG_CCANRX, BIT_CCK_FA_RST, 2);
  	rtw_write32_mask(rtwdev, REG_CCANRX, BIT_OFDM_FA_RST, 0);
-@@ -4181,11 +4229,58 @@ static void rtw8822c_do_dpk(struct rtw_d
+@@ -2885,22 +3339,26 @@
  
- static void rtw8822c_phy_calibration(struct rtw_dev *rtwdev)
+ static void rtw8822c_do_lck(struct rtw_dev *rtwdev)
  {
--	rtw8822c_rfk_power_save(rtwdev, false);
--	rtw8822c_do_gapk(rtwdev);
--	rtw8822c_do_iqk(rtwdev);
--	rtw8822c_do_dpk(rtwdev);
--	rtw8822c_rfk_power_save(rtwdev, true);
-+	u32 cnt, reg_1e70, reg_180c, reg_410c;
-+	u8 path, reg_522;
+-	u32 val;
+-
+-	rtw_write_rf(rtwdev, RF_PATH_A, RF_SYN_CTRL, RFREG_MASK, 0x80010);
+-	rtw_write_rf(rtwdev, RF_PATH_A, RF_SYN_PFD, RFREG_MASK, 0x1F0FA);
+-	fsleep(1);
+-	rtw_write_rf(rtwdev, RF_PATH_A, RF_AAC_CTRL, RFREG_MASK, 0x80000);
+-	rtw_write_rf(rtwdev, RF_PATH_A, RF_SYN_AAC, RFREG_MASK, 0x80001);
+-	read_poll_timeout(rtw_read_rf, val, val != 0x1, 1000, 100000,
+-			  true, rtwdev, RF_PATH_A, RF_AAC_CTRL, 0x1000);
+-	rtw_write_rf(rtwdev, RF_PATH_A, RF_SYN_PFD, RFREG_MASK, 0x1F0F8);
+-	rtw_write_rf(rtwdev, RF_PATH_B, RF_SYN_CTRL, RFREG_MASK, 0x80010);
+-
+-	rtw_write_rf(rtwdev, RF_PATH_A, RF_FAST_LCK, RFREG_MASK, 0x0f000);
+-	rtw_write_rf(rtwdev, RF_PATH_A, RF_FAST_LCK, RFREG_MASK, 0x4f000);
+-	fsleep(1);
+-	rtw_write_rf(rtwdev, RF_PATH_A, RF_FAST_LCK, RFREG_MASK, 0x0f000);
++	u32 cnt;
 +
 +	/* 8822E AACK (_phy_aac_calibrate_8822e) */
 +	rtw_write_rf(rtwdev, RF_PATH_A, 0xca, BIT(0), 0x0);
@@ -2755,6 +3288,148 @@ diff -uprN a/drivers/net/wireless/realtek/rtw88/rtw8822c.c b/drivers/net/wireles
 +			break;
 +	}
 +	rtw_write_rf(rtwdev, RF_PATH_A, 0xcc, BIT(18), 0x0);
+ }
+ 
+ static void rtw8822c_do_iqk(struct rtw_dev *rtwdev)
+@@ -2921,6 +3379,24 @@
+ }
+ 
+ /* for coex */
++static void rtw8822c_set_wl_trx_mask(struct rtw_dev *rtwdev, u8 path, u8 group,
++				     u32 val)
++{
++	rtw_write_rf(rtwdev, path, RF_LUTWE, RFREG_MASK, 0x2000);
++	rtw_write_rf(rtwdev, path, RF_LUTWA, RFREG_MASK, group);
++	rtw_write_rf(rtwdev, path, RF_LUTWD0, RFREG_MASK, val);
++	rtw_write_rf(rtwdev, path, RF_LUTWE, RFREG_MASK, 0x0);
++}
++
++static void rtw8822c_coex_set_wl_gnt_keep(struct rtw_dev *rtwdev)
++{
++	/* Keep BB DAC enabled and WL TX unmasked while GNT_BT = 1 */
++	rtw_write8_mask(rtwdev, REG_ANAPAR + 2, BIT_ANAPAR_BTPS >> 16, 0);
++	rtw_write8_mask(rtwdev, REG_IGN_GNTBT4, BIT_PI_IGNORE_GNT_BT, 1);
++	rtw_write8_mask(rtwdev, REG_IGN_GNT_BT1, BIT_PI_IGNORE_GNT_BT, 1);
++	rtw_write8_mask(rtwdev, REG_NOMASK_TXBT, BIT_NOMASK_TXBT_ENABLE, 1);
++}
++
+ static void rtw8822c_coex_cfg_init(struct rtw_dev *rtwdev)
+ {
+ 	/* enable TBTT nterrupt */
+@@ -2946,8 +3422,15 @@
+ 	/* BT_CCA = ~GNT_WL_BB, not or GNT_BT_BB, LTE_Rx */
+ 	rtw_write8_clr(rtwdev, REG_DUMMY_PAGE4_V1, BIT_BTCCA_CTRL);
+ 
+-	/* to avoid RF parameter error */
+-	rtw_write_rf(rtwdev, RF_PATH_B, RF_MODOPT, 0xfffff, 0x40000);
++	/* to avoid RF parameter error + BT at S1 */
++	rtw_write_rf(rtwdev, RF_PATH_B, RF_MODOPT, 0xfffff, 0x42000);
++
++	/* WLS0_EN_GNT_CHECK = 0: Let WLS0 Tx when BTS1 Tx (GNT_BT/GNT_WL = 1/1) */
++	rtw_write_rf(rtwdev, RF_PATH_A, RF_WLSEL, 0x1, 0x0);
++	rtw8822c_set_wl_trx_mask(rtwdev, RF_PATH_A, 0x3, 0x5ff);
++	rtw8822c_set_wl_trx_mask(rtwdev, RF_PATH_B, 0x3, 0x5ff);
++	rtw8822c_set_wl_trx_mask(rtwdev, RF_PATH_A, 0x5, 0x5df);
++	rtw8822c_coex_set_wl_gnt_keep(rtwdev);
+ }
+ 
+ static void rtw8822c_coex_cfg_gnt_fix(struct rtw_dev *rtwdev)
+@@ -2962,71 +3445,23 @@
+ 
+ 	coex_stat->gnt_workaround_state = coex_stat->wl_coex_mode;
+ 
+-	if ((coex_stat->kt_ver == 0 && coex->under_5g) || coex->freerun)
+-		rf_0x1 = 0x40021;
+-	else
+-		rf_0x1 = 0x40000;
+-
+-	/* BT at S1 for Shared-Ant */
+-	if (efuse->share_ant)
+-		rf_0x1 |= BIT(13);
+-
++	(void)efuse;
++	/* Never set 0x40021 on Station Max: 0x40021 forces GNT_BT=0 at S1!
++	 * Use 0x42000 (0x40000 | BIT(13)) so BT at S1 is enabled and
++	 * WLS0_EN_GNT_CHECK = 0 on RF_PATH_A so WLS0 can TX while GNT_BT=1.
++	 */
++	rf_0x1 = 0x42000;
+ 	rtw_write_rf(rtwdev, RF_PATH_B, 0x1, 0xfffff, rf_0x1);
+-
+-	/* WL-S0 2G RF TRX cannot be masked by GNT_BT
+-	 * enable "WLS0 BB chage RF mode if GNT_BT = 1" for shared-antenna type
+-	 * disable:0x1860[3] = 1, enable:0x1860[3] = 0
+-	 *
+-	 * enable "DAC off if GNT_WL = 0" for non-shared-antenna
+-	 * disable 0x1c30[22] = 0,
+-	 * enable: 0x1c30[22] = 1, 0x1c38[12] = 0, 0x1c38[28] = 1
+-	 */
+-	if (coex_stat->wl_coex_mode == COEX_WLINK_2GFREE) {
+-		rtw_write8_mask(rtwdev, REG_ANAPAR + 2,
+-				BIT_ANAPAR_BTPS >> 16, 0);
+-	} else {
+-		rtw_write8_mask(rtwdev, REG_ANAPAR + 2,
+-				BIT_ANAPAR_BTPS >> 16, 1);
++	rtw_write_rf(rtwdev, RF_PATH_A, RF_WLSEL, 0x1, 0x0);
++
++	if (coex_stat->wl_coex_mode != COEX_WLINK_2GFREE) {
+ 		rtw_write8_mask(rtwdev, REG_RSTB_SEL + 1,
+ 				BIT_DAC_OFF_ENABLE, 0);
+ 		rtw_write8_mask(rtwdev, REG_RSTB_SEL + 3,
+ 				BIT_DAC_OFF_ENABLE, 1);
+ 	}
+ 
+-	/* disable WL-S1 BB chage RF mode if GNT_BT
+-	 * since RF TRx mask can do it
+-	 */
+-	rtw_write8_mask(rtwdev, REG_IGN_GNTBT4,
+-			BIT_PI_IGNORE_GNT_BT, 1);
+-
+-	/* disable WL-S0 BB chage RF mode if wifi is at 5G,
+-	 * or antenna path is separated
+-	 */
+-	if (coex_stat->wl_coex_mode == COEX_WLINK_2GFREE) {
+-		rtw_write8_mask(rtwdev, REG_IGN_GNT_BT1,
+-				BIT_PI_IGNORE_GNT_BT, 1);
+-		rtw_write8_mask(rtwdev, REG_NOMASK_TXBT,
+-				BIT_NOMASK_TXBT_ENABLE, 1);
+-	} else if (coex_stat->wl_coex_mode == COEX_WLINK_5G ||
+-	    coex->under_5g || !efuse->share_ant) {
+-		if (coex_stat->kt_ver >= 3) {
+-			rtw_write8_mask(rtwdev, REG_IGN_GNT_BT1,
+-					BIT_PI_IGNORE_GNT_BT, 0);
+-			rtw_write8_mask(rtwdev, REG_NOMASK_TXBT,
+-					BIT_NOMASK_TXBT_ENABLE, 1);
+-		} else {
+-			rtw_write8_mask(rtwdev, REG_IGN_GNT_BT1,
+-					BIT_PI_IGNORE_GNT_BT, 1);
+-		}
+-	} else {
+-		/* shared-antenna */
+-		rtw_write8_mask(rtwdev, REG_IGN_GNT_BT1,
+-				BIT_PI_IGNORE_GNT_BT, 0);
+-		if (coex_stat->kt_ver >= 3) {
+-			rtw_write8_mask(rtwdev, REG_NOMASK_TXBT,
+-					BIT_NOMASK_TXBT_ENABLE, 0);
+-		}
+-	}
++	rtw8822c_coex_set_wl_gnt_keep(rtwdev);
+ }
+ 
+ static void rtw8822c_coex_cfg_gnt_debug(struct rtw_dev *rtwdev)
+@@ -4181,11 +4616,54 @@
+ 
+ static void rtw8822c_phy_calibration(struct rtw_dev *rtwdev)
+ {
+-	rtw8822c_rfk_power_save(rtwdev, false);
+-	rtw8822c_do_gapk(rtwdev);
+-	rtw8822c_do_iqk(rtwdev);
+-	rtw8822c_do_dpk(rtwdev);
+-	rtw8822c_rfk_power_save(rtwdev, true);
++	u32 rf_reg0[RTW_RF_PATH_MAX] = {};
++	u32 reg_1e70, reg_180c, reg_410c;
++	u8 path, reg_522;
++
++	rtw8822c_do_lck(rtwdev);
 +
 +	/* 8822E RX DCK (halrf_rx_dck_8822e) */
 +	reg_522 = rtw_read8(rtwdev, 0x522);
@@ -2767,7 +3442,9 @@ diff -uprN a/drivers/net/wireless/realtek/rtw88/rtw8822c.c b/drivers/net/wireles
 +	rtw_write32_mask(rtwdev, 0x180c, 0x3, 0x0);
 +	rtw_write32_mask(rtwdev, 0x410c, 0x3, 0x0);
 +
-+	for (path = 0; path < rtwdev->hal.rf_path_num; path++) {
++	for (path = 0; path < rtwdev->hal.rf_path_num &&
++	     path < RTW_RF_PATH_MAX; path++) {
++		rf_reg0[path] = rtw_read_rf(rtwdev, path, 0x0, RFREG_MASK);
 +		rtw_write_rf(rtwdev, path, 0x0, RFREG_MASK, 0x30000);
 +		rtw_write_rf(rtwdev, path, 0x92, BIT(0), 0x0);
 +		rtw_write_rf(rtwdev, path, 0x93, BIT(6), 0x0);
@@ -2778,18 +3455,28 @@ diff -uprN a/drivers/net/wireless/realtek/rtw88/rtw8822c.c b/drivers/net/wireles
 +		rtw_write_rf(rtwdev, path, 0x92, BIT(0), 0x1);
 +		usleep_range(1500, 1600);
 +		rtw_write_rf(rtwdev, path, 0x92, BIT(0), 0x0);
++		rtw_write_rf(rtwdev, path, 0x0, RFREG_MASK, rf_reg0[path]);
 +	}
 +
 +	rtw_write32(rtwdev, 0x180c, reg_180c);
 +	rtw_write32(rtwdev, 0x410c, reg_410c);
-+	rtw_write32(rtwdev, 0x1d70, 0x50505050);
-+	rtw_write32(rtwdev, 0x1d70, 0x20202020);
 +	rtw_write8(rtwdev, 0x522, reg_522);
 +	rtw_write32(rtwdev, 0x1e70, reg_1e70);
++
++	rtw_write32_mask(rtwdev, 0x1d0c, BIT(16), 0x1);
++	rtw_write32_mask(rtwdev, 0x1d0c, BIT(16), 0x0);
++	rtw_write32_mask(rtwdev, 0x1d0c, BIT(16), 0x1);
++
++	rtw8822c_toggle_igi(rtwdev);
++	rtw8822e_dac_fifo_reset(rtwdev);
++	rtw8822c_coex_set_wl_gnt_keep(rtwdev);
++
++	pr_info("[RTW88-CAL] rf0=%05x/%05x igi=%08x\n",
++		rf_reg0[0], rf_reg0[1], rtw_read32(rtwdev, REG_RXIGI));
  }
  
  static void rtw8822c_dpk_track(struct rtw_dev *rtwdev)
-@@ -5384,8 +5479,8 @@ const struct rtw_chip_info rtw8822c_hw_s
+@@ -5384,8 +5862,8 @@
  	.mac_tbl = &rtw8822c_mac_tbl,
  	.agc_tbl = &rtw8822c_agc_tbl,
  	.bb_tbl = &rtw8822c_bb_tbl,
@@ -2800,10 +3487,9 @@ diff -uprN a/drivers/net/wireless/realtek/rtw88/rtw8822c.c b/drivers/net/wireles
  	.rfe_defs = rtw8822c_rfe_defs,
  	.rfe_defs_size = ARRAY_SIZE(rtw8822c_rfe_defs),
  	.en_dis_dpd = true,
-diff -uprN a/drivers/net/wireless/realtek/rtw88/rtw8822c_table.c b/drivers/net/wireless/realtek/rtw88/rtw8822c_table.c
---- a/drivers/net/wireless/realtek/rtw88/rtw8822c_table.c	2026-11-09 12:09:52.132399282 +0300
-+++ b/drivers/net/wireless/realtek/rtw88/rtw8822c_table.c	2026-11-09 12:09:52.138616703 +0300
-@@ -13,3291 +13,1946 @@ static const u32 rtw8822c_mac[] = {
+--- a/drivers/net/wireless/realtek/rtw88/rtw8822c_table.c
++++ b/drivers/net/wireless/realtek/rtw88/rtw8822c_table.c
+@@ -13,3291 +13,1946 @@
  RTW_DECL_TABLE_PHY_COND(rtw8822c_mac, rtw_phy_cfg_mac);
  
  static const u32 rtw8822c_agc[] = {
@@ -8030,7 +8716,7 @@ diff -uprN a/drivers/net/wireless/realtek/rtw88/rtw8822c_table.c b/drivers/net/w
  };
  
  RTW_DECL_TABLE_PHY_COND(rtw8822c_bb, rtw_phy_cfg_bb);
-@@ -3354,36469 +2009,1607 @@ static const struct rtw_phy_pg_cfg_pair
+@@ -3354,36469 +2009,1607 @@
  RTW_DECL_TABLE_BB_PG(rtw8822c_bb_pg_type0);
  
  static const u32 rtw8822c_rf_a[] = {
@@ -46096,9 +46782,8 @@ diff -uprN a/drivers/net/wireless/realtek/rtw88/rtw8822c_table.c b/drivers/net/w
  };
  
  RTW_DECL_TABLE_RF_RADIO(rtw8822c_rf_b, B);
-diff -uprN a/drivers/net/wireless/realtek/rtw88/rtw8822cs.c b/drivers/net/wireless/realtek/rtw88/rtw8822cs.c
---- a/drivers/net/wireless/realtek/rtw88/rtw8822cs.c	2026-11-09 12:09:52.133156584 +0300
-+++ b/drivers/net/wireless/realtek/rtw88/rtw8822cs.c	2026-11-09 12:09:52.138803704 +0300
+--- a/drivers/net/wireless/realtek/rtw88/rtw8822cs.c
++++ b/drivers/net/wireless/realtek/rtw88/rtw8822cs.c
 @@ -1,36 +1,57 @@
 -// SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 -/* Copyright(c) Martin Blumenstingl <martin.blumenstingl@googlemail.com>
@@ -46193,3 +46878,65 @@ diff -uprN a/drivers/net/wireless/realtek/rtw88/rtw8822cs.c b/drivers/net/wirele
 +MODULE_AUTHOR("Martin Blumenstingl <martin.blumenstingl@googlemail.com>");
 +MODULE_DESCRIPTION("Realtek 802.11ac wireless 8822cs driver");
 +MODULE_LICENSE("Dual BSD/GPL");
+--- a/drivers/net/wireless/realtek/rtw88/sdio.c
++++ b/drivers/net/wireless/realtek/rtw88/sdio.c
+@@ -1243,6 +1243,8 @@
+ 		return;
+ 
+ 	ret = rtw_sdio_write_port(rtwdev, skb, queue);
++	if (queue == RTW_TX_QUEUE_MGMT)
++		pr_info("[RTW88-SDIO-TX] mgmt write_port ret=%d len=%u\n", ret, skb->len);
+ 	if (ret) {
+ 		skb_queue_head(&rtwsdio->tx_queue[queue], skb);
+ 		return;
+--- a/drivers/net/wireless/realtek/rtw88/tx.c
++++ b/drivers/net/wireless/realtek/rtw88/tx.c
+@@ -186,6 +186,8 @@
+ 	if (skb_queue_len(&tx_report->queue) == 0)
+ 		return;
+ 
++	pr_info("[RTW88-TXRPT] purge timeout qlen=%u\n",
++		skb_queue_len(&tx_report->queue));
+ 	rtw_warn(rtwdev, "failed to get tx report from firmware\n");
+ 
+ 	spin_lock_irqsave(&tx_report->q_lock, flags);
+@@ -254,6 +256,7 @@
+ 	skb_queue_walk_safe(&tx_report->queue, cur, tmp) {
+ 		n = (u8 *)IEEE80211_SKB_CB(cur)->status.status_driver_data;
+ 		if (*n == sn) {
++			pr_info("[RTW88-TXRPT] sn=%u st=%u\n", sn, st);
+ 			__skb_unlink(cur, &tx_report->queue);
+ 			rtw_tx_report_tx_status(rtwdev, cur, st == 0);
+ 			break;
+@@ -444,6 +447,12 @@
+ 	pkt_info->qsel = skb->priority;
+ 	pkt_info->ls = true;
+ 
++	if (ieee80211_is_mgmt(fc) && !ieee80211_is_probe_req(fc))
++		pr_info("[RTW88-TX] fc=0x%04x len=%u rate=%u qsel=%u mac_id=%u sn=%u rpt=%d\n",
++			le16_to_cpu(fc), skb->len, pkt_info->rate,
++			pkt_info->qsel, pkt_info->mac_id, pkt_info->sn,
++			pkt_info->report);
++
+ 	/* maybe merge with tx status ? */
+ 	rtw_tx_stats(rtwdev, vif, skb);
+ }
+@@ -555,7 +564,9 @@
+ 	    struct ieee80211_tx_control *control,
+ 	    struct sk_buff *skb)
+ {
++	struct ieee80211_hdr *hdr = (struct ieee80211_hdr *)skb->data;
+ 	struct rtw_tx_pkt_info pkt_info = {0};
++	__le16 fc = hdr->frame_control;
+ 	int ret;
+ 
+ 	rtw_tx_pkt_info_update(rtwdev, &pkt_info, control->sta, skb);
+@@ -662,6 +673,8 @@
+ 		unsigned long frame_cnt;
+ 
+ 		ieee80211_txq_get_depth(txq, &frame_cnt, NULL);
++		if (!frame_cnt)
++			pr_info("[RTW88-TXWORK] frame_cnt=0 ac=%u\n", txq->ac);
+ 		rtw_txq_push(rtwdev, rtwtxq, frame_cnt);
+ 
+ 		list_del_init(&rtwtxq->list);

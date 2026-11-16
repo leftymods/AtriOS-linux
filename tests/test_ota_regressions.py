@@ -585,3 +585,25 @@ def test_boot_mount_requires_boot_partition_on_same_emmc(ota):
 def test_boot_mount_rejects_wrong_disk_media_label_and_root_shape(ota, root_source, boot_source, fstype, device_type, label):
     with pytest.raises(RuntimeError, match="same eMMC"):
         ota.g["inspect_boot_mount"](root_source, boot_source, fstype, device_type, label)
+
+
+def test_firmware_discovery_coexists_with_latest_apk(ota, monkeypatch):
+    import copy
+    app = {"tag_name": "app-v1.4", "draft": False, "assets": [{"name": "AtriOS-Control-v1.4.apk"}]}
+    firmware = release_response()
+    old = copy.deepcopy(firmware)
+    old["tag_name"] = "v1.5"
+    future = copy.deepcopy(firmware)
+    future["tag_name"] = "v9.0"
+    future["prerelease"] = True
+    monkeypatch.setitem(ota.g, "request_json", lambda *args, **kwargs: app)
+    monkeypatch.setitem(ota.g, "request_bytes", lambda *args, **kwargs: json.dumps([app, old, future, firmware]).encode())
+    assert ota.g["latest_release"]()["tag"] == "v2.0"
+
+
+def test_only_apk_releases_are_not_firmware(ota, monkeypatch):
+    app = {"tag_name": "app-v1.4", "assets": []}
+    monkeypatch.setitem(ota.g, "request_json", lambda *args, **kwargs: app)
+    monkeypatch.setitem(ota.g, "request_bytes", lambda *args, **kwargs: json.dumps([app]).encode())
+    with pytest.raises(ota.g["NoFirmwareRelease"]):
+        ota.g["latest_release"]()

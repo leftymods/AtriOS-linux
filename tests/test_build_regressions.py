@@ -288,3 +288,24 @@ def test_rootfs_restores_command_modes_without_executing_configuration(tmp_path)
     assert result.returncode == 0, result.stderr
     for name in names[:-1]: assert (stage / name).stat().st_mode & 0o111 == 0o111
     assert (stage / names[-1]).stat().st_mode & 0o111 == 0
+
+
+@pytest.mark.parametrize('source,canonical,devno,sysfs,expected', [
+    ('/dev/mmcblk1p2', '/dev/mmcblk1p2', '179:34', '/sys/devices/block/mmcblk1/mmcblk1p2', '/dev/mmcblk1p2'),
+    ('/dev/root', '/dev/root', '179:34', '/sys/devices/block/mmcblk1/mmcblk1p2', '/dev/mmcblk1p2'),
+    ('/dev/root', '', '179:34', '/sys/devices/block/mmcblk1/mmcblk1p2', '/dev/mmcblk1p2'),
+    ('/dev/root', '', '8:2', '/sys/devices/block/sda/sda2', None),
+    ('/dev/root', '', '../179:34', '/sys/devices/block/mmcblk1/mmcblk1p2', None),
+    ('/dev/root', '', '179:34:1', '/sys/devices/block/mmcblk1/mmcblk1p2', None),
+    ('/dev/root', '', '179:34', '/sys/devices/block/mmcblk1/mmcblk1p1', None),
+])
+def test_package_root_alias_resolves_using_kernel_device_number(source, canonical, devno, sysfs, expected):
+    # Mock only read-only kernel inspection commands; no physical devices needed.
+    script = library('package-boot.sh') + r'''
+findmnt() { case "$*" in *MAJ:MIN*) printf '%s\n' "$DEVNO" ;; *) printf '%s\n' "$SOURCE" ;; esac; }
+readlink() { case "$2" in /sys/dev/block/*) printf '%s\n' "$SYSFS" ;; *) printf '%s\n' "$CANONICAL" ;; esac; }
+atrios_resolve_root_source
+'''
+    result = shell(script, env={'SOURCE': source, 'CANONICAL': canonical, 'DEVNO': devno, 'SYSFS': sysfs})
+    assert (result.returncode == 0) == (expected is not None)
+    if expected is not None: assert result.stdout.strip() == expected

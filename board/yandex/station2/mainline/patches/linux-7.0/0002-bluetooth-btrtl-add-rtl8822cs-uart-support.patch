@@ -1,31 +1,30 @@
-diff -uprN a/drivers/bluetooth/btrtl.c b/drivers/bluetooth/btrtl.c
 --- a/drivers/bluetooth/btrtl.c
 +++ b/drivers/bluetooth/btrtl.c
-@@ -69,6 +69,7 @@ enum {
+@@ -69,6 +69,7 @@
  	CHIP_ID_8852A = 18,
  	CHIP_ID_8852B = 20,
  	CHIP_ID_8852C = 25,
 +	CHIP_ID_8822E = 33,
  	CHIP_ID_8851B = 36,
  	CHIP_ID_8922A = 44,
- };
-@@ -257,6 +258,15 @@ static const struct id_table ic_id_table
- 	  .fw_name  = "rtl_bt/rtl8822cs_fw",
- 	  .cfg_name = "rtl_bt/rtl8822cs_config",
- 	  .hw_info  = "rtl8822cs" },
-+
-+	/* 8822E with UART interface */
-+	{ IC_INFO(RTL_ROM_LMP_8822B, 0xe, 0xc, HCI_UART),
+ 	CHIP_ID_8852BT = 47,
+@@ -250,6 +251,15 @@
+ 
+ 	/* 8822C with UART interface */
+ 	{ IC_INFO(RTL_ROM_LMP_8822B, 0xc, 0xa, HCI_UART),
 +	  .config_needed = true,
 +	  .has_rom_version = true,
 +	  .has_msft_ext = true,
 +	  .fw_name  = "rtl_bt/rtl8822cs_fw",
 +	  .cfg_name = "rtl_bt/rtl8822cs_config",
 +	  .hw_info  = "rtl8822cs" },
- 
- 	/* 8822C with USB interface */
- 	{ IC_INFO(RTL_ROM_LMP_8822B, 0xc, 0xa, HCI_USB),
-@@ -673,6 +683,7 @@ static int btrtl_setup_rtl8723b(struct h
++
++	/* 8822E with UART interface */
++	{ IC_INFO(RTL_ROM_LMP_8822B, 0xe, 0xc, HCI_UART),
+ 	  .config_needed = true,
+ 	  .has_rom_version = true,
+ 	  .has_msft_ext = true,
+@@ -664,6 +674,7 @@
  		{ RTL_ROM_LMP_8723B, 9 },	/* 8723D */
  		{ RTL_ROM_LMP_8821A, 10 },	/* 8821C */
  		{ RTL_ROM_LMP_8822B, 13 },	/* 8822C */
@@ -33,13 +32,14 @@ diff -uprN a/drivers/bluetooth/btrtl.c b/drivers/bluetooth/btrtl.c
  		{ RTL_ROM_LMP_8761A, 14 },	/* 8761B */
  		{ RTL_ROM_LMP_8852A, 18 },	/* 8852A */
  		{ RTL_ROM_LMP_8852A, 20 },	/* 8852B */
-@@ -1186,9 +1197,13 @@ struct btrtl_device_info *btrtl_initiali
+@@ -1185,11 +1196,14 @@
  		goto err_free;
  	}
  
 -	rc = btrtl_vendor_read_reg16(hdev, RTL_SEC_PROJ, reg_val);
 -	if (rc < 0)
 -		goto err_free;
+-
 -	key_id = reg_val[0];
 +	if (lmp_subver == RTL_ROM_LMP_8852A || lmp_subver == RTL_ROM_LMP_8851B || lmp_subver == RTL_ROM_LMP_8922A) {
 +		rc = btrtl_vendor_read_reg16(hdev, RTL_SEC_PROJ, reg_val);
@@ -51,7 +51,8 @@ diff -uprN a/drivers/bluetooth/btrtl.c b/drivers/bluetooth/btrtl.c
 +	}
  	btrtl_dev->key_id = key_id;
  	rtl_dev_info(hdev, "%s: key id %u", __func__, key_id);
-@@ -1322,6 +1337,7 @@ int btrtl_setup_realtek(struct hci_dev *
+ 
+@@ -1310,6 +1324,7 @@
  	/* Enable WBS supported for the specific Realtek devices. */
  	switch (btrtl_dev->project_id) {
  	case CHIP_ID_8822C:
@@ -59,10 +60,9 @@ diff -uprN a/drivers/bluetooth/btrtl.c b/drivers/bluetooth/btrtl.c
  	case CHIP_ID_8852A:
  	case CHIP_ID_8852B:
  	case CHIP_ID_8852C:
-diff -uprN a/net/bluetooth/hci_event.c b/net/bluetooth/hci_event.c
 --- a/net/bluetooth/hci_event.c
 +++ b/net/bluetooth/hci_event.c
-@@ -4657,6 +4657,14 @@ static void hci_pin_code_request_evt(str
+@@ -4657,6 +4657,14 @@
  			secure = 0;
  
  		mgmt_pin_code_request(hdev, &ev->bdaddr, secure);
@@ -77,7 +77,7 @@ diff -uprN a/net/bluetooth/hci_event.c b/net/bluetooth/hci_event.c
  	}
  
  unlock:
-@@ -4705,9 +4713,6 @@ static void hci_link_key_request_evt(str
+@@ -4705,9 +4713,6 @@
  
  	bt_dev_dbg(hdev, "");
  
@@ -87,7 +87,7 @@ diff -uprN a/net/bluetooth/hci_event.c b/net/bluetooth/hci_event.c
  	hci_dev_lock(hdev);
  
  	key = hci_find_link_key(hdev, &ev->bdaddr);
-@@ -4786,9 +4791,6 @@ static void hci_link_key_notify_evt(stru
+@@ -4786,9 +4791,6 @@
  	set_bit(HCI_CONN_NEW_LINK_KEY, &conn->flags);
  	conn_set_key(conn, ev->key_type, conn->pin_length);
  
@@ -97,7 +97,7 @@ diff -uprN a/net/bluetooth/hci_event.c b/net/bluetooth/hci_event.c
  	key = hci_add_link_key(hdev, conn, &ev->bdaddr, ev->link_key,
  			        ev->key_type, pin_len, &persistent);
  	if (!key)
-@@ -4800,7 +4802,10 @@ static void hci_link_key_notify_evt(stru
+@@ -4800,7 +4802,10 @@
  	if (ev->key_type == HCI_LK_CHANGED_COMBINATION)
  		conn_set_key(conn, key->type, key->pin_len);
  
@@ -109,11 +109,12 @@ diff -uprN a/net/bluetooth/hci_event.c b/net/bluetooth/hci_event.c
  
  	/* Keep debug keys around only if the HCI_KEEP_DEBUG_KEYS flag
  	 * is set. If it's not set simply remove the key from the kernel
-@@ -5350,8 +5355,19 @@ static void hci_io_capa_request_evt(stru
+@@ -5350,8 +5355,19 @@
  
  	hci_conn_hold(conn);
  
 -	if (!hci_dev_test_flag(hdev, HCI_MGMT))
+-		goto unlock;
 +	if (!hci_dev_test_flag(hdev, HCI_MGMT)) {
 +		struct hci_cp_io_capability_reply cp;
 +
@@ -125,20 +126,21 @@ diff -uprN a/net/bluetooth/hci_event.c b/net/bluetooth/hci_event.c
 +		conn->auth_type = HCI_AT_GENERAL_BONDING;
 +		hci_send_cmd(hdev, HCI_OP_IO_CAPABILITY_REPLY,
 +			     sizeof(cp), &cp);
- 		goto unlock;
++		goto unlock;
 +	}
  
  	/* Allow pairing if we're pairable, the initiators of the
  	 * pairing or if the remote is not requesting bonding.
-@@ -5436,8 +5452,11 @@ static void hci_user_confirm_request_evt
+@@ -5436,8 +5452,11 @@
  
  	hci_dev_lock(hdev);
  
 -	if (!hci_dev_test_flag(hdev, HCI_MGMT))
+-		goto unlock;
 +	if (!hci_dev_test_flag(hdev, HCI_MGMT)) {
 +		hci_send_cmd(hdev, HCI_OP_USER_CONFIRM_REPLY,
 +			     sizeof(ev->bdaddr), &ev->bdaddr);
- 		goto unlock;
++		goto unlock;
 +	}
  
  	conn = hci_conn_hash_lookup_ba(hdev, ACL_LINK, &ev->bdaddr);

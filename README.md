@@ -75,6 +75,8 @@ atrios reset                                        # Полный сброс у
 Настройки находятся в `/etc/atrios/updates.json`; по умолчанию используется
 `leftymods/AtriOS-linux`. Фоновая служба `S85atrios-update` только скачивает пакет;
 команда `atrios ota update` выполняет установку. Более старые версии отклоняются.
+APK-релизы `app-v*` учитываются отдельно: при таком latest клиент ищет числовой
+релиз прошивки в списке релизов. Выпуск прошивки не меняет latest приложения.
 
 Release asset называется `AtriOS-<board>-ota.tar.gz`, где `<board>` точно совпадает
 с `/etc/atrios-board` (`station-max` или `yndxsttion53`). Проверяются размер и
@@ -106,6 +108,11 @@ WebSocket-клиент удалён. Станция отправляет WAV в 
 `POST /chat` и `POST /tts`; сервер возвращает JSON распознавания/ответа и WAV.
 Эти HTTP endpoints уже есть в backend AtriAI. На сервере нужен HTTPS с валидным
 сертификатом, например TLS reverse proxy перед backend на `127.0.0.1:8090`.
+Вместо reverse proxy можно запустить `tools/run_voice_https.py` через окружение
+backend с `--backend-dir`, `--cert`, `--key`, `--token-file`, `--host` и `--port`.
+Он подключает только четыре HTTPS-маршрута, требует token вне loopback и не
+скачивает веса моделей. LLM-сервисы, указанные в конфигурации backend, запускаются
+отдельно; `--warmup` включает прогрев ASR/TTS из локальных весов.
 
 ```bash
 atrios ai server https://voice.example.org

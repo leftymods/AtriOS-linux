@@ -49,6 +49,10 @@ class VerificationError(ValueError):
     error_kind = "signature"
 
 
+class NoFirmwareRelease(RuntimeError):
+    pass
+
+
 def load_config():
     cfg = dict(DEFAULT_CONFIG)
     if CONFIG_FILE.exists():
@@ -418,6 +422,27 @@ def install_bundle_tar(pkg_path, source_label, do_reboot=False, expected_version
 def latest_release(cfg=None):
     cfg = cfg or load_config()
     data = request_json("https://api.github.com/repos/" + cfg["repository"] + "/releases/latest", headers={"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"})
+    # This repository also publishes app-v* APK releases. Do not change the
+    # companion app's latest release merely to make firmware discoverable.
+    if str(data.get("tag_name", "")).startswith("app-"):
+        raw = request_bytes("https://api.github.com/repos/" + cfg["repository"] + "/releases?per_page=100", headers={"Accept": "application/vnd.github+json"}, limit=4 * 1024 * 1024)
+        releases = json.loads(raw)
+        if not isinstance(releases, list):
+            raise ValueError("Invalid GitHub release list")
+        name = "AtriOS-" + device_id() + "-ota.tar.gz"
+        candidates = []
+        for release in releases:
+            if not isinstance(release, dict) or release.get("draft") or release.get("prerelease"):
+                continue
+            try:
+                rank = version_key(release.get("tag_name"))
+            except ValueError:
+                continue
+            if any(isinstance(asset, dict) and asset.get("name") == name for asset in release.get("assets", [])):
+                candidates.append((rank, release))
+        if not candidates:
+            raise NoFirmwareRelease("No stable firmware release is published for this board")
+        data = max(candidates, key=lambda candidate: candidate[0])[1]
     if data.get("draft") or data.get("prerelease"):
         raise ValueError("Only stable published releases are accepted")
     name = "AtriOS-" + device_id() + "-ota.tar.gz"
@@ -516,6 +541,10 @@ def run_daemon():
                 with update_lock():
                     check_and_download()
             delay = max(300, min(86400, int(cfg["interval_seconds"])))
+        except NoFirmwareRelease as exc:
+            set_error("ota")
+            print("[OTA]", exc, flush=True)
+            delay = 21600
         except urllib.error.HTTPError as exc:
             # A repository with no published release is normal during provisioning.
             if exc.code != 404:

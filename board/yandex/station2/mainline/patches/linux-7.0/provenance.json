@@ -1,0 +1,86 @@
+{
+  "archive": "linux-7.3.1.tar.xz",
+  "archive_sha256": "fa595aad93734f829c963c2a90ef7c3673224fd7fdae7b49406e397cde2de231",
+  "capture": "working source following station build #73; no live mutations",
+  "files": {
+    "drivers/bluetooth/btrtl.c": {
+      "base_sha256": "2698257fa53f3a17d5244b37be882428a4fac0f4726b0d58e92d850fd6784b53",
+      "working_crlf": 0,
+      "working_sha256": "ec70c0320cdd9477b86412aadaef2c65f5a4a0edd06d24db77b74d3f5b1767f1",
+      "working_size": 41011
+    },
+    "drivers/net/wireless/realtek/rtw88/coex.c": {
+      "base_sha256": "f0ecf9a2d2f121fc7dab32dcf3ced250f388175d8251dd398df6298e3e412d41",
+      "working_crlf": 0,
+      "working_sha256": "35cd0b430f7ecd187ddd45eff5ad1d8ed9c26b2043ac0e5521ff7217445c403c",
+      "working_size": 118617
+    },
+    "drivers/net/wireless/realtek/rtw88/efuse.c": {
+      "base_sha256": "2120e85547a1f622a5248eeeffd96e068d552d326809bc64488b8c84b21daff5",
+      "working_crlf": 0,
+      "working_sha256": "3a830a2030fcb1653f94a801b9186c9c92233fc4bcb6cdbf5c2d375698acbc90",
+      "working_size": 4991
+    },
+    "drivers/net/wireless/realtek/rtw88/fw.c": {
+      "base_sha256": "0da28129dfcdf3e9b5661523b54ede4632c6c9e5af7008a6f7ce2a1f8b6a19f0",
+      "working_crlf": 0,
+      "working_sha256": "942c41614ba921ce9534ce2f264d633d654d0e44258c84b948db101dd5f09008",
+      "working_size": 67395
+    },
+    "drivers/net/wireless/realtek/rtw88/mac80211.c": {
+      "base_sha256": "5de984df903ec1d96199ecd05b37f7ce3459de575a9439a59ac6f06d47a0853a",
+      "working_crlf": 997,
+      "working_sha256": "424c3dc29b4d97c427ae2e5a1260518a7bc3b5bba13159b97a7345d961df2abf",
+      "working_size": 26889
+    },
+    "drivers/net/wireless/realtek/rtw88/main.c": {
+      "base_sha256": "cd52ce31a39022269a9cf48a35c2e1b89cc8a25ccb0f2ed1cec8425e910dcfa4",
+      "working_crlf": 0,
+      "working_sha256": "d7c163b62034e1608d60a698152f4c4474ca085798cf9593e13d48968e895d4e",
+      "working_size": 67565
+    },
+    "drivers/net/wireless/realtek/rtw88/phy.c": {
+      "base_sha256": "669d76c8acfc9f30418dbd119e777eae4404f6e3bb1198292aab536a3aa9e4ec",
+      "working_crlf": 0,
+      "working_sha256": "8d5006f37107dd87d0b23423e2425b672313323d7480d915925a17c0563c733e",
+      "working_size": 70252
+    },
+    "drivers/net/wireless/realtek/rtw88/rtw8822c.c": {
+      "base_sha256": "a12e2b2ddde31ce8e0242d3e5b29769c364950a72b161fdcbd3905ec145d4a83",
+      "working_crlf": 0,
+      "working_sha256": "5e32499f0b580a0d00f8426eae4a949e0433d6e0cad92c24625d4827eb8cdd7e",
+      "working_size": 183425
+    },
+    "drivers/net/wireless/realtek/rtw88/rtw8822c_table.c": {
+      "base_sha256": "ec3f4d9eed016932b9100e4e2332c12f67bd0824a3f3b4b05cc515e7916a2247",
+      "working_crlf": 0,
+      "working_sha256": "ed97318df7bd4bf015ca9240a1d1aa372a86149045a93000f923b746829a8281",
+      "working_size": 228280
+    },
+    "drivers/net/wireless/realtek/rtw88/rtw8822cs.c": {
+      "base_sha256": "c40db7263b1ffe3040fc3190f7f622884a419a6eb4c67ae7d69b187038b04779",
+      "working_crlf": 57,
+      "working_sha256": "e1c7055320c7aec1321347d3baf2788e6d215b641d6e22c4e9e0d1076b7f3e9a",
+      "working_size": 1657
+    },
+    "drivers/net/wireless/realtek/rtw88/sdio.c": {
+      "base_sha256": "dc46139096dcbacac5b03e00d4ab2b25aea5d2f43353f2f34b0d3d7a2408a5be",
+      "working_crlf": 0,
+      "working_sha256": "846fd945bf45b6a0b5585e9dfcde0985be52d2a7a488ed5455c061ef79e44d62",
+      "working_size": 35169
+    },
+    "drivers/net/wireless/realtek/rtw88/tx.c": {
+      "base_sha256": "dfc212ab3caf47437ed234dba1b7f7ef0cbd45749d4d34162699446a2a4adf7e",
+      "working_crlf": 0,
+      "working_sha256": "74553dd5177be92bf3472104f430a5dc53b0b96b48899d5d256a15503eb7a3ef",
+      "working_size": 20936
+    },
+    "net/bluetooth/hci_event.c": {
+      "base_sha256": "c58ba0373c66ac4816620ee0730574fdadd29d6249ad5556b702cd7334451a6a",
+      "working_crlf": 0,
+      "working_sha256": "3458ae128a14b50133a0605b37b67671dcf69b5fecdf43a125fb3083818b1a29",
+      "working_size": 208895
+    }
+  },
+  "replay_byte_identical": true
+}

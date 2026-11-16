@@ -168,4 +168,5 @@ jobs:
               --title "AtriOS $RELEASE_TAG" --generate-notes
           fi
           gh release upload "$RELEASE_TAG" release-assets/* --clobber
-          gh release edit "$RELEASE_TAG" --draft=false
+          # Keep app-v* APK releases as the companion app's latest release.
+          gh release edit "$RELEASE_TAG" --draft=false --latest=false
