@@ -8,25 +8,7 @@ build_kernel() {
 
     local kernel_dir="$PROJECT_ROOT/cache/kernel"
 
-    # 1. Resolve Kernel Source in cache/kernel or Clone from Git
-    if [ ! -d "$kernel_dir" ]; then
-        if [ -n "${KERNEL_SOURCE_DIR:-}" ]; then
-            [ -f "$KERNEL_SOURCE_DIR/Makefile" ] || exit_with_error "Invalid KERNEL_SOURCE_DIR: $KERNEL_SOURCE_DIR"
-            display_alert "INFO" "Linking configured local kernel tree into" "$kernel_dir"
-            mkdir -p "$PROJECT_ROOT/cache"
-            ln -sfn "$(realpath "$KERNEL_SOURCE_DIR")" "$kernel_dir"
-        else
-            local git_url="${KERNEL_GIT_URL:-https://github.com/torvalds/linux.git}"
-            local git_branch="${KERNEL_BRANCH:-master}"
-            
-            display_alert "WARN" "Kernel not found at $kernel_dir. Cloning from Git..."
-            display_alert "INFO" "Repository:" "$git_url (branch: $git_branch)"
-            
-            mkdir -p "$PROJECT_ROOT/cache"
-            git clone --depth 1 -b "$git_branch" "$git_url" "$kernel_dir"
-            display_alert "OK" "Kernel cloned successfully into" "$kernel_dir"
-        fi
-    fi
+    prepare_kernel_source "$kernel_dir"
 
     local defconfig_src="$PROJECT_ROOT/$UBOOT_SOURCE_DIR/${KERNEL_DEFCONFIG}"
     local dts_src="$PROJECT_ROOT/$UBOOT_SOURCE_DIR/dts/${DTS_NAME}.dts"
@@ -88,5 +70,26 @@ apply_kernel_patch() {
         display_alert INFO "Patch already applied:" "$(basename "$patch_file")"
     else
         exit_with_error "Kernel patch is incompatible or partially applied: $patch_file"
+    fi
+}
+
+# Preserve existing local trees. Only an absent cache uses the verified pin.
+prepare_kernel_source() {
+    local kernel_dir="$1"
+    if [ -d "$kernel_dir" ]; then
+        [ -f "$kernel_dir/Makefile" ] || exit_with_error "Invalid existing kernel cache: $kernel_dir"
+        return
+    fi
+    if [ -e "$kernel_dir" ] || [ -L "$kernel_dir" ]; then
+        exit_with_error "Refusing to replace an existing kernel cache path: $kernel_dir"
+    fi
+    mkdir -p "$(dirname "$kernel_dir")"
+    if [ -n "${KERNEL_SOURCE_DIR:-}" ]; then
+        [ -f "$KERNEL_SOURCE_DIR/Makefile" ] || exit_with_error "Invalid KERNEL_SOURCE_DIR: $KERNEL_SOURCE_DIR"
+        ln -s "$(realpath "$KERNEL_SOURCE_DIR")" "$kernel_dir"
+    else
+        python3 "$PROJECT_ROOT/lib/kernel-source.py" \
+            --url "${KERNEL_ARCHIVE_URL:-}" --sha256 "${KERNEL_ARCHIVE_SHA256:-}" \
+            --destination "$kernel_dir"
     fi
 }

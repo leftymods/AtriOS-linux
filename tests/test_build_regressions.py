@@ -309,3 +309,105 @@ atrios_resolve_root_source
     result = shell(script, env={'SOURCE': source, 'CANONICAL': canonical, 'DEVNO': devno, 'SYSFS': sysfs})
     assert (result.returncode == 0) == (expected is not None)
     if expected is not None: assert result.stdout.strip() == expected
+
+
+@pytest.fixture
+def kernel_source_helper():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('pinned_kernel_source', ROOT / 'lib/kernel-source.py')
+    helper = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(helper)
+    return helper
+
+
+def fake_kernel_archive(tmp_path, extra=None):
+    archive = tmp_path / 'linux-test.tar.xz'
+    with tarfile.open(archive, 'w:xz') as tf:
+        for name, data, mode in [('linux-test/Makefile', b'VERSION = 7\n', 0o644),
+                                 ('linux-test/scripts/check.sh', b'#!/bin/sh\nexit 0\n', 0o755)]:
+            member = tarfile.TarInfo(name)
+            member.size = len(data)
+            member.mode = mode
+            tf.addfile(member, io.BytesIO(data))
+        if extra is not None:
+            tf.addfile(extra)
+    import hashlib
+    return archive, hashlib.sha256(archive.read_bytes()).hexdigest()
+
+
+def test_pinned_kernel_archive_atomic_stage_and_script_mode(tmp_path, kernel_source_helper):
+    archive, sha = fake_kernel_archive(tmp_path)
+    destination = tmp_path / 'cache/kernel'
+    kernel_source_helper.stage_archive(archive, sha, destination, 'linux-test')
+    assert (destination / 'Makefile').read_bytes() == b'VERSION = 7\n'
+    assert (destination / 'scripts/check.sh').stat().st_mode & 0o111
+    assert not list(destination.parent.glob('.kernel-stage-*'))
+    assert sha in (destination / '.atrios-kernel-source.json').read_text()
+
+
+def test_pinned_kernel_wrong_digest_does_not_create_cache(tmp_path, kernel_source_helper):
+    archive, _ = fake_kernel_archive(tmp_path)
+    destination = tmp_path / 'cache/kernel'
+    with pytest.raises(ValueError, match='SHA-256 mismatch'):
+        kernel_source_helper.stage_archive(archive, '0' * 64, destination, 'linux-test')
+    assert not destination.exists()
+
+
+@pytest.mark.parametrize('kind', ['traversal', 'absolute', 'escaping-link', 'device'])
+def test_pinned_kernel_unsafe_archive_is_rejected(tmp_path, kernel_source_helper, kind):
+    if kind == 'traversal':
+        member = tarfile.TarInfo('linux-test/../../outside')
+    elif kind == 'absolute':
+        member = tarfile.TarInfo('/outside')
+    elif kind == 'escaping-link':
+        member = tarfile.TarInfo('linux-test/link')
+        member.type = tarfile.SYMTYPE
+        member.linkname = '../outside'
+    else:
+        member = tarfile.TarInfo('linux-test/device')
+        member.type = tarfile.CHRTYPE
+    archive, sha = fake_kernel_archive(tmp_path, member)
+    destination = tmp_path / 'cache/kernel'
+    with pytest.raises((ValueError, tarfile.TarError)):
+        kernel_source_helper.stage_archive(archive, sha, destination, 'linux-test')
+    assert not destination.exists()
+    assert not (tmp_path / 'outside').exists()
+    assert not list(destination.parent.glob('.kernel-stage-*'))
+
+
+def test_pinned_kernel_internal_symlink_is_safe(tmp_path, kernel_source_helper):
+    link = tarfile.TarInfo('linux-test/Buildfile')
+    link.type = tarfile.SYMTYPE
+    link.linkname = 'Makefile'
+    archive, sha = fake_kernel_archive(tmp_path, link)
+    destination = tmp_path / 'kernel'
+    kernel_source_helper.stage_archive(archive, sha, destination, 'linux-test')
+    assert (destination / 'Buildfile').is_symlink()
+    assert (destination / 'Buildfile').read_bytes() == b'VERSION = 7\n'
+
+
+@pytest.mark.parametrize('url,sha', [('', 'a' * 64),
+    ('http://example.invalid/linux-test.tar.xz', 'a' * 64),
+    ('https://example.invalid/linux-test.tar.xz', ''),
+    ('https://example.invalid/linux-test.tar.xz', 'wrong')])
+def test_pinned_kernel_metadata_fails_before_network(tmp_path, kernel_source_helper, monkeypatch, url, sha):
+    monkeypatch.setattr(kernel_source_helper.urllib.request, 'build_opener',
+                        lambda *a, **kw: pytest.fail('Invalid metadata must not start network I/O'))
+    with pytest.raises(ValueError):
+        kernel_source_helper.fetch_kernel(url, sha, tmp_path / 'kernel')
+    assert not (tmp_path / 'kernel').exists()
+
+
+def test_kernel_source_existing_cache_and_local_tree_are_preserved(tmp_path):
+    existing = tmp_path / 'existing'
+    existing.mkdir()
+    (existing / 'Makefile').write_text('unchanged')
+    result = shell(library('compilation-kernel.sh') + 'prepare_kernel_source "$TARGET"',
+                   env={'TARGET': str(existing)})
+    assert result.returncode == 0, result.stderr
+    assert (existing / 'Makefile').read_text() == 'unchanged'
+    target = tmp_path / 'cache/kernel'
+    result = shell(library('compilation-kernel.sh') + 'prepare_kernel_source "$TARGET"',
+                   env={'TARGET': str(target), 'KERNEL_SOURCE_DIR': str(existing)})
+    assert result.returncode == 0, result.stderr
+    assert target.is_symlink() and target.resolve() == existing
