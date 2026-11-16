@@ -22,6 +22,8 @@
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
+#include <fcntl.h>
 
 #include <bluetooth/bluetooth.h>
 #include <bluetooth/hci.h>
@@ -1095,6 +1097,32 @@ static bool audio_ensure_pcm(unsigned int rate, unsigned int channels) {
     return false;
 }
 
+/* Tee played PCM (48 kHz stereo S16) to the AEC front-end as echo reference. */
+static int g_aec_fd = -1;
+
+static void aec_tee(const uint8_t *pcm, size_t frames, unsigned int ch) {
+    if (frames == 0) return;
+    if (g_aec_fd < 0) {
+        g_aec_fd = socket(AF_UNIX, SOCK_DGRAM, 0);
+        if (g_aec_fd < 0) return;
+        int fl = fcntl(g_aec_fd, F_GETFL, 0);
+        fcntl(g_aec_fd, F_SETFL, fl | O_NONBLOCK);
+    }
+    struct sockaddr_un a;
+    memset(&a, 0, sizeof(a));
+    a.sun_family = AF_UNIX;
+    snprintf(a.sun_path, sizeof(a.sun_path), "/var/run/atrios/aec_ref.sock");
+    if (ch == 2) {
+        sendto(g_aec_fd, pcm, frames * 4, MSG_DONTWAIT, (struct sockaddr *)&a, sizeof(a));
+    } else {
+        static int16_t st[8192];
+        const int16_t *in = (const int16_t *)pcm;
+        size_t n = frames > 4096 ? 4096 : frames;
+        for (size_t i = 0; i < n; i++) { st[i * 2] = in[i]; st[i * 2 + 1] = in[i]; }
+        sendto(g_aec_fd, st, n * 4, MSG_DONTWAIT, (struct sockaddr *)&a, sizeof(a));
+    }
+}
+
 static void handle_avdtp_media(client_t *c, const uint8_t *pkt, size_t len) {
     c->media_pkts++;
     if (len < 14 || !audio_load_libs()) return;
@@ -1180,6 +1208,8 @@ static void handle_avdtp_media(client_t *c, const uint8_t *pkt, size_t len) {
             }
 
             if (!audio_ensure_pcm(rate, ch)) break;
+
+            aec_tee(play_buf, total_frames, ch);
 
             size_t byte_off = 0;
             while (total_frames > 0) {
@@ -1272,6 +1302,75 @@ static void send_avrcp_volume_changed(client_t *c, int pct) {
                c->peer_str, pct, av);
         fflush(stdout);
     }
+}
+
+#define BT_CMD_SOCK_PATH "/var/run/atrios/bt_cmd.sock"
+
+static int open_bt_cmd_socket(void) {
+    mkdir("/var/run/atrios", 0755);
+    unlink(BT_CMD_SOCK_PATH);
+    int fd = socket(AF_UNIX, SOCK_DGRAM, 0);
+    if (fd < 0) return -1;
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", BT_CMD_SOCK_PATH);
+    if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        close(fd);
+        return -1;
+    }
+    chmod(BT_CMD_SOCK_PATH, 0666);
+    return fd;
+}
+
+static bool send_avrcp_passthrough(uint8_t op_id) {
+    static uint8_t tx_label = 0;
+    bool sent_any = false;
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        client_t *c = &g_clients[i];
+        if (!c->active || c->kind != CONN_AVCTP) continue;
+        uint8_t t1 = tx_label;
+        tx_label = (uint8_t)((tx_label + 1) & 0x0f);
+        uint8_t t2 = tx_label;
+        tx_label = (uint8_t)((tx_label + 1) & 0x0f);
+        uint8_t pkt[8] = {
+            (uint8_t)((t1 << 4) | 0x00), /* Single, Command */
+            0x11, 0x0e,                  /* AVRCP */
+            0x00,                        /* CONTROL */
+            0x48,                        /* PANEL subunit */
+            0x7c,                        /* PASS THROUGH */
+            (uint8_t)(op_id & 0x7f),     /* pressed */
+            0x00
+        };
+        if (send(c->fd, pkt, sizeof(pkt), 0) == (ssize_t)sizeof(pkt)) {
+            usleep(20000);
+            pkt[0] = (uint8_t)((t2 << 4) | 0x00);
+            pkt[6] = (uint8_t)((op_id & 0x7f) | 0x80); /* released */
+            send(c->fd, pkt, sizeof(pkt), 0);
+            printf("[bt-speaker] AVRCP -> %s: PASSTHROUGH op=0x%02x\n", c->peer_str, op_id & 0x7f);
+            fflush(stdout);
+            sent_any = true;
+        }
+    }
+    return sent_any;
+}
+
+static void handle_bt_cmd_socket(int fd_cmd) {
+    char buf[64];
+    ssize_t n = recv(fd_cmd, buf, sizeof(buf) - 1, 0);
+    if (n <= 0) return;
+    buf[n] = '\0';
+    char *p = buf;
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+    size_t len = strlen(p);
+    while (len > 0 && (p[len - 1] == ' ' || p[len - 1] == '\t' || p[len - 1] == '\r' || p[len - 1] == '\n')) {
+        p[--len] = '\0';
+    }
+    if (strcmp(p, "next") == 0) send_avrcp_passthrough(0x4b);
+    else if (strcmp(p, "prev") == 0 || strcmp(p, "previous") == 0) send_avrcp_passthrough(0x4c);
+    else if (strcmp(p, "play") == 0) send_avrcp_passthrough(0x44);
+    else if (strcmp(p, "pause") == 0) send_avrcp_passthrough(0x46);
+    else if (strcmp(p, "stop") == 0) send_avrcp_passthrough(0x45);
 }
 
 static void handle_avctp(client_t *c, const uint8_t *pkt, size_t len) {
@@ -1515,6 +1614,7 @@ int main(void) {
     int fd_avdtp = create_l2cap_server(0x0019, 895, BT_SECURITY_LOW);
     int fd_avctp = create_l2cap_server(0x0017, 672, BT_SECURITY_LOW);
     int fd_hci = open_hci_monitor();
+    int fd_cmd = open_bt_cmd_socket();
 
     if (fd_sdp < 0 || fd_avdtp < 0) {
         fprintf(stderr, "[bt-speaker] Failed to bind core L2CAP servers!\n");
@@ -1524,8 +1624,8 @@ int main(void) {
     time_t last_refresh = time(NULL);
 
     while (g_running) {
-        struct pollfd pfds[4 + MAX_CLIENTS];
-        int pmap[4 + MAX_CLIENTS];
+        struct pollfd pfds[5 + MAX_CLIENTS];
+        int pmap[5 + MAX_CLIENTS];
         nfds_t nfds = 0;
 
         pfds[nfds] = (struct pollfd){ .fd = fd_sdp, .events = POLLIN };
@@ -1539,6 +1639,10 @@ int main(void) {
         if (fd_hci >= 0) {
             pfds[nfds] = (struct pollfd){ .fd = fd_hci, .events = POLLIN };
             pmap[nfds++] = -4;
+        }
+        if (fd_cmd >= 0) {
+            pfds[nfds] = (struct pollfd){ .fd = fd_cmd, .events = POLLIN };
+            pmap[nfds++] = -5;
         }
         for (int i = 0; i < MAX_CLIENTS; i++) {
             if (g_clients[i].active) {
@@ -1573,6 +1677,8 @@ int main(void) {
             int id = pmap[i];
             if (id == -4) {
                 handle_hci_event(fd_hci);
+            } else if (id == -5) {
+                handle_bt_cmd_socket(fd_cmd);
             } else if (id < 0) {
                 struct sockaddr_l2 rem;
                 socklen_t rlen = sizeof(rem);
@@ -1628,5 +1734,7 @@ int main(void) {
     if (fd_avdtp >= 0) close(fd_avdtp);
     if (fd_avctp >= 0) close(fd_avctp);
     if (fd_hci >= 0) close(fd_hci);
+    if (fd_cmd >= 0) close(fd_cmd);
+    unlink(BT_CMD_SOCK_PATH);
     return 0;
 }

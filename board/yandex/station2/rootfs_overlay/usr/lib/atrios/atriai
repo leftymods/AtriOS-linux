@@ -11,6 +11,7 @@ Pure Python 3 stdlib implementation of the leftymods/AtriAI column protocol:
 import array
 import base64
 from collections import deque
+import glob
 import hashlib
 import json
 import math
@@ -31,6 +32,7 @@ CAP_CH = 8
 FRAME_SAMPLES = 512
 FRAME_BYTES = FRAME_SAMPLES * 2
 CAP_FRAME_BYTES = FRAME_SAMPLES * 3 * CAP_CH * 4  # 48kHz 8ch S32_LE -> 16kHz 1ch S16_LE
+AEC_BIN = "/usr/lib/atrios/atri-aec"  # arecord + echo cancellation, outputs 16kHz mono S16_LE
 CONFIG_FILE = "/var/lib/atrios/ai.json"
 STATUS_FILE = "/var/run/atrios/ai_status.json"
 BUTTONS_FILE = "/var/run/atrios/buttons.json"
@@ -438,6 +440,97 @@ def play_audio_bytes(audio_bytes, sample_rate=48000):
             pass
 
 
+BT_CMD_SOCK = "/var/run/atrios/bt_cmd.sock"
+VOLUME_FILE = "/var/lib/atrios/volume"
+
+
+def send_bt_cmd(cmd):
+    if not os.path.exists(BT_CMD_SOCK):
+        print(f"[atriai] bt_cmd socket missing: {BT_CMD_SOCK}", flush=True)
+        return False
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    try:
+        sock.sendto(cmd.encode("ascii"), BT_CMD_SOCK)
+        return True
+    except Exception as e:
+        print(f"[atriai] bt_cmd '{cmd}' error: {e}", flush=True)
+        return False
+    finally:
+        sock.close()
+
+
+def adjust_volume(delta):
+    cur = 10
+    try:
+        with open(VOLUME_FILE, "r", encoding="utf-8") as f:
+            cur = int(f.read().strip())
+    except Exception:
+        pass
+    nxt = max(0, min(100, cur + delta))
+    subprocess.run(["/usr/bin/atrios", "volume", str(nxt)],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    print(f"[atriai] volume: {cur}% -> {nxt}%", flush=True)
+
+
+def _tone_pcm16(freq_hz, dur_ms, amp=5500, sr=48000):
+    n = max(1, int(sr * dur_ms / 1000.0))
+    fade = max(1, min(n // 4, int(sr * 0.010)))
+    samples = array.array("h")
+    two_pi_f = 2.0 * math.pi * freq_hz / sr
+    for i in range(n):
+        env = 1.0
+        if i < fade:
+            env = i / fade
+        elif i >= n - fade:
+            env = (n - 1 - i) / fade
+        samples.append(int(amp * env * math.sin(two_pi_f * i)))
+    return samples.tobytes()
+
+
+def play_command_chime(action):
+    patterns = {
+        "volume_up": [(523.25, 55), (659.25, 80)],
+        "volume_down": [(659.25, 55), (523.25, 80)],
+        "next_track": [(587.33, 50), (880.00, 75)],
+        "prev_track": [(880.00, 50), (587.33, 75)],
+        "pause": [(440.00, 85)],
+        "play": [(440.00, 50), (554.37, 75)],
+    }
+    notes = patterns.get(action, [(587.33, 70)])
+    pcm = bytearray()
+    gap = b"\x00" * (int(48000 * 0.018) * 2)
+    for idx, (freq, ms) in enumerate(notes):
+        if idx > 0:
+            pcm.extend(gap)
+        pcm.extend(_tone_pcm16(freq, ms))
+    try:
+        subprocess.run(
+            ["aplay", "-q", "-t", "raw", "-f", "S16_LE", "-r", "48000", "-c", "1"],
+            input=bytes(pcm),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=2.0,
+        )
+    except Exception:
+        pass
+
+
+def execute_device_command(action):
+    bt_map = {
+        "next_track": "next",
+        "prev_track": "prev",
+        "pause": "pause",
+        "play": "play",
+    }
+    if action in bt_map:
+        send_bt_cmd(bt_map[action])
+    elif action == "volume_up":
+        adjust_volume(5)
+    elif action == "volume_down":
+        adjust_volume(-5)
+    play_command_chime(action)
+
+
 def send_phrase_to_server(server_url, pcm_bytes, wake_word=""):
     ws = SimpleWebSocket(server_url, timeout=25.0)
     last_asr = ""
@@ -445,6 +538,7 @@ def send_phrase_to_server(server_url, pcm_bytes, wake_word=""):
     audio = bytearray()
     audio_sr = 48000
     cancelled = False
+    command_received = False
     try:
         start_msg = {"type": "start", "sample_rate": SR, "format": "pcm16", "lang": "ru"}
         if wake_word:
@@ -468,14 +562,20 @@ def send_phrase_to_server(server_url, pcm_bytes, wake_word=""):
             if opcode == 0x1:
                 ev = json.loads(payload.decode("utf-8", errors="ignore"))
                 kind = ev.get("type")
-                if kind == "asr":
+                if kind == "command":
+                    action = ev.get("action", "")
+                    if action:
+                        command_received = True
+                        print(f"[atriai] command: {action}", flush=True)
+                        execute_device_command(action)
+                elif kind == "asr":
                     last_asr = ev.get("text", "")
                     print(f"[atriai] asr: {last_asr}", flush=True)
                     if not last_asr.strip():
                         break
-                    if wake_word and not matches_wake_word(last_asr, wake_word):
+                    if wake_word and not command_received and not matches_wake_word(last_asr, wake_word):
                         break
-                    if wake_word:
+                    if wake_word or command_received:
                         set_vad_visual("thinking")
                 elif kind == "answer":
                     last_answer = ev.get("text", "")
@@ -495,7 +595,7 @@ def send_phrase_to_server(server_url, pcm_bytes, wake_word=""):
         set_vad_visual("idle")
         return "", ""
 
-    if wake_word and not matches_wake_word(last_asr, wake_word):
+    if wake_word and not command_received and not matches_wake_word(last_asr, wake_word):
         print(f"[atriai] ignored (no wake word '{wake_word}'): {last_asr}", flush=True)
         set_vad_visual("idle")
         return last_asr, ""
@@ -505,10 +605,40 @@ def send_phrase_to_server(server_url, pcm_bytes, wake_word=""):
         write_status("speaking", last_asr=last_asr, last_answer=last_answer)
         set_vad_visual("speaking")
         play_audio_bytes(bytes(audio), sample_rate=audio_sr)
-    else:
+    elif not command_received:
         print(f"[atriai] no audio bytes received for answer: {last_answer}", flush=True)
     set_vad_visual("idle")
     return last_asr, last_answer
+
+
+def playback_running():
+    try:
+        for p in glob.glob("/proc/asound/card*/pcm*p/sub*/status"):
+            with open(p, "r") as f:
+                if "RUNNING" in f.read():
+                    return True
+    except Exception:
+        pass
+    return False
+
+
+def duck_volume(target=2):
+    """Temporarily lower playback volume while the user speaks (never raises it)."""
+    try:
+        with open(VOLUME_FILE, "r", encoding="utf-8") as f:
+            cur = int(f.read().strip())
+    except Exception:
+        return None
+    if cur <= target:
+        return None
+    subprocess.Popen(["/usr/bin/atrios", "volume", str(target)],
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return cur
+
+
+def restore_volume(orig):
+    subprocess.Popen(["/usr/bin/atrios", "volume", str(int(orig))],
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def run_daemon():
@@ -522,6 +652,8 @@ def run_daemon():
     except Exception:
         pass
     try:
+        subprocess.run(["pkill", "-9", "-f", "atri-aec"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         subprocess.run(["pkill", "-9", "-f", "arecord.*hw:0,3"],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:
@@ -549,16 +681,23 @@ def run_daemon():
 
         proc = None
         try:
-            proc = subprocess.Popen(
-                ["arecord", "-q", "-D", "hw:0,3", "-t", "raw", "-f", "S32_LE", "-r", str(CAP_SR), "-c", str(CAP_CH)],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
+            use_aec = os.path.exists(AEC_BIN)
+            if use_aec:
+                proc = subprocess.Popen([AEC_BIN], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            else:
+                proc = subprocess.Popen(
+                    ["arecord", "-q", "-D", "hw:0,3", "-t", "raw", "-f", "S32_LE", "-r", str(CAP_SR), "-c", str(CAP_CH)],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+            read_bytes = FRAME_BYTES if use_aec else CAP_FRAME_BYTES
             buf = bytearray()
             pre_roll = deque(maxlen=10)
             speaking = False
             speech_hits = 0
             warmup_frames = 20
+            noise_floor = 200.0
+            duck_orig = None
             force_active = False
             wait_speech_ms = 0.0
             silence_ms = 0.0
@@ -589,8 +728,8 @@ def run_daemon():
                     buf.clear()
                     set_vad_visual("vad")
                     print("[atriai] funcbutton pressed -> listening without wake word (6s timeout)", flush=True)
-                raw = proc.stdout.read(CAP_FRAME_BYTES)
-                if not raw or len(raw) < CAP_FRAME_BYTES:
+                raw = proc.stdout.read(read_bytes)
+                if not raw or len(raw) < read_bytes:
                     err_msg = ""
                     try:
                         proc.wait(timeout=0.5)
@@ -603,14 +742,23 @@ def run_daemon():
                         print("[atriai] arecord stream ended, retrying...", flush=True)
                     time.sleep(1.0)
                     break
-                chunk = downsample_48k_s32_8ch_to_16k_s16_mono(raw)
+                chunk = raw if use_aec else downsample_48k_s32_8ch_to_16k_s16_mono(raw)
                 if warmup_frames > 0:
                     warmup_frames -= 1
                     pre_roll.append(chunk)
                     continue
                 rms = pcm16_rms(chunk)
-                active_thr = min(vad_thr, 350.0) if force_active else vad_thr
-                needed_hits = 2 if force_active else 3
+                # Adaptive noise floor: falls fast, rises slowly (tracks music/TV level).
+                if not speaking:
+                    if rms < noise_floor:
+                        noise_floor = noise_floor * 0.85 + rms * 0.15
+                    else:
+                        noise_floor = noise_floor * 0.995 + rms * 0.005
+                music_on = playback_running()
+                dyn_thr = noise_floor * (1.8 if music_on else 2.2) + 60.0
+                dyn_thr = max(vad_thr * 0.6, min(dyn_thr, 6000.0))
+                active_thr = min(dyn_thr, 350.0) if force_active else dyn_thr
+                needed_hits = 2 if force_active else 4
                 if rms >= active_thr:
                     speech_hits += 1
                     if not speaking and speech_hits >= needed_hits:
@@ -618,6 +766,8 @@ def run_daemon():
                         for prev in pre_roll:
                             buf.extend(prev)
                         pre_roll.clear()
+                        if not force_active:
+                            set_vad_visual("vad")
                     if speaking:
                         silence_ms = 0.0
                         buf.extend(chunk)
@@ -654,8 +804,13 @@ def run_daemon():
                 except Exception:
                     pass
 
+            if duck_orig is not None:
+                restore_volume(duck_orig)
+                duck_orig = None
+
             if speaking and len(buf) >= min_bytes:
                 write_status("thinking")
+                set_vad_visual("thinking")
                 if force_active:
                     set_vad_visual("thinking")
                 try:
