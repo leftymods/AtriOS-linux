@@ -186,7 +186,7 @@ fn normalize_text(text: &str) -> Vec<String> {
 const ATRI_ALIASES: &[&str] = &[
     "atri", "atria", "атри", "атря", "атрия", "атре", "атрий", "атрии", "отри", "этри", "этрий",
     "адри", "антри", "артри", "актри", "а три", "о три", "эй три", "матри", "мотри", "утри",
-    "атриа", "атрей", "атрик", "отрыв", "и три", "ну три",
+    "атриа", "атрей", "атрик", "отрыв", "и три", "ну три", "на три", "а тры",
 ];
 const ALICE_ALIASES: &[&str] = &["алиса", "алису", "алисе", "алисой", "alice"];
 const FILLERS: &[&str] = &[
@@ -284,7 +284,7 @@ pub fn matches_wake_word(text: &str, wake_word: &str) -> bool {
 }
 
 pub fn strip_wake_word(text: &str, wake_word: &str) -> String {
-    let mut words = normalize_text(text);
+    let words = normalize_text(text);
     if words.is_empty() {
         return String::new();
     }
@@ -292,48 +292,58 @@ pub fn strip_wake_word(text: &str, wake_word: &str) -> String {
     if cands.is_empty() {
         return words.join(" ");
     }
-    while !words.is_empty() && FILLERS.contains(&words[0].as_str()) {
-        words.remove(0);
-    }
+    let has_atri = cands.iter().any(|c| c == "atri" || c == "атри");
     let mut s = words.join(" ");
-    let mut matched = false;
-    for w in &cands {
-        if s == *w {
-            s.clear();
-            matched = true;
+    loop {
+        let mut toks: Vec<String> = s.split_whitespace().map(str::to_string).collect();
+        while !toks.is_empty() && FILLERS.contains(&toks[0].as_str()) {
+            toks.remove(0);
+        }
+        s = toks.join(" ");
+        if s.is_empty() {
             break;
         }
-        if let Some(rest) = s.strip_prefix(&format!("{w} ")) {
-            s = rest.trim().to_string();
-            matched = true;
-            break;
+        let mut progressed = false;
+        for w in &cands {
+            if s == *w {
+                s.clear();
+                progressed = true;
+                break;
+            }
+            if let Some(rest) = s.strip_prefix(&format!("{w} ")) {
+                s = rest.trim().to_string();
+                progressed = true;
+                break;
+            }
         }
-    }
-    if !matched && cands.iter().any(|c| c == "atri" || c == "атри") {
-        if s == "ри" || s == "три" {
-            s.clear();
-            matched = true;
-        } else {
-            for cl in ["ри ", "три "] {
-                if let Some(rest) = s.strip_prefix(cl) {
-                    if !rest.trim().is_empty() {
+        if !progressed && has_atri {
+            if s == "ри" || s == "три" {
+                s.clear();
+                progressed = true;
+            } else {
+                for cl in ["ри ", "три "] {
+                    if let Some(rest) = s.strip_prefix(cl) {
                         s = rest.trim().to_string();
-                        matched = true;
+                        progressed = true;
                         break;
                     }
                 }
             }
-        }
-        if !matched {
-            if let Some(first) = words.first() {
-                if first.chars().count() >= 5
-                    && first.ends_with("атри")
-                    && first != "смотри"
-                    && first != "посмотри"
-                {
-                    s = words[1..].join(" ");
+            if !progressed {
+                if let Some(first) = toks.first() {
+                    if first.chars().count() >= 5
+                        && first.ends_with("атри")
+                        && first != "смотри"
+                        && first != "посмотри"
+                    {
+                        s = toks[1..].join(" ");
+                        progressed = true;
+                    }
                 }
             }
+        }
+        if !progressed {
+            break;
         }
     }
     for w in &cands {
@@ -989,6 +999,43 @@ fn voice_call<T: Send + 'static>(f: impl FnOnce() -> Result<T, String> + Send + 
     }
 }
 
+pub fn prepare_asr_wav(pcm: &[u8]) -> Vec<u8> {
+    let lead_samples = 1920usize; // 120 ms @ 16 kHz
+    let min_total_samples = 19200usize; // 1.20 s @ 16 kHz
+    let samples: Vec<i16> = pcm
+        .chunks_exact(2)
+        .map(|b| i16::from_le_bytes([b[0], b[1]]))
+        .collect();
+    if samples.is_empty() {
+        return encode_wav_pcm16(&vec![0u8; min_total_samples * 2], SR as u32, 1);
+    }
+    let sum: f64 = samples.iter().map(|&s| s as f64).sum();
+    let mean = sum / (samples.len() as f64);
+    let mut peak = 0.0f64;
+    let mut centered = Vec::with_capacity(samples.len());
+    for &s in &samples {
+        let v = (s as f64) - mean;
+        let av = v.abs();
+        if av > peak {
+            peak = av;
+        }
+        centered.push(v);
+    }
+    let gain = if (350.0..14000.0).contains(&peak) {
+        (14000.0 / peak).min(4.0)
+    } else {
+        1.0
+    };
+    let out_samples = (lead_samples + centered.len()).max(min_total_samples);
+    let mut out = vec![0u8; out_samples * 2];
+    for (idx, v) in centered.into_iter().enumerate() {
+        let s = (v * gain).round().clamp(-32767.0, 32767.0) as i16;
+        let off = (lead_samples + idx) * 2;
+        out[off..off + 2].copy_from_slice(&s.to_le_bytes());
+    }
+    encode_wav_pcm16(&out, SR as u32, 1)
+}
+
 fn send_phrase_to_server(
     server_url: &str,
     pcm: &[u8],
@@ -1001,7 +1048,7 @@ fn send_phrase_to_server(
     }
     let cfg = load_config();
     let base = server_url.trim_end_matches('/').to_string();
-    let wav = encode_wav_pcm16(pcm, SR as u32, 1);
+    let wav = prepare_asr_wav(pcm);
     let mut keep_listening = false;
 
     let res: Result<(String, String, bool), String> = (|| {
@@ -1020,6 +1067,7 @@ fn send_phrase_to_server(
         let rec_txt = String::from_utf8(raw_asr).map_err(|_| "Invalid UTF-8 ASR response")?;
         let rec = Json::parse(&rec_txt)?;
         let text = rec.get_str("text").ok_or("Invalid ASR response")?.trim().to_string();
+        println!("[stt] text={text:?}");
         if text.is_empty() {
             set_error("voice", None, "", 120);
             if force_active {
@@ -1030,14 +1078,14 @@ fn send_phrase_to_server(
             return Ok((text, String::new(), false));
         }
         if !wake_word.is_empty() && !matches_wake_word(&text, wake_word) {
-            println!("[atriai] ignored phrase without wake word ({wake_word:?}): {text:?}");
+            println!("[wake] ignored background speech ({wake_word:?}): {text:?}");
             set_error("voice", None, "", 120);
             return Ok((text, String::new(), false));
         }
         if is_wake_word_only(&text, wake_word) {
             WAKE_TRIGGERED.store(true, Ordering::SeqCst);
             keep_listening = true;
-            println!("[atriai] wake word activated ({text:?}) -> listening (7s)");
+            println!("[wake] activated ({text:?}) -> ActiveCommand (7s)");
             set_vad_visual("vad", false, "default");
             play_command_chime("play");
             drain_capture_fd_now();
@@ -1079,6 +1127,7 @@ fn send_phrase_to_server(
             .filter(|s| !s.trim().is_empty())
             .ok_or("Empty or invalid chat response")?;
         let emotion = chat.get_str("emotion").unwrap_or("neutral").to_string();
+        println!("[chat] answer={answer:?} emotion={emotion}");
 
         let base3 = base;
         let tok3 = cfg.token.clone();
@@ -1110,6 +1159,7 @@ fn send_phrase_to_server(
         parse_wav(&audio)?;
         write_status("speaking", &text, &answer, "");
         set_vad_visual("speaking", false, &emotion);
+        println!("[tts] playing {} bytes", audio.len());
         let completed = play_audio_bytes(&audio)?;
         set_error("voice", None, "", 120);
         if completed {
@@ -1225,6 +1275,84 @@ fn drain_capture_pipe(child: &mut Option<Child>, settle_ms: u64, frame_bytes: us
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PipelineMode {
+    WakeSpotter,
+    ActiveCommand,
+}
+
+impl PipelineMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            PipelineMode::WakeSpotter => "WakeSpotter",
+            PipelineMode::ActiveCommand => "ActiveCommand",
+        }
+    }
+}
+
+struct VadProcessor {
+    noise_rms: f64,
+    wait_quiet_frames: usize,
+}
+
+impl VadProcessor {
+    fn new() -> Self {
+        Self {
+            noise_rms: 160.0,
+            wait_quiet_frames: 0,
+        }
+    }
+
+    fn warmup(&mut self, rms: f64) {
+        self.noise_rms = (self.noise_rms * 0.85 + rms * 0.15).clamp(60.0, 1800.0);
+    }
+
+    fn update_noise(&mut self, rms: f64) {
+        if rms < self.noise_rms {
+            self.noise_rms = (self.noise_rms * 0.95 + rms * 0.05).clamp(60.0, 1800.0);
+        } else {
+            self.noise_rms =
+                (self.noise_rms * 0.98 + rms.min(self.noise_rms * 3.0) * 0.02).clamp(60.0, 1800.0);
+        }
+    }
+
+    fn adapt_rejected(&mut self, mean_rms: f64) {
+        self.noise_rms = (self.noise_rms * 0.70 + mean_rms * 0.30).clamp(60.0, 1800.0);
+    }
+
+    fn thresholds(&self, mode: PipelineMode, vad_thr: f64, silence_cfg: f64) -> (f64, f64, f64, f64) {
+        match mode {
+            PipelineMode::WakeSpotter => {
+                let start = (self.noise_rms * 2.35 + 130.0).clamp(vad_thr, 2600.0);
+                let keep = (self.noise_rms * 1.55 + 75.0).clamp(vad_thr * 0.68, start * 0.80);
+                (start, keep, 3200.0, 420.0)
+            }
+            PipelineMode::ActiveCommand => {
+                let start = (self.noise_rms * 1.75 + 85.0).clamp(vad_thr * 0.72, 2200.0);
+                let keep = (self.noise_rms * 1.30 + 50.0).clamp(vad_thr * 0.55, start * 0.78);
+                (start, keep, 8000.0, silence_cfg)
+            }
+        }
+    }
+}
+
+fn is_valid_speech(frame_rms: &[f64], noise_rms: f64, start_thr: f64) -> bool {
+    if frame_rms.is_empty() {
+        return false;
+    }
+    let mut min_r = f64::MAX;
+    let mut max_r = 0.0f64;
+    for &r in frame_rms {
+        if r < min_r {
+            min_r = r;
+        }
+        if r > max_r {
+            max_r = r;
+        }
+    }
+    max_r >= start_thr * 1.08 && max_r >= noise_rms * 2.1 + 100.0 && max_r >= min_r * 1.45
+}
+
 fn run_daemon() -> i32 {
     unsafe {
         signal(SIGUSR1, on_sigusr1 as *const () as usize);
@@ -1245,7 +1373,7 @@ fn run_daemon() -> i32 {
     println!("[atriai] Starting voice client -> {}", cfg0.server);
     write_status("listening", "", "", "");
 
-    let mut noise_floor = 220.0f64;
+    let mut vad = VadProcessor::new();
     let mut pend_force_active = false;
     let mut empty_followups: usize = 0;
     let mut proc_child: Option<Child> = None;
@@ -1262,6 +1390,7 @@ fn run_daemon() -> i32 {
             stop_capture(&mut proc_child);
             pend_force_active = false;
             empty_followups = 0;
+            vad.wait_quiet_frames = 0;
             write_status("muted", "", "", "");
             thread::sleep(Duration::from_millis(500));
             continue;
@@ -1300,23 +1429,33 @@ fn run_daemon() -> i32 {
         CAPTURE_FRAME_BYTES.store(read_bytes, Ordering::SeqCst);
         let cap_fd = child.stdout.as_ref().map(|s| s.as_raw_fd()).unwrap_or(-1);
         CAPTURE_FD.store(cap_fd, Ordering::SeqCst);
+
         let mut raw = vec![0u8; read_bytes];
         let mut buf: Vec<u8> = Vec::new();
-        let mut pre_roll: VecDeque<Vec<u8>> = VecDeque::with_capacity(20);
+        let mut utt_rms: Vec<f64> = Vec::new();
+        let mut pre_roll: VecDeque<(Vec<u8>, f64)> = VecDeque::with_capacity(16);
         let mut speaking = false;
         let mut speech_hits = 0usize;
+        let mut hit_max_utt = false;
         let mut warmup_frames = if first_start { 15usize } else { 0 };
         let mut force_active = pend_force_active;
         pend_force_active = false;
+        let mut mode = if force_active {
+            vad.wait_quiet_frames = 0;
+            PipelineMode::ActiveCommand
+        } else {
+            PipelineMode::WakeSpotter
+        };
         let ww_cfg = cfg.wake_word.trim().to_string();
         let wake_required = !ww_cfg.is_empty() && !matches!(ww_cfg.to_ascii_lowercase().as_str(), "off" | "none" | "false");
         let mut wait_speech_ms = 0.0f64;
         let mut silence_ms = 0.0f64;
         let frame_ms = (FRAME_SAMPLES as f64 / SR as f64) * 1000.0;
         let vad_thr = cfg.vad_threshold;
-        let max_sil = cfg.silence_ms;
         let min_bytes = (SR * 2) * (cfg.min_speech_ms as usize) / 1000;
-        let mut active_thr = vad_thr;
+        let mut last_start_thr = vad_thr;
+        let mut frame_idx = 0usize;
+        let mut music_on = false;
 
         if force_active {
             set_vad_visual("vad", false, "default");
@@ -1335,19 +1474,23 @@ fn run_daemon() -> i32 {
                     println!("[atriai] funcbutton pressed again -> cancelled -> clock");
                     speaking = false;
                     buf.clear();
+                    utt_rms.clear();
                     empty_followups = 0;
                     set_vad_visual("idle", false, "default");
                     break;
                 }
                 force_active = true;
+                mode = PipelineMode::ActiveCommand;
+                vad.wait_quiet_frames = 0;
                 empty_followups = 0;
                 speaking = false;
                 speech_hits = 0;
                 silence_ms = 0.0;
                 wait_speech_ms = 0.0;
                 buf.clear();
+                utt_rms.clear();
                 set_vad_visual("vad", false, "default");
-                println!("[atriai] funcbutton pressed -> listening without wake word (7s timeout)");
+                println!("[atriai] funcbutton pressed -> ActiveCommand (7s timeout)");
             }
             let read_ok = child
                 .stdout
@@ -1367,77 +1510,89 @@ fn run_daemon() -> i32 {
             let rms = pcm16_rms(&chunk);
             if warmup_frames > 0 {
                 warmup_frames -= 1;
-                noise_floor = (noise_floor * 0.85 + rms * 0.15).clamp(90.0, 1200.0);
-                if pre_roll.len() == 20 {
+                vad.warmup(rms);
+                if pre_roll.len() == 16 {
                     pre_roll.pop_front();
                 }
-                pre_roll.push_back(chunk);
+                pre_roll.push_back((chunk, rms));
                 continue;
             }
-            if !speaking {
-                if rms < noise_floor {
-                    noise_floor = noise_floor * 0.85 + rms * 0.15;
-                } else if rms < noise_floor * 1.6 {
-                    noise_floor = noise_floor * 0.992 + rms * 0.008;
-                }
+            if frame_idx % 8 == 0 {
+                music_on = playback_running();
             }
-            let music_on = playback_running();
-            let dyn_thr = (noise_floor * if music_on { 1.55 } else { 1.70 } + 40.0)
-                .clamp(vad_thr * 0.75, 2800.0);
-            active_thr = if force_active {
-                dyn_thr.min((vad_thr * 0.65).max(200.0))
-            } else {
-                dyn_thr
-            };
-            let needed_hits = 2;
-            if rms >= active_thr {
-                speech_hits += 1;
-                if !speaking && speech_hits >= needed_hits {
-                    speaking = true;
-                    for p in pre_roll.drain(..) {
-                        buf.extend_from_slice(&p);
+            frame_idx = frame_idx.wrapping_add(1);
+            let eff_thr = if music_on { vad_thr * 1.25 } else { vad_thr };
+            let (start_thr, keep_thr, max_utt_ms, end_silence_ms) =
+                vad.thresholds(mode, eff_thr, cfg.silence_ms);
+            last_start_thr = start_thr;
+
+            if !speaking {
+                if vad.wait_quiet_frames > 0 && !force_active {
+                    vad.update_noise(rms);
+                    if rms < keep_thr {
+                        vad.wait_quiet_frames -= 1;
+                    } else {
+                        vad.wait_quiet_frames = 10;
                     }
-                    if force_active || !wake_required {
-                        set_vad_visual("vad", false, "default");
-                    }
-                }
-                if speaking {
-                    silence_ms = 0.0;
-                    buf.extend_from_slice(&chunk);
-                    if buf.len() >= SR * 2 * 12 {
-                        break;
-                    }
-                } else {
-                    if pre_roll.len() == 20 {
+                    if pre_roll.len() == 16 {
                         pre_roll.pop_front();
                     }
-                    pre_roll.push_back(chunk);
+                    pre_roll.push_back((chunk, rms));
+                    continue;
                 }
-            } else if speaking {
+                if rms >= start_thr {
+                    speech_hits += 1;
+                    if speech_hits >= 2 {
+                        speaking = true;
+                        utt_rms.clear();
+                        for (p, r) in pre_roll.drain(..) {
+                            buf.extend_from_slice(&p);
+                            utt_rms.push(r);
+                        }
+                        buf.extend_from_slice(&chunk);
+                        utt_rms.push(rms);
+                        silence_ms = 0.0;
+                        if force_active || !wake_required {
+                            set_vad_visual("vad", false, "default");
+                        }
+                        continue;
+                    }
+                } else {
+                    vad.update_noise(rms);
+                    speech_hits = speech_hits.saturating_sub(1);
+                    if force_active {
+                        wait_speech_ms += frame_ms;
+                        if wait_speech_ms >= 7000.0 {
+                            println!("[atriai] active listening timeout (7s without speech) -> clock");
+                            break;
+                        }
+                    }
+                }
+                if pre_roll.len() == 16 {
+                    pre_roll.pop_front();
+                }
+                pre_roll.push_back((chunk, rms));
+            } else {
                 speech_hits = 0;
                 buf.extend_from_slice(&chunk);
-                silence_ms += frame_ms;
-                if silence_ms >= max_sil {
+                utt_rms.push(rms);
+                if rms >= keep_thr {
+                    silence_ms = 0.0;
+                } else {
+                    silence_ms += frame_ms;
+                }
+                let utt_ms = (buf.len() as f64) / ((SR * 2) as f64) * 1000.0;
+                if silence_ms >= end_silence_ms {
                     if buf.len() >= min_bytes {
                         break;
                     }
                     speaking = false;
                     buf.clear();
+                    utt_rms.clear();
                     silence_ms = 0.0;
-                    speech_hits = 0;
-                }
-            } else {
-                speech_hits = speech_hits.saturating_sub(1);
-                if pre_roll.len() == 20 {
-                    pre_roll.pop_front();
-                }
-                pre_roll.push_back(chunk);
-                if force_active {
-                    wait_speech_ms += frame_ms;
-                    if wait_speech_ms >= 7000.0 {
-                        println!("[atriai] active listening timeout (7s without speech) -> clock");
-                        break;
-                    }
+                } else if utt_ms >= max_utt_ms {
+                    hit_max_utt = true;
+                    break;
                 }
             }
         }
@@ -1447,6 +1602,29 @@ fn run_daemon() -> i32 {
             continue;
         }
         if speaking && buf.len() >= min_bytes && !is_mic_muted() {
+            let peak_rms = utt_rms.iter().copied().fold(0.0f64, f64::max);
+            let mean_rms = utt_rms.iter().sum::<f64>() / (utt_rms.len().max(1) as f64);
+            if !is_valid_speech(&utt_rms, vad.noise_rms, last_start_thr) {
+                vad.adapt_rejected(mean_rms);
+                if mode == PipelineMode::WakeSpotter && hit_max_utt {
+                    vad.wait_quiet_frames = 10;
+                }
+                if force_active {
+                    set_vad_visual("idle", false, "default");
+                    empty_followups = 0;
+                }
+                println!(
+                    "[vad] rejected flat/noise: peak={peak_rms:.0} mean={mean_rms:.0} noise={:.0} thr={last_start_thr:.0}",
+                    vad.noise_rms
+                );
+                continue;
+            }
+            let dur_ms = (buf.len() * 1000) / (SR * 2);
+            println!(
+                "[vad] speech segment captured: dur_ms={dur_ms} peak_rms={peak_rms:.0} noise_rms={:.0} mode={}",
+                vad.noise_rms,
+                mode.as_str()
+            );
             write_status("thinking", "", "", "");
             if force_active || !wake_required {
                 set_vad_visual("thinking", false, "default");
@@ -1461,12 +1639,14 @@ fn run_daemon() -> i32 {
                     } else if stay_active && force_active && asr.is_empty() && empty_followups < 1 {
                         pend_force_active = true;
                         empty_followups += 1;
-                    } else if force_active && !stay_active {
-                        set_vad_visual("idle", false, "default");
-                        empty_followups = 0;
-                    } else if !pend_force_active && force_active {
-                        set_vad_visual("idle", false, "default");
-                        empty_followups = 0;
+                    } else {
+                        if force_active {
+                            set_vad_visual("idle", false, "default");
+                            empty_followups = 0;
+                        }
+                        if mode == PipelineMode::WakeSpotter && hit_max_utt {
+                            vad.wait_quiet_frames = 10;
+                        }
                     }
                     write_status("listening", &asr, &ans, "");
                 }
@@ -1482,7 +1662,6 @@ fn run_daemon() -> i32 {
             set_vad_visual("idle", false, "default");
             empty_followups = 0;
         }
-        let _ = active_thr;
     }
     stop_capture(&mut proc_child);
     0

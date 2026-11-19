@@ -88,14 +88,39 @@ mod tests {
         assert!(atriai::matches_wake_word("три", "Atri"));
         assert!(atriai::matches_wake_word("матри", "Atri"));
         assert!(atriai::matches_wake_word("мотри", "Atri"));
+        assert!(atriai::matches_wake_word("на три", "Atri"));
         assert!(atriai::matches_wake_word("дизайнератри", "Atri"));
         assert!(!atriai::matches_wake_word("смотри", "Atri"));
         assert!(!atriai::matches_wake_word("atrium hello", "Atri"));
         assert!(!atriai::matches_wake_word("patriarch", "Atri"));
         assert_eq!(atriai::strip_wake_word("Эй, Атри, громче", "Atri"), "громче");
         assert_eq!(atriai::strip_wake_word("три", "Atri"), "");
+        assert_eq!(atriai::strip_wake_word("а три а три", "Atri"), "");
+        assert_eq!(atriai::strip_wake_word("атри атри как дела", "Atri"), "как дела");
         assert_eq!(atriai::strip_wake_word("дизайнератри", "Atri"), "");
         assert_eq!(atriai::strip_wake_word("громче атри", "Atri"), "громче");
+    }
+
+    #[test]
+    fn asr_wav_conditioning_pads_and_normalizes() {
+        // 100 ms soft 1000-amplitude speech (1600 samples) -> must gain normalize & pad >= 1.2s (38444B WAV)
+        let mut pcm = Vec::with_capacity(1600 * 2);
+        for i in 0..1600usize {
+            let s = if i % 2 == 0 { 1100i16 } else { -900i16 };
+            pcm.extend_from_slice(&s.to_le_bytes());
+        }
+        let wav = atriai::prepare_asr_wav(&pcm);
+        assert!(wav.starts_with(b"RIFF"));
+        assert!(wav.len() >= 44 + 19200 * 2);
+        // Leading 120ms (1920 samples) must be zero silence
+        assert!(wav[44..44 + 1920 * 2].iter().all(|&b| b == 0));
+        // Normalized peak should be lifted (> 3500)
+        let peak = wav[44 + 1920 * 2..]
+            .chunks_exact(2)
+            .map(|b| i16::from_le_bytes([b[0], b[1]]).abs())
+            .max()
+            .unwrap_or(0);
+        assert!(peak >= 3500, "expected normalized peak >= 3500, got {peak}");
     }
 
     #[test]
