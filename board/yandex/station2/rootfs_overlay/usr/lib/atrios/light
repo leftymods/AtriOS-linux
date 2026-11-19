@@ -290,6 +290,8 @@ E_EYE_STATES = frozenset(("idle", "listening", "thinking", "speaking", "happy", 
 E_STATES = tuple(sorted(E_EYE_STATES | {"sleep", "boot", "setup", "bt_speaker", "bt_on", "volume",
                                          "timer", "weather", "mic_muted", "updating"}))
 VOICE_LEVEL_FILE = "/var/run/atrios/voice_level"
+BOOTING_FLAG_FILE = "/var/run/atrios/booting"
+SCREEN_MODE_FILE = "/var/run/atrios/screen_mode"
 EYES_UDP_ADDR = ("127.0.0.1", 5055)
 E_ALIASES = {
     "open": "idle", "blink": "idle", "left": "idle", "right": "idle", "up": "idle", "down": "idle",
@@ -336,6 +338,7 @@ class _Eyes:
         self.eq = None
         self.volume = 50
         self.boot_start = self.setup_start = now_ms
+        self.boot_orbit_end = None
         self.sleep_mode, self.sleep_start = "none", 0
         self.manual_gaze = False
         self.tdx = self.tdy = 0
@@ -351,6 +354,7 @@ class _Eyes:
         prev, self.state = self.state, state
         if state == "boot":
             self.boot_start = now_ms
+            self.boot_orbit_end = None
         elif state == "setup":
             self.setup_start = now_ms
         if state == "sleep" and prev in E_EYE_STATES:
@@ -361,7 +365,9 @@ class _Eyes:
             self.sleep_mode = "none"
 
     def boot_done(self, now_ms):
-        return (now_ms - self.boot_start) / 1000.0 > 4.6
+        if self.boot_orbit_end is None:
+            return False
+        return ((now_ms - self.boot_start) / 1000.0 - self.boot_orbit_end) > 1.75
 
     # primitives
     def _px(self, x, y, v=1):
@@ -772,12 +778,18 @@ class _Eyes:
         ph = (now - self.boot_start) / 1000.0
         if ph < 0.75:
             self._beam(ph / 0.75)
-        elif ph < 2.85:
-            self._orbits(ph - 0.75)
-        elif ph < 3.55:
-            p = (ph - 2.85) / 0.7
+            return
+        if self.boot_orbit_end is None:
+            if ph >= 2.85 and (not os.path.exists(BOOTING_FLAG_FILE) or ph >= 25.0):
+                self.boot_orbit_end = ph
+            else:
+                self._orbits(ph - 0.75)
+                return
+        post = ph - self.boot_orbit_end
+        if post < 0.70:
+            p = post / 0.70
             ease = p * p * (3 - 2 * p)
-            ea = 2.1 * 3.8
+            ea = (self.boot_orbit_end - 0.75) * 3.8
             a = (12 + math.sin(ea) * 8.5, 7.5 + math.sin(ea * 2) * 4.2)
             b = (12 + math.sin(ea + math.pi) * 8.5, 7.5 + math.sin((ea + math.pi) * 2) * 4.2)
             l, r = (a, b) if a[0] < b[0] else (b, a)
@@ -787,7 +799,7 @@ class _Eyes:
             self._line(lx - hl, ly, lx + hl, ly)
             self._line(rx - hl, ry, rx + hl, ry)
         else:
-            sub = ph - 3.55
+            sub = post - 0.70
             h = max(1, _rnd(1 + (E_EYE_H - 1) * min(1.0, sub / 0.45)))
             if 0.60 < sub < 0.72 or 0.84 < sub < 0.96:
                 h = 1
@@ -945,6 +957,7 @@ def screen_eyes(state="open", brightness=200, duration=None):
     file_mtime = 0.0
     print(f"[Screen] Eyes: {name}{(':' + eyes.variant) if name == 'speaking' else ''} (brightness={brightness}/255)", flush=True)
     end = time.monotonic() + duration if duration else None
+    boot_idle_until = None
     try:
         while end is None or time.monotonic() < end:
             now = ms()
@@ -959,6 +972,29 @@ def screen_eyes(state="open", brightness=200, duration=None):
             screen_send_frame(eyes.frame_rgb888(brightness))
             if eyes.state == "boot" and eyes.boot_done(now):
                 eyes.set_state("idle", None, now)
+                try:
+                    with open(SCREEN_MODE_FILE) as f:
+                        if f.read().strip() == "boot":
+                            boot_idle_until = time.monotonic() + 1.2
+                except OSError:
+                    pass
+            elif boot_idle_until is not None and time.monotonic() >= boot_idle_until:
+                handover = False
+                try:
+                    with open(SCREEN_MODE_FILE) as f:
+                        if f.read().strip() == "boot":
+                            handover = True
+                except OSError:
+                    pass
+                if handover:
+                    try:
+                        os.makedirs(os.path.dirname(SCREEN_MODE_FILE), exist_ok=True)
+                        with open(SCREEN_MODE_FILE, "w") as f:
+                            f.write("clock")
+                    except OSError:
+                        pass
+                    break
+                boot_idle_until = None
             time.sleep(1.0 / E_FPS)
     except KeyboardInterrupt:
         pass

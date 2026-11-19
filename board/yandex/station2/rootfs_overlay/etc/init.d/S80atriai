@@ -13,6 +13,7 @@ case "$1" in
     else
       echo "[AtriAI] Disabled in /var/lib/atrios/ai.json (skipping)"
     fi
+    rm -f /var/run/atrios/booting 2>/dev/null || true
     ;;
   stop)
     pkill -f "/usr/lib/atrios/atriai daemon" 2>/dev/null || true

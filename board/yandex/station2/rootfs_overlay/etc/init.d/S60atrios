@@ -40,6 +40,7 @@ case "$1" in
     if [ -x /usr/lib/atrios/screend ]; then
       /usr/lib/atrios/screend >/var/log/atrios-screend.log 2>&1 &
     fi
+    (sleep 2; rm -f /var/run/atrios/booting 2>/dev/null || true) >/dev/null 2>&1 &
     ;;
   stop)
     # Turn off LED ring and screen

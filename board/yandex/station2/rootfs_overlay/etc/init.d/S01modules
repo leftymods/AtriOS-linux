@@ -51,22 +51,7 @@ case "$1" in
     depmod -a 2>/dev/null || true
     custom_failed=0
 
-    # 1. Audio drivers & codecs
-    load_mod snd-soc-dmic
-    load_mod snd-soc-pcm1774
-    load_mod snd-soc-pcm1774-i2c
-    load_mod snd-soc-es7210 || custom_failed=1
-    load_mod snd-soc-es8156 || custom_failed=1
-    load_mod snd-soc-sy6045s || custom_failed=1
-    load_mod snd-soc-tas5825m || custom_failed=1
-
-    # 2. Rotary knob & sensors
-    load_mod rotary-volume || custom_failed=1
-    load_mod gpio_keypad || custom_failed=1
-    load_mod quasar_pcba_ids || custom_failed=1
-    load_mod ltr308als01 || custom_failed=1
-
-    # 3. Displays: Gowin 25x16 screen & IS31FL32xx LED ring
+    # 1. Displays: Gowin 25x16 screen & IS31FL32xx LED ring (first, so boot animation starts right away)
     load_mod gowin_led_device || custom_failed=1
     load_mod quasar_led_screen || custom_failed=1
     load_mod leds-is31fl32xx || custom_failed=1
@@ -81,6 +66,42 @@ case "$1" in
       [ -f "$vt/name" ] && grep -q "frame buffer" "$vt/name" || continue
       [ -f "$vt/bind" ] && echo 0 > "$vt/bind" 2>/dev/null || true
     done
+
+    for fb_dir in /sys/class/graphics/fb*; do
+      [ -f "$fb_dir/name" ] || continue
+      fb_name=$(cat "$fb_dir/name" 2>/dev/null | tr '[:upper:]' '[:lower:]')
+      fb_dev="/dev/$(basename "$fb_dir")"
+      case "$fb_name" in
+        *quasar_led_screen*|*gowin*|*screen*|*panel*|*yandex*)
+          ln -sfn "$fb_dev" /dev/fb_screen
+          ;;
+        *led_ring*|*ring*|*is31fl*)
+          ln -sfn "$fb_dev" /dev/fb_ring
+          ;;
+      esac
+    done
+    if [ -e /dev/fb_screen ] && [ -f /usr/lib/atrios/light ]; then
+      mkdir -p /var/run/atrios 2>/dev/null || true
+      : > /var/run/atrios/booting
+      echo "boot" > /var/run/atrios/screen_mode
+      python3 /usr/lib/atrios/light screen eyes boot >/dev/null 2>&1 &
+      echo "$!" > /var/run/atrios/screen_owner.pid
+    fi
+
+    # 2. Audio drivers & codecs
+    load_mod snd-soc-dmic
+    load_mod snd-soc-pcm1774
+    load_mod snd-soc-pcm1774-i2c
+    load_mod snd-soc-es7210 || custom_failed=1
+    load_mod snd-soc-es8156 || custom_failed=1
+    load_mod snd-soc-sy6045s || custom_failed=1
+    load_mod snd-soc-tas5825m || custom_failed=1
+
+    # 3. Rotary knob & sensors
+    load_mod rotary-volume || custom_failed=1
+    load_mod gpio_keypad || custom_failed=1
+    load_mod quasar_pcba_ids || custom_failed=1
+    load_mod ltr308als01 || custom_failed=1
 
     # 4. Wireless (Realtek RTL8822CS) - Power up SDIO & BT reset GPIO
     if [ -x /usr/lib/atrios/wifi-power ]; then
