@@ -399,7 +399,10 @@ pub fn matches_wake_word(text: &str, wake_word: &str) -> bool {
         while idx < words.len() && FILLERS.contains(&words[idx].as_str()) {
             idx += 1;
         }
-        if idx < words.len() && is_fuzzy_atri_token(&words[idx]) {
+        if idx < words.len()
+            && (is_fuzzy_atri_token(&words[idx])
+                || (words.len() > idx + 1 && words[idx] == "адрес"))
+        {
             return true;
         }
         if idx + 1 < words.len() && is_fuzzy_atri_pair(&words[idx], &words[idx + 1]) {
@@ -450,7 +453,7 @@ pub fn strip_wake_word(text: &str, wake_word: &str) -> String {
                 s = toks[2..].join(" ");
                 progressed = true;
             } else if let Some(first) = toks.first() {
-                if is_fuzzy_atri_token(first) {
+                if is_fuzzy_atri_token(first) || (toks.len() >= 2 && first == "адрес") {
                     s = toks[1..].join(" ");
                     progressed = true;
                 }
@@ -847,6 +850,13 @@ fn set_vad_visual(phase: &str, force: bool, variant: &str) {
             vec!["screen".into(), "eyes".into(), format!("speaking:{ev}")],
             "ai",
         ),
+        "bt_on" => (
+            "blue",
+            vec!["ring", "blue"],
+            "eyes_bt_on".into(),
+            vec!["screen".into(), "eyes".into(), "bt_on".into()],
+            "ai",
+        ),
         _ => (
             "off",
             vec!["ring", "off"],
@@ -911,6 +921,7 @@ fn set_vad_visual(phase: &str, force: bool, variant: &str) {
             "vad" => "state:listening\n".to_string(),
             "thinking" => "state:thinking\n".to_string(),
             "speaking" => format!("speaking:{ev}\n"),
+            "bt_on" => "state:bt_on\n".to_string(),
             _ => "state:idle\n".to_string(),
         };
         let screen_alive = v
@@ -1420,45 +1431,143 @@ fn play_audio_bytes(
     res
 }
 
-fn tone_pcm16(freq: f64, dur_ms: usize) -> Vec<u8> {
+struct SynthVoice {
+    start_ms: usize,
+    dur_ms: usize,
+    f0: f64,
+    f1: f64,
+    amp: f64,
+    harm2: f64,
+    harm3: f64,
+    decay: f64,
+}
+
+fn render_synth_chime(voices: &[SynthVoice]) -> Vec<u8> {
     let sr = 48000usize;
-    let n = (sr * dur_ms / 1000).max(1);
-    let fade = (sr * 10 / 1000).clamp(1, (n / 4).max(1));
-    let mut out = Vec::with_capacity(n * 2);
-    let w = 2.0 * std::f64::consts::PI * freq / (sr as f64);
-    for i in 0..n {
-        let env = if i < fade {
-            (i as f64) / (fade as f64)
-        } else if i >= n - fade {
-            ((n - 1 - i) as f64) / (fade as f64)
-        } else {
-            1.0
-        };
-        let s = (5500.0 * env * (w * (i as f64)).sin()) as i16;
-        out.extend_from_slice(&s.to_le_bytes());
+    let total_ms = voices
+        .iter()
+        .map(|v| v.start_ms + v.dur_ms)
+        .max()
+        .unwrap_or(80)
+        + 15;
+    let total_samples = (sr * total_ms / 1000).max(1);
+    let mut mix = vec![0.0f64; total_samples];
+    for v in voices {
+        let s0 = sr * v.start_ms / 1000;
+        let len = (sr * v.dur_ms / 1000).max(1);
+        let attack = (sr * 6 / 1000).clamp(1, (len / 4).max(1));
+        let release = (sr * 18 / 1000).clamp(1, (len / 2).max(1));
+        let mut phase = 0.0f64;
+        for i in 0..len {
+            let idx = s0 + i;
+            if idx >= total_samples {
+                break;
+            }
+            let frac = (i as f64) / (len as f64);
+            let freq = v.f0 + (v.f1 - v.f0) * frac;
+            phase += 2.0 * std::f64::consts::PI * freq / (sr as f64);
+            let atk = if i < attack { (i as f64) / (attack as f64) } else { 1.0 };
+            let rel = if i >= len - release {
+                ((len - 1 - i) as f64) / (release as f64)
+            } else {
+                1.0
+            };
+            let dec = (-v.decay * frac).exp();
+            let wave = phase.sin() + v.harm2 * (2.0 * phase).sin() + v.harm3 * (3.0 * phase).sin();
+            mix[idx] += v.amp * atk * rel * dec * wave;
+        }
+    }
+    let mut out = Vec::with_capacity(total_samples * 2);
+    for s in mix {
+        let soft = 22000.0 * (s / 22000.0).tanh();
+        let v = soft.round().clamp(-32767.0, 32767.0) as i16;
+        out.extend_from_slice(&v.to_le_bytes());
     }
     out
 }
 
-fn play_command_chime(action: &str) {
-    let notes: &[(f64, usize)] = match action {
-        "volume_up" => &[(523.25, 55), (659.25, 80)],
-        "volume_down" => &[(659.25, 55), (523.25, 80)],
-        "next_track" => &[(587.33, 50), (880.00, 75)],
-        "prev_track" => &[(880.00, 50), (587.33, 75)],
-        "pause" => &[(440.00, 85)],
-        "play" => &[(440.00, 50), (554.37, 75)],
-        "bt_on" => &[(440.00, 50), (554.37, 55), (659.25, 80)],
-        "bt_off" => &[(659.25, 50), (554.37, 55), (440.00, 80)],
-        _ => &[(587.33, 70)],
-    };
-    let mut pcm = Vec::new();
-    let gap_bytes = (48000 * 18 / 1000) * 2;
-    for (idx, &(f, ms)) in notes.iter().enumerate() {
-        if idx > 0 {
-            pcm.extend(std::iter::repeat(0u8).take(gap_bytes));
+pub fn build_chime_pcm(action: &str, vol_pct: Option<i32>) -> Vec<u8> {
+    let v_norm = vol_pct.unwrap_or(50).clamp(0, 100) as f64 / 100.0;
+    let voices: Vec<SynthVoice> = match action {
+        // Crystal rising two-step chime with soft upper shimmer
+        "wake" => vec![
+            SynthVoice { start_ms: 0, dur_ms: 95, f0: 523.25, f1: 528.0, amp: 4600.0, harm2: 0.22, harm3: 0.08, decay: 2.2 },
+            SynthVoice { start_ms: 52, dur_ms: 140, f0: 783.99, f1: 783.99, amp: 4800.0, harm2: 0.18, harm3: 0.10, decay: 2.8 },
+            SynthVoice { start_ms: 68, dur_ms: 150, f0: 1046.50, f1: 1046.50, amp: 2400.0, harm2: 0.10, harm3: 0.0, decay: 3.4 },
+        ],
+        // Pitch-scaled ascending marimba/bell pop for volume up
+        "volume_up" => {
+            let base = 420.0 + v_norm * 360.0;
+            vec![
+                SynthVoice { start_ms: 0, dur_ms: 65, f0: base, f1: base * 1.08, amp: 4800.0, harm2: 0.28, harm3: 0.06, decay: 3.6 },
+                SynthVoice { start_ms: 42, dur_ms: 105, f0: base * 1.25, f1: base * 1.26, amp: 5200.0, harm2: 0.20, harm3: 0.08, decay: 3.2 },
+            ]
         }
-        pcm.extend_from_slice(&tone_pcm16(f, ms));
+        // Pitch-scaled descending warm woodblock/bell drop for volume down
+        "volume_down" => {
+            let base = 340.0 + v_norm * 320.0;
+            if vol_pct == Some(0) {
+                vec![
+                    SynthVoice { start_ms: 0, dur_ms: 90, f0: 320.0, f1: 210.0, amp: 4600.0, harm2: 0.12, harm3: 0.0, decay: 3.8 },
+                    SynthVoice { start_ms: 55, dur_ms: 120, f0: 196.0, f1: 165.0, amp: 4200.0, harm2: 0.08, harm3: 0.0, decay: 4.0 },
+                ]
+            } else {
+                vec![
+                    SynthVoice { start_ms: 0, dur_ms: 65, f0: base * 1.22, f1: base * 1.15, amp: 4600.0, harm2: 0.22, harm3: 0.04, decay: 3.6 },
+                    SynthVoice { start_ms: 42, dur_ms: 110, f0: base * 0.96, f1: base * 0.92, amp: 4800.0, harm2: 0.16, harm3: 0.03, decay: 3.4 },
+                ]
+            }
+        }
+        // Futuristic 4-note rising major-9th arpeggio for Bluetooth ON
+        "bt_on" => vec![
+            SynthVoice { start_ms: 0, dur_ms: 90, f0: 587.33, f1: 587.33, amp: 4200.0, harm2: 0.24, harm3: 0.08, decay: 2.6 },
+            SynthVoice { start_ms: 58, dur_ms: 100, f0: 739.99, f1: 739.99, amp: 4400.0, harm2: 0.22, harm3: 0.08, decay: 2.6 },
+            SynthVoice { start_ms: 116, dur_ms: 130, f0: 880.00, f1: 880.00, amp: 4600.0, harm2: 0.18, harm3: 0.10, decay: 2.8 },
+            SynthVoice { start_ms: 170, dur_ms: 190, f0: 1318.51, f1: 1318.51, amp: 3600.0, harm2: 0.12, harm3: 0.05, decay: 3.2 },
+            SynthVoice { start_ms: 170, dur_ms: 190, f0: 587.33, f1: 587.33, amp: 2400.0, harm2: 0.10, harm3: 0.0, decay: 3.0 },
+        ],
+        // Smooth descending triad power-down for Bluetooth OFF
+        "bt_off" => vec![
+            SynthVoice { start_ms: 0, dur_ms: 85, f0: 880.00, f1: 865.0, amp: 4200.0, harm2: 0.18, harm3: 0.05, decay: 2.8 },
+            SynthVoice { start_ms: 60, dur_ms: 95, f0: 659.25, f1: 645.0, amp: 4200.0, harm2: 0.16, harm3: 0.04, decay: 3.0 },
+            SynthVoice { start_ms: 120, dur_ms: 155, f0: 440.00, f1: 415.0, amp: 4000.0, harm2: 0.12, harm3: 0.0, decay: 3.2 },
+        ],
+        // Upbeat staccato forward chirp for next track
+        "next_track" => vec![
+            SynthVoice { start_ms: 0, dur_ms: 52, f0: 659.25, f1: 740.0, amp: 4600.0, harm2: 0.25, harm3: 0.10, decay: 4.0 },
+            SynthVoice { start_ms: 50, dur_ms: 85, f0: 987.77, f1: 1046.5, amp: 4800.0, harm2: 0.20, harm3: 0.08, decay: 3.5 },
+        ],
+        // Rewind double-tap chirp for previous track
+        "prev_track" => vec![
+            SynthVoice { start_ms: 0, dur_ms: 52, f0: 987.77, f1: 880.0, amp: 4600.0, harm2: 0.22, harm3: 0.08, decay: 4.0 },
+            SynthVoice { start_ms: 50, dur_ms: 85, f0: 659.25, f1: 587.33, amp: 4800.0, harm2: 0.18, harm3: 0.06, decay: 3.5 },
+        ],
+        // Warm major-third bloom for play/resume
+        "play" => vec![
+            SynthVoice { start_ms: 0, dur_ms: 110, f0: 523.25, f1: 523.25, amp: 3800.0, harm2: 0.20, harm3: 0.06, decay: 2.8 },
+            SynthVoice { start_ms: 28, dur_ms: 120, f0: 659.25, f1: 659.25, amp: 4000.0, harm2: 0.18, harm3: 0.06, decay: 2.8 },
+            SynthVoice { start_ms: 62, dur_ms: 130, f0: 783.99, f1: 783.99, amp: 3400.0, harm2: 0.12, harm3: 0.04, decay: 3.2 },
+        ],
+        // Soft damped settle for pause
+        "pause" => vec![
+            SynthVoice { start_ms: 0, dur_ms: 75, f0: 783.99, f1: 770.0, amp: 4200.0, harm2: 0.15, harm3: 0.04, decay: 3.4 },
+            SynthVoice { start_ms: 55, dur_ms: 110, f0: 587.33, f1: 575.0, amp: 3800.0, harm2: 0.12, harm3: 0.0, decay: 3.6 },
+        ],
+        // Subtle, quiet low dismiss for stop/cancel
+        "cancel" => vec![
+            SynthVoice { start_ms: 0, dur_ms: 65, f0: 440.00, f1: 415.0, amp: 3000.0, harm2: 0.12, harm3: 0.0, decay: 3.8 },
+            SynthVoice { start_ms: 48, dur_ms: 95, f0: 329.63, f1: 311.13, amp: 2800.0, harm2: 0.10, harm3: 0.0, decay: 4.0 },
+        ],
+        _ => vec![
+            SynthVoice { start_ms: 0, dur_ms: 85, f0: 587.33, f1: 587.33, amp: 4200.0, harm2: 0.18, harm3: 0.05, decay: 3.0 },
+        ],
+    };
+    render_synth_chime(&voices)
+}
+
+fn play_pcm_48k(pcm: &[u8]) {
+    if pcm.is_empty() {
+        return;
     }
     if let Ok(mut child) = Command::new("aplay")
         .args(["-q", "-t", "raw", "-f", "S16_LE", "-r", "48000", "-c", "1"])
@@ -1468,15 +1577,26 @@ fn play_command_chime(action: &str) {
         .spawn()
     {
         if let Some(mut sin) = child.stdin.take() {
-            let _ = sin.write_all(&pcm);
+            let _ = sin.write_all(pcm);
         }
         let _ = child.wait();
     }
     drain_capture_fd_now();
 }
 
+fn play_command_chime(action: &str) {
+    let pcm = build_chime_pcm(action, None);
+    play_pcm_48k(&pcm);
+}
+
+fn play_volume_chime(cur: i32, nxt: i32) {
+    let action = if nxt < cur || nxt == 0 { "volume_down" } else { "volume_up" };
+    let pcm = build_chime_pcm(action, Some(nxt));
+    play_pcm_48k(&pcm);
+}
+
 fn execute_device_command(cmd: DeviceCommand) {
-    let chime = match cmd {
+    match cmd {
         DeviceCommand::NextTrack | DeviceCommand::PrevTrack | DeviceCommand::Pause | DeviceCommand::Play => {
             let (sock_cmd, ch) = match cmd {
                 DeviceCommand::NextTrack => ("next", "next_track"),
@@ -1490,7 +1610,7 @@ fn execute_device_command(cmd: DeviceCommand) {
                     let _ = sock.send_to(sock_cmd.as_bytes(), BT_CMD_SOCK);
                 }
             }
-            ch
+            play_command_chime(ch);
         }
         DeviceCommand::VolumeUp(step) => {
             let cur = fs::read_to_string(VOLUME_FILE)
@@ -1504,7 +1624,7 @@ fn execute_device_command(cmd: DeviceCommand) {
                 .stderr(Stdio::null())
                 .status();
             println!("[atriai] volume: {cur}% -> {nxt}%");
-            "volume_up"
+            play_volume_chime(cur, nxt);
         }
         DeviceCommand::VolumeDown(step) => {
             let cur = fs::read_to_string(VOLUME_FILE)
@@ -1518,7 +1638,7 @@ fn execute_device_command(cmd: DeviceCommand) {
                 .stderr(Stdio::null())
                 .status();
             println!("[atriai] volume: {cur}% -> {nxt}%");
-            "volume_down"
+            play_volume_chime(cur, nxt);
         }
         DeviceCommand::VolumeSet(target) => {
             let cur = fs::read_to_string(VOLUME_FILE)
@@ -1532,19 +1652,22 @@ fn execute_device_command(cmd: DeviceCommand) {
                 .stderr(Stdio::null())
                 .status();
             println!("[atriai] volume: {cur}% -> {nxt}%");
-            if nxt >= cur { "volume_up" } else { "volume_down" }
+            play_volume_chime(cur, nxt);
         }
         DeviceCommand::BluetoothOn => {
+            set_vad_visual("bt_on", false, "default");
             let _ = Command::new("/bin/sh")
                 .args([
                     "-c",
-                    "/usr/lib/atrios/wireless bt speaker on >/dev/null 2>&1 && /usr/lib/atrios/wireless bt pair 120 >/dev/null 2>&1",
+                    "/usr/lib/atrios/wireless bt speaker on >>/var/log/atriai.log 2>&1 && /usr/lib/atrios/wireless bt pair 120 >>/var/log/atriai.log 2>&1",
                 ])
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .spawn();
-            println!("[atriai] bluetooth: speaker ON + pairing window open (120s)");
-            "bt_on"
+            println!("[atriai] bluetooth: speaker ON + pairing window open (120s) + bt_on animation");
+            play_command_chime("bt_on");
+            thread::sleep(Duration::from_millis(2000));
+            drain_capture_fd_now();
         }
         DeviceCommand::BluetoothOff => {
             if Path::new(BT_CMD_SOCK).exists() {
@@ -1555,16 +1678,15 @@ fn execute_device_command(cmd: DeviceCommand) {
             let _ = Command::new("/bin/sh")
                 .args([
                     "-c",
-                    "/usr/lib/atrios/wireless bt speaker off >/dev/null 2>&1 && /usr/lib/atrios/wireless bt hide >/dev/null 2>&1",
+                    "/usr/lib/atrios/wireless bt speaker off >>/var/log/atriai.log 2>&1 && /usr/lib/atrios/wireless bt hide >>/var/log/atriai.log 2>&1",
                 ])
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .spawn();
             println!("[atriai] bluetooth: speaker OFF (hidden)");
-            "bt_off"
+            play_command_chime("bt_off");
         }
-    };
-    play_command_chime(chime);
+    }
 }
 
 static VOICE_BUSY: AtomicBool = AtomicBool::new(false);
@@ -1694,7 +1816,7 @@ fn send_phrase_to_server(
             keep_listening = true;
             println!("[wake] activated ({text:?}) -> ActiveCommand (7s)");
             set_vad_visual("vad", false, "default");
-            play_command_chime("play");
+            play_command_chime("wake");
             drain_capture_fd_now();
             set_error("voice", None, "", 120);
             return Ok((text, String::new(), true));
@@ -1703,6 +1825,7 @@ fn send_phrase_to_server(
         if is_cancel_phrase(&clean_query) {
             println!("[atriai] cancelled by phrase ({text:?}) -> idle");
             keep_listening = false;
+            play_command_chime("cancel");
             set_error("voice", None, "", 15);
             return Ok((text, String::new(), false));
         }

@@ -187,9 +187,6 @@ case "$CMD" in
         echo "Bluetooth controller ready ($(cat /tmp/atrios_bt_state))"
       fi
     elif [ "$SUBCMD" = "visible" ] || [ "$SUBCMD" = "speaker" ]; then
-      if [ -x /usr/bin/bt-visible ]; then
-        /usr/bin/bt-visible "Yandex Station Max"
-      fi
       MODE="${3:-on}"
       if [ "$MODE" = "on" ] || [ "$MODE" = "start" ]; then
         echo "=========================================================="
@@ -198,13 +195,44 @@ case "$CMD" in
         if [ ! -e /sys/class/bluetooth/hci0 ]; then
           bt_do_init
         fi
+        if [ -e /sys/class/bluetooth/hci0 ] && command -v hciconfig >/dev/null 2>&1; then
+          if ! hciconfig hci0 2>/dev/null | grep -q "UP RUNNING"; then
+            if ! hciconfig hci0 up 2>/dev/null; then
+              echo "hci0 wedged DOWN; rebinding hci_uart_h5 (serial0-0)..."
+              killall bt-speaker-daemon 2>/dev/null || true
+              pkill -f /usr/lib/atrios/bt-control 2>/dev/null || true
+              sleep 0.3
+              if [ -e /sys/bus/serial/drivers/hci_uart_h5/serial0-0 ]; then
+                echo serial0-0 > /sys/bus/serial/drivers/hci_uart_h5/unbind 2>/dev/null || true
+                sleep 0.5
+                echo serial0-0 > /sys/bus/serial/drivers/hci_uart_h5/bind 2>/dev/null || true
+                for i in 1 2 3 4 5; do
+                  sleep 1
+                  [ -e /sys/class/bluetooth/hci0 ] && break
+                done
+              fi
+              for i in 1 2 3; do
+                hciconfig hci0 up 2>/dev/null && break
+                sleep 1
+              done
+            fi
+          fi
+        fi
         if [ -e /sys/class/bluetooth/hci0 ]; then
+          DEV_NAME="AtriStation"
+          if [ -f /etc/atrios-device ]; then
+            . /etc/atrios-device 2>/dev/null || true
+            [ -n "$DEVICE_NAME" ] && DEV_NAME="$DEVICE_NAME"
+          fi
           hciconfig hci0 up 2>/dev/null || true
           hciconfig hci0 class 0x240414 2>/dev/null || true
-          hciconfig hci0 name "Yandex Station Max" 2>/dev/null || true
+          hciconfig hci0 name "$DEV_NAME" 2>/dev/null || true
           hciconfig hci0 piscan 2>/dev/null || true
           hciconfig hci0 sspmode 1 2>/dev/null || true
           hciconfig hci0 noauth 2>/dev/null || true
+          if [ -x /usr/bin/bt-visible ]; then
+            /usr/bin/bt-visible "$DEV_NAME" >/dev/null 2>&1 || true
+          fi
           command -v gdbus >/dev/null 2>&1 && {
             gdbus call --system --dest org.bluez --object-path /org/bluez/hci0 --method org.freedesktop.DBus.Properties.Set org.bluez.Adapter1 Pairable '<true>' >/dev/null 2>&1 || true
             gdbus call --system --dest org.bluez --object-path /org/bluez/hci0 --method org.freedesktop.DBus.Properties.Set org.bluez.Adapter1 Discoverable '<true>' >/dev/null 2>&1 || true

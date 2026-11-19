@@ -185,6 +185,9 @@ mod tests {
 
         assert!(matches_wake_word("адре", "Atri"));
         assert!(matches_wake_word("эй адре какая погода", "Atri"));
+        assert!(matches_wake_word("адрес сделай громкость десять", "Atri"));
+        assert!(!matches_wake_word("адрес", "Atri"));
+        assert_eq!(strip_wake_word("адрес сделай громкость десять", "Atri"), "сделай громкость десять");
         assert!(matches_wake_word("одри привет", "Atri"));
         assert!(!matches_wake_word("утром прохладно", "Atri"));
         assert!(!matches_wake_word("внутри пусто", "Atri"));
@@ -204,6 +207,19 @@ mod tests {
             split_trailing_stop("какая погода хватит", "Atri"),
             ("какая погода".to_string(), true)
         );
+
+        let c_wake = atriai::build_chime_pcm("wake", None);
+        let c_up_lo = atriai::build_chime_pcm("volume_up", Some(15));
+        let c_up_hi = atriai::build_chime_pcm("volume_up", Some(85));
+        let c_dn = atriai::build_chime_pcm("volume_down", Some(10));
+        let c_bt_on = atriai::build_chime_pcm("bt_on", None);
+        let c_bt_off = atriai::build_chime_pcm("bt_off", None);
+        let c_cancel = atriai::build_chime_pcm("cancel", None);
+        assert!(c_wake.len() > 4000 && c_bt_on.len() > 8000 && c_cancel.len() > 2000);
+        assert_ne!(c_up_lo, c_up_hi);
+        assert_ne!(c_up_lo, c_dn);
+        assert_ne!(c_bt_on, c_bt_off);
+        assert_ne!(c_wake, c_cancel);
     }
 
     #[test]
