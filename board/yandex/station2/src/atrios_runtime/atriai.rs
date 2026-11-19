@@ -814,7 +814,7 @@ fn send_voice_level(level: Option<f64>) {
     }
 }
 
-fn set_vad_visual(phase: &str, force: bool, variant: &str) {
+pub fn set_vad_visual(phase: &str, force: bool, variant: &str) {
     let ev = match variant.trim().to_ascii_lowercase().as_str() {
         "happy" => "happy",
         "sad" => "sad",
@@ -1222,27 +1222,40 @@ fn play_audio_bytes(
         let ca = s_ca.clone();
         let ans = s_ans.clone();
         thread::spawn(move || {
-            let wav = prepare_asr_wav(&pcm);
-            let auth = format!("Bearer {tok}");
-            let mut h = vec![("Content-Type", "audio/wav"), ("Accept", "application/json")];
-            if !tok.is_empty() {
-                h.push(("Authorization", &auth));
-            }
-            let ca_opt = if ca.is_empty() { None } else { Some(ca.as_str()) };
-            let hit = match request_bytes(&format!("{b}/asr"), Some(&wav), &h, ca_opt, 4, 65536, None) {
-                Ok(raw) => {
-                    let txt = String::from_utf8(raw)
-                        .ok()
-                        .and_then(|s| Json::parse(&s).ok())
-                        .and_then(|j| j.get_str("text").map(str::to_string))
-                        .unwrap_or_default();
-                    let t = txt.trim();
-                    if !t.is_empty() {
-                        println!("[tts-barge] asr={t:?}");
+            let hit = if crate::local_stt::is_available() {
+                match crate::local_stt::transcribe_pcm16(&pcm) {
+                    Ok(txt) => {
+                        let t = txt.trim();
+                        if !t.is_empty() {
+                            println!("[tts-barge-local] asr={t:?}");
+                        }
+                        is_barge_in_stop(t, &ans)
                     }
-                    is_barge_in_stop(t, &ans)
+                    Err(_) => false,
                 }
-                Err(_) => false,
+            } else {
+                let wav = prepare_asr_wav(&pcm);
+                let auth = format!("Bearer {tok}");
+                let mut h = vec![("Content-Type", "audio/wav"), ("Accept", "application/json")];
+                if !tok.is_empty() {
+                    h.push(("Authorization", &auth));
+                }
+                let ca_opt = if ca.is_empty() { None } else { Some(ca.as_str()) };
+                match request_bytes(&format!("{b}/asr"), Some(&wav), &h, ca_opt, 4, 65536, None) {
+                    Ok(raw) => {
+                        let txt = String::from_utf8(raw)
+                            .ok()
+                            .and_then(|s| Json::parse(&s).ok())
+                            .and_then(|j| j.get_str("text").map(str::to_string))
+                            .unwrap_or_default();
+                        let t = txt.trim();
+                        if !t.is_empty() {
+                            println!("[tts-barge] asr={t:?}");
+                        }
+                        is_barge_in_stop(t, &ans)
+                    }
+                    Err(_) => false,
+                }
             };
             let _ = tx.send(hit);
         });
@@ -1558,6 +1571,47 @@ pub fn build_chime_pcm(action: &str, vol_pct: Option<i32>) -> Vec<u8> {
             SynthVoice { start_ms: 0, dur_ms: 65, f0: 440.00, f1: 415.0, amp: 3000.0, harm2: 0.12, harm3: 0.0, decay: 3.8 },
             SynthVoice { start_ms: 48, dur_ms: 95, f0: 329.63, f1: 311.13, amp: 2800.0, harm2: 0.10, harm3: 0.0, decay: 4.0 },
         ],
+        // Bright confirmation chime for setting a timer
+        "timer_set" => vec![
+            SynthVoice { start_ms: 0, dur_ms: 70, f0: 659.25, f1: 659.25, amp: 4400.0, harm2: 0.24, harm3: 0.08, decay: 3.4 },
+            SynthVoice { start_ms: 55, dur_ms: 70, f0: 880.00, f1: 880.00, amp: 4600.0, harm2: 0.20, harm3: 0.08, decay: 3.2 },
+            SynthVoice { start_ms: 110, dur_ms: 130, f0: 1174.66, f1: 1174.66, amp: 4000.0, harm2: 0.15, harm3: 0.06, decay: 3.0 },
+        ],
+        // Warm morning chord for setting an alarm
+        "alarm_set" => vec![
+            SynthVoice { start_ms: 0, dur_ms: 90, f0: 523.25, f1: 523.25, amp: 4200.0, harm2: 0.22, harm3: 0.08, decay: 2.6 },
+            SynthVoice { start_ms: 65, dur_ms: 95, f0: 659.25, f1: 659.25, amp: 4400.0, harm2: 0.20, harm3: 0.08, decay: 2.6 },
+            SynthVoice { start_ms: 130, dur_ms: 165, f0: 1046.50, f1: 1046.50, amp: 4200.0, harm2: 0.16, harm3: 0.06, decay: 2.8 },
+            SynthVoice { start_ms: 130, dur_ms: 165, f0: 783.99, f1: 783.99, amp: 2800.0, harm2: 0.10, harm3: 0.0, decay: 2.8 },
+        ],
+        // Repeating bell pattern for timer completion
+        "timer_ring" => vec![
+            SynthVoice { start_ms: 0, dur_ms: 110, f0: 880.00, f1: 880.00, amp: 5200.0, harm2: 0.25, harm3: 0.12, decay: 3.0 },
+            SynthVoice { start_ms: 120, dur_ms: 110, f0: 1174.66, f1: 1174.66, amp: 5200.0, harm2: 0.22, harm3: 0.12, decay: 3.0 },
+            SynthVoice { start_ms: 250, dur_ms: 180, f0: 880.00, f1: 880.00, amp: 4800.0, harm2: 0.22, harm3: 0.10, decay: 2.6 },
+            SynthVoice { start_ms: 250, dur_ms: 180, f0: 1318.51, f1: 1318.51, amp: 3600.0, harm2: 0.14, harm3: 0.06, decay: 2.8 },
+        ],
+        // Melodic gentle wake-up alarm phrase
+        "alarm_ring" => vec![
+            SynthVoice { start_ms: 0, dur_ms: 120, f0: 523.25, f1: 523.25, amp: 4800.0, harm2: 0.24, harm3: 0.08, decay: 2.5 },
+            SynthVoice { start_ms: 110, dur_ms: 120, f0: 659.25, f1: 659.25, amp: 5000.0, harm2: 0.22, harm3: 0.08, decay: 2.5 },
+            SynthVoice { start_ms: 220, dur_ms: 130, f0: 783.99, f1: 783.99, amp: 5200.0, harm2: 0.20, harm3: 0.10, decay: 2.4 },
+            SynthVoice { start_ms: 330, dur_ms: 220, f0: 1046.50, f1: 1046.50, amp: 5000.0, harm2: 0.16, harm3: 0.08, decay: 2.4 },
+        ],
+        // Short clean UI tick for time/date/query
+        "tick" => vec![
+            SynthVoice { start_ms: 0, dur_ms: 55, f0: 783.99, f1: 810.0, amp: 3800.0, harm2: 0.18, harm3: 0.05, decay: 4.5 },
+        ],
+        // Sparkling chord for LED ring color change
+        "ring_mode" => vec![
+            SynthVoice { start_ms: 0, dur_ms: 85, f0: 587.33, f1: 587.33, amp: 3800.0, harm2: 0.22, harm3: 0.08, decay: 3.0 },
+            SynthVoice { start_ms: 40, dur_ms: 115, f0: 880.00, f1: 880.00, amp: 4000.0, harm2: 0.18, harm3: 0.10, decay: 3.0 },
+        ],
+        // Soft polite double-tap when remote LLM server is offline
+        "offline" => vec![
+            SynthVoice { start_ms: 0, dur_ms: 70, f0: 392.00, f1: 370.0, amp: 3200.0, harm2: 0.12, harm3: 0.0, decay: 3.8 },
+            SynthVoice { start_ms: 95, dur_ms: 95, f0: 329.63, f1: 311.13, amp: 3000.0, harm2: 0.10, harm3: 0.0, decay: 4.0 },
+        ],
         _ => vec![
             SynthVoice { start_ms: 0, dur_ms: 85, f0: 587.33, f1: 587.33, amp: 4200.0, harm2: 0.18, harm3: 0.05, decay: 3.0 },
         ],
@@ -1584,7 +1638,7 @@ fn play_pcm_48k(pcm: &[u8]) {
     drain_capture_fd_now();
 }
 
-fn play_command_chime(action: &str) {
+pub fn play_command_chime(action: &str) {
     let pcm = build_chime_pcm(action, None);
     play_pcm_48k(&pcm);
 }
@@ -1769,35 +1823,59 @@ fn send_phrase_to_server(
     wake_word: &str,
     force_active: bool,
 ) -> Result<(String, String, bool), String> {
-    require_https(server_url)?;
     if pcm.len() > SR * 2 * 30 || pcm.len() % 2 != 0 {
         return Err("Invalid or oversized PCM16 phrase".into());
     }
+    let has_remote = require_https(server_url).is_ok();
+    let use_local_stt = crate::local_stt::is_available();
+    if !use_local_stt && !has_remote {
+        return Err("No local STT model and no HTTPS server configured".into());
+    }
     let cfg = load_config();
     let base = server_url.trim_end_matches('/').to_string();
-    let wav = prepare_asr_wav(pcm);
     let mut keep_listening = false;
     let mut user_addressed = force_active || wake_word.is_empty();
 
     let res: Result<(String, String, bool), String> = (|| {
-        let base1 = base.clone();
-        let tok1 = cfg.token.clone();
-        let ca1 = cfg.ca_file.clone();
-        let raw_asr = voice_call(move || {
-            let auth = format!("Bearer {tok1}");
-            let mut h = vec![("Content-Type", "audio/wav"), ("Accept", "application/json")];
-            if !tok1.is_empty() {
-                h.push(("Authorization", &auth));
-            }
-            let ca = if ca1.is_empty() { None } else { Some(ca1.as_str()) };
-            request_bytes(&format!("{base1}/asr"), Some(&wav), &h, ca, 25, 65536, None)
-        })?;
-        let rec_txt = String::from_utf8(raw_asr).map_err(|_| "Invalid UTF-8 ASR response")?;
-        let rec = Json::parse(&rec_txt)?;
-        let text = rec.get_str("text").ok_or("Invalid ASR response")?.trim().to_string();
-        println!("[stt] text={text:?}");
+        let text = if use_local_stt {
+            let t = crate::local_stt::transcribe_pcm16(pcm)?;
+            println!("[local-stt] text={t:?}");
+            t
+        } else {
+            let wav = prepare_asr_wav(pcm);
+            let base1 = base.clone();
+            let tok1 = cfg.token.clone();
+            let ca1 = cfg.ca_file.clone();
+            let raw_asr = voice_call(move || {
+                let auth = format!("Bearer {tok1}");
+                let mut h = vec![("Content-Type", "audio/wav"), ("Accept", "application/json")];
+                if !tok1.is_empty() {
+                    h.push(("Authorization", &auth));
+                }
+                let ca = if ca1.is_empty() { None } else { Some(ca1.as_str()) };
+                request_bytes(&format!("{base1}/asr"), Some(&wav), &h, ca, 25, 65536, None)
+            })?;
+            let rec_txt = String::from_utf8(raw_asr).map_err(|_| "Invalid UTF-8 ASR response")?;
+            let rec = Json::parse(&rec_txt)?;
+            let t = rec.get_str("text").ok_or("Invalid ASR response")?.trim().to_string();
+            println!("[stt] text={t:?}");
+            t
+        };
+
+        if crate::local_ai::is_ringing()
+            && (is_cancel_phrase(&text)
+                || text.contains("стоп")
+                || text.contains("выключи")
+                || text.contains("хватит")
+                || text.contains("тихо"))
+        {
+            crate::local_ai::stop_ringing();
+            keep_listening = false;
+            return Ok((text, String::new(), false));
+        }
+
         if text.is_empty() {
-            set_error("voice", None, "", 120);
+            set_error("voice", None, "", 15);
             if force_active {
                 keep_listening = true;
                 set_vad_visual("vad", false, "default");
@@ -1807,7 +1885,7 @@ fn send_phrase_to_server(
         }
         if !wake_word.is_empty() && !matches_wake_word(&text, wake_word) {
             println!("[wake] ignored background speech ({wake_word:?}): {text:?}");
-            set_error("voice", None, "", 120);
+            set_error("voice", None, "", 15);
             return Ok((text, String::new(), false));
         }
         user_addressed = true;
@@ -1818,7 +1896,7 @@ fn send_phrase_to_server(
             set_vad_visual("vad", false, "default");
             play_command_chime("wake");
             drain_capture_fd_now();
-            set_error("voice", None, "", 120);
+            set_error("voice", None, "", 15);
             return Ok((text, String::new(), true));
         }
         let (clean_query, has_trailing_stop) = split_trailing_stop(&text, wake_word);
@@ -1829,14 +1907,32 @@ fn send_phrase_to_server(
             set_error("voice", None, "", 15);
             return Ok((text, String::new(), false));
         }
-        if let Some(cmd) = local_command(&text, wake_word) {
-            execute_device_command(cmd);
-            set_error("voice", None, "", 120);
+        if let Some(intent) = crate::local_ai::parse_local_intent(&text, wake_word) {
+            crate::local_ai::execute_local_intent(intent);
+            set_error("voice", None, "", 15);
             if !has_trailing_stop && force_active {
                 keep_listening = true;
                 set_vad_visual("vad", false, "default");
                 return Ok((text, String::new(), true));
             }
+            keep_listening = false;
+            return Ok((text, String::new(), false));
+        }
+        if let Some(cmd) = local_command(&text, wake_word) {
+            execute_device_command(cmd);
+            set_error("voice", None, "", 15);
+            if !has_trailing_stop && force_active {
+                keep_listening = true;
+                set_vad_visual("vad", false, "default");
+                return Ok((text, String::new(), true));
+            }
+            keep_listening = false;
+            return Ok((text, String::new(), false));
+        }
+
+        if !has_remote {
+            println!("[local-ai] unhandled phrase in offline mode: {clean_query:?}");
+            play_command_chime("offline");
             keep_listening = false;
             return Ok((text, String::new(), false));
         }
@@ -1916,7 +2012,12 @@ fn send_phrase_to_server(
 
     if let Err(ref e) = res {
         if user_addressed && !e.starts_with("InterruptedError") {
-            set_error("voice", Some(error_kind_from_msg(e, "server")), e, 15);
+            if use_local_stt {
+                println!("[local-ai] remote AtriAI unreachable ({e}); staying in local offline mode");
+                play_command_chime("offline");
+            } else {
+                set_error("voice", Some(error_kind_from_msg(e, "server")), e, 15);
+            }
         }
     }
     if !keep_listening {
@@ -2113,7 +2214,13 @@ fn run_daemon() -> i32 {
         println!("[atriai] Disabled in config; exiting.");
         return 0;
     }
-    println!("[atriai] Starting voice client -> {}", cfg0.server);
+    let local_ok = crate::local_stt::init();
+    crate::local_ai::start_scheduler();
+    println!(
+        "[atriai] Starting voice client -> {} (local_mini_ai={})",
+        cfg0.server,
+        if local_ok { "ready" } else { "off" }
+    );
     write_status("listening", "", "", "");
 
     let mut vad = VadProcessor::new();
@@ -2214,6 +2321,10 @@ fn run_daemon() -> i32 {
                 break;
             }
             if consume_button_trigger() {
+                if crate::local_ai::is_ringing() {
+                    crate::local_ai::stop_ringing();
+                    continue;
+                }
                 if force_active {
                     println!("[atriai] funcbutton pressed again -> cancelled -> clock");
                     speaking = false;
@@ -2435,6 +2546,39 @@ pub fn run(args: &[String]) -> i32 {
     let cmd = args.first().map(String::as_str).unwrap_or("status");
     match cmd {
         "daemon" => run_daemon(),
+        "timers" | "alarms" => {
+            println!("{}", crate::local_ai::list_status_json().to_string_pretty());
+            0
+        }
+        "local-stt" if args.len() > 1 => {
+            if !crate::local_stt::init() {
+                eprintln!("Local Vosk STT model or libvosk.so not installed.");
+                return 1;
+            }
+            let Ok(mut raw) = fs::read(&args[1]) else {
+                eprintln!("Cannot read {}", args[1]);
+                return 1;
+            };
+            if raw.starts_with(b"RIFF") && raw.len() > 44 {
+                match parse_wav(&raw) {
+                    Ok(info) => raw = raw[info.data_offset..info.data_offset + info.data_len].to_vec(),
+                    Err(e) => {
+                        eprintln!("{e}");
+                        return 1;
+                    }
+                }
+            }
+            match crate::local_stt::transcribe_pcm16(&raw) {
+                Ok(t) => {
+                    println!("{t}");
+                    0
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    1
+                }
+            }
+        }
         "enable" => {
             let mut cfg = load_config();
             if let Err(e) = require_https(&cfg.server) {

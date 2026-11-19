@@ -13,6 +13,10 @@ mod light;
 mod screend;
 #[path = "atrios_runtime/rotaryd.rs"]
 mod rotaryd;
+#[path = "atrios_runtime/local_stt.rs"]
+mod local_stt;
+#[path = "atrios_runtime/local_ai.rs"]
+mod local_ai;
 #[path = "atrios_runtime/atriai.rs"]
 mod atriai;
 #[path = "atrios_runtime/bt_control.rs"]
@@ -271,5 +275,52 @@ mod tests {
         assert_eq!(status::classify_error_kind(msg, "server", false), "network");
         assert_eq!(status::classify_error_kind(msg, "update", true), "update");
         assert_eq!(status::classify_error_kind("TLS handshake error", "server", true), "tls");
+    }
+
+    #[test]
+    fn local_ai_timers_alarms_and_device_intents() {
+        use local_ai::{
+            parse_local_intent, parse_russian_alarm_time, parse_russian_duration_secs, LocalIntent,
+        };
+
+        assert_eq!(parse_russian_duration_secs(&["на", "5", "минут"]), Some(300));
+        assert_eq!(parse_russian_duration_secs(&["тридцать", "секунд"]), Some(30));
+        assert_eq!(parse_russian_duration_secs(&["полчаса"]), Some(1800));
+        assert_eq!(parse_russian_duration_secs(&["один", "час", "двадцать", "минут"]), Some(4800));
+
+        assert_eq!(parse_russian_alarm_time(&["на", "7", "утра"]), Some((7, 0)));
+        assert_eq!(parse_russian_alarm_time(&["на", "семь", "вечера"]), Some((19, 0)));
+        assert_eq!(parse_russian_alarm_time(&["в", "восемь", "тридцать"]), Some((8, 30)));
+        assert_eq!(parse_russian_alarm_time(&["на", "полвосьмого"]), Some((7, 30)));
+        assert_eq!(parse_russian_alarm_time(&["на", "23:45"]), Some((23, 45)));
+
+        assert_eq!(
+            parse_local_intent("Атри поставь таймер на 5 минут", "Atri"),
+            Some(LocalIntent::SetTimer { secs: 300 })
+        );
+        assert_eq!(
+            parse_local_intent("Атри отмени таймер", "Atri"),
+            Some(LocalIntent::CancelTimers)
+        );
+        assert_eq!(
+            parse_local_intent("Атри поставь будильник на 7 30", "Atri"),
+            Some(LocalIntent::SetAlarm { hour: 7, minute: 30 })
+        );
+        assert_eq!(
+            parse_local_intent("удали будильник", ""),
+            Some(LocalIntent::CancelAlarms)
+        );
+        assert_eq!(
+            parse_local_intent("сколько времени", ""),
+            Some(LocalIntent::QueryTime)
+        );
+        assert_eq!(
+            parse_local_intent("включи подсветку радуга", ""),
+            Some(LocalIntent::RingMode("rainbow".into()))
+        );
+        assert_eq!(
+            parse_local_intent("выключи подсветку", ""),
+            Some(LocalIntent::RingMode("off".into()))
+        );
     }
 }
