@@ -204,7 +204,8 @@ const FILLERS: &[&str] = &[
     "okay",
 ];
 const CANCEL_PHRASES: &[&str] = &[
-    "стоп", "отмена", "хватит", "ничего", "не надо", "забудь", "молчи",
+    "стоп", "stop", "отмена", "хватит", "ничего", "не надо", "забудь", "молчи",
+    "замолчи", "заткнись", "стой", "прекрати", "достаточно",
 ];
 
 fn wake_candidates(wake_word: &str) -> Vec<String> {
@@ -370,15 +371,170 @@ fn is_wake_word_only(text: &str, wake_word: &str) -> bool {
     matches_wake_word(text, wake_word) && strip_wake_word(text, wake_word).is_empty()
 }
 
-fn local_command(text: &str, wake_word: &str) -> Option<&'static str> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceCommand {
+    NextTrack,
+    PrevTrack,
+    Pause,
+    Play,
+    VolumeUp(i32),
+    VolumeDown(i32),
+    VolumeSet(i32),
+    BluetoothOn,
+    BluetoothOff,
+}
+
+fn parse_russian_number(words: &[&str]) -> Option<i32> {
+    for &w in words {
+        if let Ok(v) = w.parse::<i32>() {
+            if (0..=100).contains(&v) {
+                return Some(v);
+            }
+        }
+    }
+    for &w in words {
+        match w {
+            "минимум" | "минимума" => return Some(5),
+            "половину" | "половина" | "среднюю" | "среднее" | "средняя" => return Some(50),
+            "максимум" | "максимальную" | "полную" | "максимально" => return Some(100),
+            "ноль" | "нуль" => return Some(0),
+            _ => {}
+        }
+    }
+    let word_val = |w: &str| -> Option<(i32, bool)> {
+        match w {
+            "десять" => Some((10, false)),
+            "двадцать" => Some((20, true)),
+            "тридцать" => Some((30, true)),
+            "сорок" => Some((40, true)),
+            "пятьдесят" => Some((50, true)),
+            "шестьдесят" => Some((60, true)),
+            "семьдесят" => Some((70, true)),
+            "восемьдесят" => Some((80, true)),
+            "девяносто" => Some((90, true)),
+            "сто" => Some((100, false)),
+            "один" | "одну" => Some((1, false)),
+            "два" | "две" => Some((2, false)),
+            "три" => Some((3, false)),
+            "четыре" => Some((4, false)),
+            "пять" => Some((5, false)),
+            "шесть" => Some((6, false)),
+            "семь" => Some((7, false)),
+            "восемь" => Some((8, false)),
+            "девять" => Some((9, false)),
+            "одиннадцать" => Some((11, false)),
+            "двенадцать" => Some((12, false)),
+            "тринадцать" => Some((13, false)),
+            "четырнадцать" => Some((14, false)),
+            "пятнадцать" => Some((15, false)),
+            "шестнадцать" => Some((16, false)),
+            "семнадцать" => Some((17, false)),
+            "восемнадцать" => Some((18, false)),
+            "девятнадцать" => Some((19, false)),
+            _ => None,
+        }
+    };
+    let mut i = 0usize;
+    while i < words.len() {
+        if let Some((v, is_ten)) = word_val(words[i]) {
+            if is_ten && i + 1 < words.len() {
+                if let Some((u, false)) = word_val(words[i + 1]) {
+                    if (1..=9).contains(&u) {
+                        return Some((v + u).clamp(0, 100));
+                    }
+                }
+            }
+            return Some(v.clamp(0, 100));
+        }
+        i += 1;
+    }
+    None
+}
+
+pub fn split_trailing_stop(text: &str, wake_word: &str) -> (String, bool) {
+    let stripped = strip_wake_word(text, wake_word);
+    let mut toks: Vec<&str> = stripped.split_whitespace().collect();
+    while !toks.is_empty() && FILLERS.contains(toks.last().unwrap()) {
+        toks.pop();
+    }
+    if toks.len() >= 2 && matches!(*toks.last().unwrap(), "стоп" | "stop" | "хватит") {
+        toks.pop();
+        while !toks.is_empty() && FILLERS.contains(toks.last().unwrap()) {
+            toks.pop();
+        }
+        if !toks.is_empty() {
+            return (toks.join(" "), true);
+        }
+    }
+    (stripped, false)
+}
+
+pub fn local_command(text: &str, wake_word: &str) -> Option<DeviceCommand> {
     if !wake_word.is_empty() && !matches_wake_word(text, wake_word) {
         return None;
     }
-    let norm = strip_wake_word(text, wake_word);
+    let (norm, _) = split_trailing_stop(text, wake_word);
     let words: Vec<&str> = norm
         .split_whitespace()
         .filter(|w| !FILLERS.contains(w))
         .collect();
+    if words.is_empty() {
+        return None;
+    }
+
+    let has_bt = words.iter().any(|&w| {
+        matches!(
+            w,
+            "блютуз" | "блютус" | "блютуза" | "блютузу" | "bluetooth" | "бт" | "bt"
+        )
+    });
+    if has_bt {
+        if words.iter().any(|&w| {
+            matches!(
+                w,
+                "выключи"
+                    | "выключить"
+                    | "отключи"
+                    | "отключить"
+                    | "останови"
+                    | "убери"
+                    | "закрой"
+                    | "скрой"
+                    | "выруби"
+                    | "отруби"
+                    | "off"
+                    | "disable"
+                    | "stop"
+            )
+        }) {
+            return Some(DeviceCommand::BluetoothOff);
+        }
+        if words.iter().any(|&w| {
+            matches!(
+                w,
+                "включи"
+                    | "включить"
+                    | "запусти"
+                    | "активируй"
+                    | "открой"
+                    | "подключи"
+                    | "режим"
+                    | "сопряжение"
+                    | "поиск"
+                    | "вруби"
+                    | "колонка"
+                    | "колонки"
+                    | "on"
+                    | "enable"
+                    | "start"
+                    | "pair"
+            )
+        }) || words.len() <= 2
+        {
+            return Some(DeviceCommand::BluetoothOn);
+        }
+    }
+
     let mut dedup = Vec::with_capacity(words.len());
     for &w in &words {
         if dedup.last().copied() != Some(w) {
@@ -389,46 +545,89 @@ fn local_command(text: &str, wake_word: &str) -> Option<&'static str> {
     let c2 = dedup.join(" ");
     let check = |list: &[&str]| list.iter().any(|&p| p == c1 || p == c2);
 
+    if check(&["выключи звук", "без звука", "звук выключи", "mute"]) {
+        return Some(DeviceCommand::VolumeSet(0));
+    }
+
+    if words
+        .iter()
+        .any(|&w| matches!(w, "громче" | "погромче" | "прибавь" | "увеличь" | "louder"))
+    {
+        if let Some(n) = parse_russian_number(&words) {
+            if words.contains(&"на") {
+                return Some(DeviceCommand::VolumeUp(n.clamp(1, 100)));
+            }
+            return Some(DeviceCommand::VolumeSet(n.clamp(0, 100)));
+        }
+        if words.iter().any(|&w| matches!(w, "чуть" | "немного" | "слегка")) {
+            return Some(DeviceCommand::VolumeUp(5));
+        }
+        if words.iter().any(|&w| matches!(w, "сильно" | "намного" | "максимально")) {
+            return Some(DeviceCommand::VolumeUp(15));
+        }
+        return Some(DeviceCommand::VolumeUp(10));
+    }
+
+    if words
+        .iter()
+        .any(|&w| matches!(w, "тише" | "потише" | "убавь" | "уменьши" | "quieter"))
+    {
+        if let Some(n) = parse_russian_number(&words) {
+            if words.contains(&"на") {
+                return Some(DeviceCommand::VolumeDown(n.clamp(1, 100)));
+            }
+            return Some(DeviceCommand::VolumeSet(n.clamp(0, 100)));
+        }
+        if words.iter().any(|&w| matches!(w, "чуть" | "немного" | "слегка")) {
+            return Some(DeviceCommand::VolumeDown(5));
+        }
+        if words.iter().any(|&w| matches!(w, "сильно" | "намного")) {
+            return Some(DeviceCommand::VolumeDown(15));
+        }
+        return Some(DeviceCommand::VolumeDown(10));
+    }
+
+    if words
+        .iter()
+        .any(|&w| matches!(w, "громкость" | "звук" | "volume"))
+    {
+        if let Some(n) = parse_russian_number(&words) {
+            return Some(DeviceCommand::VolumeSet(n.clamp(0, 100)));
+        }
+        if words.contains(&"вверх") || words.contains(&"up") {
+            return Some(DeviceCommand::VolumeUp(10));
+        }
+        if words.contains(&"вниз") || words.contains(&"down") {
+            return Some(DeviceCommand::VolumeDown(10));
+        }
+    }
+
     if check(&[
         "next", "next track", "вперед", "дальше", "другой трек", "другую песню",
         "переключи вперед", "переключи песню", "переключи трек", "перемотай вперед",
         "след трек", "следующая", "следующая песня", "следующий", "следующий трек",
         "следующую песню", "трек вперед",
     ]) {
-        return Some("next_track");
+        return Some(DeviceCommand::NextTrack);
     }
     if check(&[
         "pause", "stop", "выключи музыку", "на паузу", "останови", "останови музыку",
         "пауза", "поставь на паузу", "стоп", "хватит играть",
     ]) {
-        return Some("pause");
+        return Some(DeviceCommand::Pause);
     }
     if check(&[
         "play", "включи музыку", "сними с паузы", "продолжай", "resume",
         "возобнови", "продолжи", "играй",
     ]) {
-        return Some("play");
+        return Some(DeviceCommand::Play);
     }
     if check(&[
         "prev", "previous", "верни песню", "верни трек", "назад", "переключи назад",
         "пред трек", "предыдущая", "предыдущая песня", "предыдущий", "предыдущий трек",
         "предыдущую песню", "прошлый трек", "трек назад",
     ]) {
-        return Some("prev_track");
-    }
-    if check(&[
-        "quieter", "volume down", "громкость вниз", "звук тише", "потише",
-        "сделай потише", "сделай тише", "тише", "убавь", "убавь громкость",
-        "убавь звук", "уменьши громкость", "уменьши звук",
-    ]) {
-        return Some("volume_down");
-    }
-    if check(&[
-        "louder", "volume up", "громкости прибавь", "громкость вверх", "громче",
-        "звук громче", "погромче", "прибавь", "прибавь громкость", "прибавь звук",
-        "сделай громче", "сделай погромче", "увеличь громкость",
-    ]) {
-        return Some("volume_up");
+        return Some(DeviceCommand::PrevTrack);
     }
     None
 }
@@ -782,10 +981,11 @@ fn downsample_48k_8ch_s32_to_16k_s16(raw: &[u8]) -> Vec<u8> {
     out
 }
 
-fn drain_capture_fd_now() {
+fn read_capture_frames_now() -> Vec<Vec<u8>> {
+    let mut frames = Vec::new();
     let fd = CAPTURE_FD.load(Ordering::SeqCst);
     if fd < 0 {
-        return;
+        return frames;
     }
     let fsz = CAPTURE_FRAME_BYTES
         .load(Ordering::SeqCst)
@@ -801,14 +1001,57 @@ fn drain_capture_fd_now() {
         while got < fsz {
             let n = recv_or_read(fd, &mut tmp[got..fsz]);
             if n <= 0 {
-                return;
+                return frames;
             }
             got += n as usize;
         }
+        if fsz == FRAME_BYTES {
+            frames.push(tmp.clone());
+        } else {
+            frames.push(downsample_48k_8ch_s32_to_16k_s16(&tmp));
+        }
+        if frames.len() >= 64 {
+            break;
+        }
     }
+    frames
 }
 
-fn play_audio_bytes(data: &[u8]) -> Result<bool, String> {
+fn drain_capture_fd_now() {
+    let _ = read_capture_frames_now();
+}
+
+pub fn is_barge_in_stop(asr_text: &str, tts_answer: &str) -> bool {
+    let asr_words = normalize_text(asr_text);
+    if asr_words.is_empty() {
+        return false;
+    }
+    let ans_words = normalize_text(tts_answer);
+    const BARGE_STOP_WORDS: &[&str] = &[
+        "стоп", "stop", "хватит", "молчи", "замолчи", "заткнись", "отмена", "стой", "тихо",
+        "выключись", "прекрати", "достаточно", "ша",
+    ];
+    for w in &asr_words {
+        let is_stop = BARGE_STOP_WORDS.contains(&w.as_str())
+            || (w.chars().count() >= 4
+                && (w.starts_with("стоп")
+                    || w.ends_with("стоп")
+                    || w.starts_with("замолч")
+                    || w.starts_with("заткн")));
+        if is_stop && (!ans_words.contains(w) || asr_words.len() <= 3) {
+            return true;
+        }
+    }
+    false
+}
+
+fn play_audio_bytes(
+    data: &[u8],
+    tts_answer: &str,
+    server_base: &str,
+    token: &str,
+    ca_file: &str,
+) -> Result<bool, String> {
     if data.is_empty() {
         return Ok(true);
     }
@@ -832,12 +1075,72 @@ fn play_audio_bytes(data: &[u8]) -> Result<bool, String> {
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
 
+    let s_base = server_base.to_string();
+    let s_tok = token.to_string();
+    let s_ca = ca_file.to_string();
+    let s_ans = tts_answer.to_string();
+    let spawn_barge_asr = move |pcm: Vec<u8>| -> mpsc::Receiver<bool> {
+        let (tx, rx) = mpsc::channel();
+        let b = s_base.clone();
+        let tok = s_tok.clone();
+        let ca = s_ca.clone();
+        let ans = s_ans.clone();
+        thread::spawn(move || {
+            let wav = prepare_asr_wav(&pcm);
+            let auth = format!("Bearer {tok}");
+            let mut h = vec![("Content-Type", "audio/wav"), ("Accept", "application/json")];
+            if !tok.is_empty() {
+                h.push(("Authorization", &auth));
+            }
+            let ca_opt = if ca.is_empty() { None } else { Some(ca.as_str()) };
+            let hit = match request_bytes(&format!("{b}/asr"), Some(&wav), &h, ca_opt, 4, 65536, None) {
+                Ok(raw) => {
+                    let txt = String::from_utf8(raw)
+                        .ok()
+                        .and_then(|s| Json::parse(&s).ok())
+                        .and_then(|j| j.get_str("text").map(str::to_string))
+                        .unwrap_or_default();
+                    let t = txt.trim();
+                    if !t.is_empty() {
+                        println!("[tts-barge] asr={t:?}");
+                    }
+                    is_barge_in_stop(t, &ans)
+                }
+                Err(_) => false,
+            };
+            let _ = tx.send(hit);
+        });
+        rx
+    };
+
     let res = (|| -> Result<bool, String> {
         let mut child = cmd.spawn().map_err(|e| format!("aplay spawn: {e}"))?;
         let t0 = Instant::now();
+        let mut bg_rms = 220.0f64;
+        let mut pre_roll: VecDeque<Vec<u8>> = VecDeque::with_capacity(8);
+        let mut barge_buf: Vec<u8> = Vec::new();
+        let mut in_barge = false;
+        let mut barge_hits = 0usize;
+        let mut barge_silence_ms = 0.0f64;
+        let mut barge_rx: Option<mpsc::Receiver<bool>> = None;
+
         loop {
             match child.try_wait() {
                 Ok(Some(status)) => {
+                    if in_barge
+                        && barge_buf.len() >= (SR * 2) * 200 / 1000
+                        && barge_rx.is_none()
+                        && !server_base.is_empty()
+                    {
+                        barge_rx = Some(spawn_barge_asr(std::mem::take(&mut barge_buf)));
+                    }
+                    if let Some(rx) = barge_rx.take() {
+                        if let Ok(true) = rx.recv_timeout(Duration::from_millis(650)) {
+                            println!("[atriai] voice barge-in STOP at end of playback -> clock");
+                            set_error("audio", None, "", 120);
+                            return Ok(false);
+                        }
+                    }
                     if !status.success() && status.code() != Some(15) {
                         let mut err_s = String::new();
                         if let Some(mut se) = child.stderr.take() {
@@ -856,7 +1159,75 @@ fn play_audio_bytes(data: &[u8]) -> Result<bool, String> {
                 }
                 Ok(None) => {
                     check_resume_visual();
-                    drain_capture_fd_now();
+                    if let Some(ref rx) = barge_rx {
+                        match rx.try_recv() {
+                            Ok(true) => {
+                                println!("[atriai] voice barge-in STOP detected during playback -> silenced -> clock");
+                                let _ = child.kill();
+                                let _ = child.wait();
+                                set_error("audio", None, "", 120);
+                                return Ok(false);
+                            }
+                            Ok(false) | Err(mpsc::TryRecvError::Disconnected) => {
+                                barge_rx = None;
+                            }
+                            Err(mpsc::TryRecvError::Empty) => {}
+                        }
+                    }
+                    let armed = t0.elapsed() >= Duration::from_millis(160);
+                    for chunk in read_capture_frames_now() {
+                        let rms = pcm16_rms(&chunk);
+                        if !armed {
+                            bg_rms = (bg_rms * 0.90 + rms * 0.10).clamp(80.0, 1400.0);
+                            if pre_roll.len() == 8 {
+                                pre_roll.pop_front();
+                            }
+                            pre_roll.push_back(chunk);
+                            continue;
+                        }
+                        let start_thr = (bg_rms * 1.65 + 110.0).clamp(260.0, 2200.0);
+                        let keep_thr = (bg_rms * 1.25 + 60.0).clamp(190.0, start_thr * 0.80);
+                        if !in_barge {
+                            if rms >= start_thr {
+                                barge_hits += 1;
+                                if barge_hits >= 2 {
+                                    in_barge = true;
+                                    barge_buf.clear();
+                                    for p in pre_roll.drain(..) {
+                                        barge_buf.extend_from_slice(&p);
+                                    }
+                                    barge_buf.extend_from_slice(&chunk);
+                                    barge_silence_ms = 0.0;
+                                    continue;
+                                }
+                            } else {
+                                bg_rms = (bg_rms * 0.94 + rms * 0.06).clamp(80.0, 1400.0);
+                                barge_hits = barge_hits.saturating_sub(1);
+                            }
+                            if pre_roll.len() == 8 {
+                                pre_roll.pop_front();
+                            }
+                            pre_roll.push_back(chunk);
+                        } else {
+                            barge_buf.extend_from_slice(&chunk);
+                            if rms >= keep_thr {
+                                barge_silence_ms = 0.0;
+                            } else {
+                                barge_silence_ms += 32.0;
+                            }
+                            let dur_ms = (barge_buf.len() * 1000) / (SR * 2);
+                            if barge_silence_ms >= 260.0 || dur_ms >= 1150 {
+                                if dur_ms >= 200 && barge_rx.is_none() && !server_base.is_empty() {
+                                    barge_rx = Some(spawn_barge_asr(std::mem::take(&mut barge_buf)));
+                                } else {
+                                    barge_buf.clear();
+                                }
+                                in_barge = false;
+                                barge_hits = 0;
+                                barge_silence_ms = 0.0;
+                            }
+                        }
+                    }
                     if consume_button_trigger() {
                         println!("[atriai] funcbutton pressed during playback -> cancelled -> clock");
                         let _ = child.kill();
@@ -907,6 +1278,8 @@ fn play_command_chime(action: &str) {
         "prev_track" => &[(880.00, 50), (587.33, 75)],
         "pause" => &[(440.00, 85)],
         "play" => &[(440.00, 50), (554.37, 75)],
+        "bt_on" => &[(440.00, 50), (554.37, 55), (659.25, 80)],
+        "bt_off" => &[(659.25, 50), (554.37, 55), (440.00, 80)],
         _ => &[(587.33, 70)],
     };
     let mut pcm = Vec::new();
@@ -932,34 +1305,96 @@ fn play_command_chime(action: &str) {
     drain_capture_fd_now();
 }
 
-fn execute_device_command(action: &str) {
-    let bt_cmd = match action {
-        "next_track" => Some("next"),
-        "prev_track" => Some("prev"),
-        "pause" => Some("pause"),
-        "play" => Some("play"),
-        _ => None,
-    };
-    if let Some(c) = bt_cmd {
-        if Path::new(BT_CMD_SOCK).exists() {
-            if let Ok(sock) = UnixDatagram::unbound() {
-                let _ = sock.send_to(c.as_bytes(), BT_CMD_SOCK);
+fn execute_device_command(cmd: DeviceCommand) {
+    let chime = match cmd {
+        DeviceCommand::NextTrack | DeviceCommand::PrevTrack | DeviceCommand::Pause | DeviceCommand::Play => {
+            let (sock_cmd, ch) = match cmd {
+                DeviceCommand::NextTrack => ("next", "next_track"),
+                DeviceCommand::PrevTrack => ("prev", "prev_track"),
+                DeviceCommand::Pause => ("pause", "pause"),
+                DeviceCommand::Play => ("play", "play"),
+                _ => unreachable!(),
+            };
+            if Path::new(BT_CMD_SOCK).exists() {
+                if let Ok(sock) = UnixDatagram::unbound() {
+                    let _ = sock.send_to(sock_cmd.as_bytes(), BT_CMD_SOCK);
+                }
             }
+            ch
         }
-    } else if action == "volume_up" || action == "volume_down" {
-        let cur = fs::read_to_string(VOLUME_FILE)
-            .ok()
-            .and_then(|s| s.trim().parse::<i32>().ok())
-            .unwrap_or(10);
-        let nxt = (cur + if action == "volume_up" { 5 } else { -5 }).clamp(0, 100);
-        let _ = Command::new("/usr/bin/atrios")
-            .args(["volume", &nxt.to_string()])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        println!("[atriai] volume: {cur}% -> {nxt}%");
-    }
-    play_command_chime(action);
+        DeviceCommand::VolumeUp(step) => {
+            let cur = fs::read_to_string(VOLUME_FILE)
+                .ok()
+                .and_then(|s| s.trim().parse::<i32>().ok())
+                .unwrap_or(10);
+            let nxt = (cur + step).clamp(0, 100);
+            let _ = Command::new("/usr/bin/atrios")
+                .args(["volume", &nxt.to_string()])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+            println!("[atriai] volume: {cur}% -> {nxt}%");
+            "volume_up"
+        }
+        DeviceCommand::VolumeDown(step) => {
+            let cur = fs::read_to_string(VOLUME_FILE)
+                .ok()
+                .and_then(|s| s.trim().parse::<i32>().ok())
+                .unwrap_or(10);
+            let nxt = (cur - step).clamp(0, 100);
+            let _ = Command::new("/usr/bin/atrios")
+                .args(["volume", &nxt.to_string()])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+            println!("[atriai] volume: {cur}% -> {nxt}%");
+            "volume_down"
+        }
+        DeviceCommand::VolumeSet(target) => {
+            let cur = fs::read_to_string(VOLUME_FILE)
+                .ok()
+                .and_then(|s| s.trim().parse::<i32>().ok())
+                .unwrap_or(10);
+            let nxt = target.clamp(0, 100);
+            let _ = Command::new("/usr/bin/atrios")
+                .args(["volume", &nxt.to_string()])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+            println!("[atriai] volume: {cur}% -> {nxt}%");
+            if nxt >= cur { "volume_up" } else { "volume_down" }
+        }
+        DeviceCommand::BluetoothOn => {
+            let _ = Command::new("/bin/sh")
+                .args([
+                    "-c",
+                    "/usr/lib/atrios/wireless bt speaker on >/dev/null 2>&1 && /usr/lib/atrios/wireless bt pair 120 >/dev/null 2>&1",
+                ])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn();
+            println!("[atriai] bluetooth: speaker ON + pairing window open (120s)");
+            "bt_on"
+        }
+        DeviceCommand::BluetoothOff => {
+            if Path::new(BT_CMD_SOCK).exists() {
+                if let Ok(sock) = UnixDatagram::unbound() {
+                    let _ = sock.send_to(b"pause", BT_CMD_SOCK);
+                }
+            }
+            let _ = Command::new("/bin/sh")
+                .args([
+                    "-c",
+                    "/usr/lib/atrios/wireless bt speaker off >/dev/null 2>&1 && /usr/lib/atrios/wireless bt hide >/dev/null 2>&1",
+                ])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn();
+            println!("[atriai] bluetooth: speaker OFF (hidden)");
+            "bt_off"
+        }
+    };
+    play_command_chime(chime);
 }
 
 static VOICE_BUSY: AtomicBool = AtomicBool::new(false);
@@ -1092,17 +1527,22 @@ fn send_phrase_to_server(
             set_error("voice", None, "", 120);
             return Ok((text, String::new(), true));
         }
-        if wake_word.is_empty() {
-            let stripped = strip_wake_word(&text, "Atri");
-            if CANCEL_PHRASES.contains(&stripped.as_str()) {
-                println!("[atriai] follow-up cancelled by phrase ({text:?}) -> idle");
-                set_error("voice", None, "", 120);
-                return Ok((text, String::new(), false));
-            }
-        }
-        if let Some(action) = local_command(&text, wake_word) {
-            execute_device_command(action);
+        let (clean_query, has_trailing_stop) = split_trailing_stop(&text, wake_word);
+        if CANCEL_PHRASES.contains(&clean_query.as_str()) {
+            println!("[atriai] cancelled by phrase ({text:?}) -> idle");
+            keep_listening = false;
             set_error("voice", None, "", 120);
+            return Ok((text, String::new(), false));
+        }
+        if let Some(cmd) = local_command(&text, wake_word) {
+            execute_device_command(cmd);
+            set_error("voice", None, "", 120);
+            if !has_trailing_stop && force_active {
+                keep_listening = true;
+                set_vad_visual("vad", false, "default");
+                return Ok((text, String::new(), true));
+            }
+            keep_listening = false;
             return Ok((text, String::new(), false));
         }
 
@@ -1110,7 +1550,11 @@ fn send_phrase_to_server(
         let base2 = base.clone();
         let tok2 = cfg.token.clone();
         let ca2 = cfg.ca_file.clone();
-        let q_text = text.clone();
+        let q_text = if clean_query.is_empty() {
+            text.clone()
+        } else {
+            clean_query.clone()
+        };
         let chat = voice_call(move || {
             let auth = format!("Bearer {tok2}");
             let mut h = Vec::new();
@@ -1129,7 +1573,7 @@ fn send_phrase_to_server(
         let emotion = chat.get_str("emotion").unwrap_or("neutral").to_string();
         println!("[chat] answer={answer:?} emotion={emotion}");
 
-        let base3 = base;
+        let base3 = base.clone();
         let tok3 = cfg.token.clone();
         let ca3 = cfg.ca_file.clone();
         let ans_c = answer.clone();
@@ -1160,14 +1604,18 @@ fn send_phrase_to_server(
         write_status("speaking", &text, &answer, "");
         set_vad_visual("speaking", false, &emotion);
         println!("[tts] playing {} bytes", audio.len());
-        let completed = play_audio_bytes(&audio)?;
+        let completed = play_audio_bytes(&audio, &answer, &base, &cfg.token, &cfg.ca_file)?;
         set_error("voice", None, "", 120);
-        if completed {
+        if completed && !has_trailing_stop {
             keep_listening = true;
             set_vad_visual("vad", false, "default");
             Ok((text, answer, true))
         } else {
-            Ok((text, String::new(), false))
+            keep_listening = false;
+            println!(
+                "[atriai] conversation ended (trailing_stop={has_trailing_stop}, completed={completed}) -> clock"
+            );
+            Ok((text, answer, false))
         }
     })();
 
@@ -1632,20 +2080,20 @@ fn run_daemon() -> i32 {
             let ww = if force_active { "" } else { ww_cfg.as_str() };
             match send_phrase_to_server(&cfg.server, &buf, ww, force_active) {
                 Ok((asr, ans, stay_active)) => {
-                    drain_capture_pipe(&mut proc_child, if stay_active { 260 } else { 40 }, read_bytes);
-                    if WAKE_TRIGGERED.swap(false, Ordering::SeqCst) || !ans.trim().is_empty() {
+                    let drain_ms = if stay_active { 260 } else if !ans.is_empty() { 120 } else { 40 };
+                    drain_capture_pipe(&mut proc_child, drain_ms, read_bytes);
+                    if stay_active && (WAKE_TRIGGERED.swap(false, Ordering::SeqCst) || !ans.trim().is_empty()) {
                         pend_force_active = true;
                         empty_followups = 0;
                     } else if stay_active && force_active && asr.is_empty() && empty_followups < 1 {
                         pend_force_active = true;
                         empty_followups += 1;
                     } else {
-                        if force_active {
-                            set_vad_visual("idle", false, "default");
-                            empty_followups = 0;
-                        }
-                        if mode == PipelineMode::WakeSpotter && hit_max_utt {
-                            vad.wait_quiet_frames = 10;
+                        WAKE_TRIGGERED.store(false, Ordering::SeqCst);
+                        set_vad_visual("idle", false, "default");
+                        empty_followups = 0;
+                        if (mode == PipelineMode::WakeSpotter && hit_max_utt) || (!stay_active && !ans.is_empty()) {
+                            vad.wait_quiet_frames = 8;
                         }
                     }
                     write_status("listening", &asr, &ans, "");

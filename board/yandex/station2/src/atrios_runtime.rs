@@ -124,6 +124,58 @@ mod tests {
     }
 
     #[test]
+    fn voice_bt_volume_stop_and_barge_in() {
+        use atriai::{is_barge_in_stop, local_command, split_trailing_stop, DeviceCommand};
+
+        assert_eq!(
+            local_command("Атри включи блютуз", "Atri"),
+            Some(DeviceCommand::BluetoothOn)
+        );
+        assert_eq!(
+            local_command("включи режим блютуз", ""),
+            Some(DeviceCommand::BluetoothOn)
+        );
+        assert_eq!(
+            local_command("выключи блютуз", ""),
+            Some(DeviceCommand::BluetoothOff)
+        );
+        assert_eq!(
+            local_command("Атри отключи bluetooth", "Atri"),
+            Some(DeviceCommand::BluetoothOff)
+        );
+
+        assert_eq!(
+            local_command("Атри громкость на 30", "Atri"),
+            Some(DeviceCommand::VolumeSet(30))
+        );
+        assert_eq!(
+            local_command("сделай тише на 15", ""),
+            Some(DeviceCommand::VolumeDown(15))
+        );
+        assert_eq!(
+            local_command("погромче", ""),
+            Some(DeviceCommand::VolumeUp(10))
+        );
+        assert_eq!(
+            local_command("громкость двадцать пять", ""),
+            Some(DeviceCommand::VolumeSet(25))
+        );
+
+        assert_eq!(
+            split_trailing_stop("Атри какая погода стоп", "Atri"),
+            ("какая погода".to_string(), true)
+        );
+        assert_eq!(
+            split_trailing_stop("Атри какая погода", "Atri"),
+            ("какая погода".to_string(), false)
+        );
+
+        assert!(is_barge_in_stop("я работаю стоп", "Я работаю стабильно"));
+        assert!(is_barge_in_stop("замолчи пожалуйста", "Привет"));
+        assert!(!is_barge_in_stop("я работаю стабильно", "Я работаю стабильно"));
+    }
+
+    #[test]
     fn boot_eyes_collapse_completely_before_done() {
         let mut e = light::Eyes::new(0.0);
         e.set_state("boot", None, 0.0);
