@@ -61,61 +61,16 @@ case "$1" in
     # pad-control layout from G12A: MST_PAD_CTRL0 is 0x20 (MCLK) and
     # MST_PAD_CTRL1 is 0x24 (SCLK/LRCLK).  GUIDE.md used the G12A offsets
     # 0x1C/0x20, which are wrong for this SoC.
-    if command -v python3 >/dev/null 2>&1; then
-      if ! python3 -c '
-import mmap, os, struct
-fd = os.open("/dev/mem", os.O_RDWR | os.O_SYNC)
-m = mmap.mmap(fd, 0x1000, mmap.MAP_SHARED, mmap.PROT_READ | mmap.PROT_WRITE, offset=0xFF660000)
-struct.pack_into("<I", m, 0x24, 0x01110111)  # SM1 MST_PAD_CTRL1: SCLK/LRCLK -> mst_b
-struct.pack_into("<I", m, 0x20, 0x00000011)  # SM1 MST_PAD_CTRL0: MCLK -> mst_b
-m.flush()
-m.close()
-os.close(fd)
-' 2>/dev/null; then
-        # /dev/mem may be restricted by CONFIG_STRICT_DEVMEM.  BusyBox
-        # devmem uses the same mapping, but try it before giving up.
-        if command -v devmem >/dev/null 2>&1; then
-          devmem 0xFF660024 32 0x01110111 2>/dev/null || true
-          devmem 0xFF660020 32 0x00000011 2>/dev/null || true
-        else
-          echo "[AtriOS] NOTE: TDM_B pad mux write skipped (kernel may already route it)"
-        fi
-      fi
-    fi
-
     # 2. Do NOT restore /var/lib/alsa/asound.state here: it stores 255/193
     # and would override the AtriOS user volume.  The mixer is configured
     # explicitly below, then the saved volume is applied at the end.
-
-    # 3. Load SY6045S firmware settings (DSP/TDM slot/crossover) and unmute via I2C bus 2
-    # Tweeters (0x2a) and Woofer (0x2b)
-    if command -v python3 >/dev/null 2>&1; then
-      python3 -c '
-import fcntl, os
-def load_sy(path, addr):
-    if not os.path.exists(path):
-        return
-    fd = os.open("/dev/i2c-2", os.O_RDWR)
-    try:
-        fcntl.ioctl(fd, 0x0706, addr)  # I2C_SLAVE_FORCE
-        with open(path) as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                parts = line.split()
-                if parts[0].lower() == "w" and len(parts) >= 4:
-                    os.write(fd, bytes(int(x, 16) for x in parts[2:]))
-                elif len(parts) >= 2 and parts[0].lower() not in ("w", "d", "r"):
-                    os.write(fd, bytes(int(x, 16) for x in parts))
-        os.write(fd, bytes([0x22, 0x00]))
-        os.write(fd, bytes([0x06, 0x00]))
-        os.write(fd, bytes([0x02, 0x00]))
-    finally:
-        os.close(fd)
-load_sy("/lib/firmware/sy6045s-tweeters-settings.txt", 0x2A)
-load_sy("/lib/firmware/sy6045s-woofer-settings.txt", 0x2B)
-' 2>/dev/null || true
+    # 3. Route TDM_B clock pads & load SY6045S firmware settings via Rust helper.
+    if [ -x /usr/lib/atrios/rotaryd ]; then
+      /usr/lib/atrios/rotaryd init-amps 2>/dev/null || true
+    fi
+    if command -v devmem >/dev/null 2>&1; then
+      devmem 0xFF660024 32 0x01110111 2>/dev/null || true
+      devmem 0xFF660020 32 0x00000011 2>/dev/null || true
     fi
     if command -v i2cset >/dev/null 2>&1; then
       i2cset -y -f 2 0x2a 0x06 0x00 2>/dev/null || true

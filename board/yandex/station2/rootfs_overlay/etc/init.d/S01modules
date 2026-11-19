@@ -80,11 +80,11 @@ case "$1" in
           ;;
       esac
     done
-    if [ -e /dev/fb_screen ] && [ -f /usr/lib/atrios/light ]; then
+    if [ -e /dev/fb_screen ] && [ -x /usr/lib/atrios/light ]; then
       mkdir -p /var/run/atrios 2>/dev/null || true
       : > /var/run/atrios/booting
       echo "boot" > /var/run/atrios/screen_mode
-      python3 /usr/lib/atrios/light screen eyes boot >/dev/null 2>&1 &
+      /usr/lib/atrios/light screen eyes boot >/dev/null 2>&1 &
       echo "$!" > /var/run/atrios/screen_owner.pid
     fi
 
@@ -106,8 +106,8 @@ case "$1" in
     # 4. Wireless (Realtek RTL8822CS) - Power up SDIO & BT reset GPIO
     if [ -x /usr/lib/atrios/wifi-power ]; then
       /usr/lib/atrios/wifi-power 1 2>/dev/null || true
-    elif [ -c /dev/wifi_power ]; then
-      python3 -c "import fcntl; f = open('/dev/wifi_power', 'wb'); fcntl.ioctl(f.fileno(), 0x6d03); f.close()" 2>/dev/null || true
+    elif [ -c /dev/wifi_power ] && [ -x /usr/lib/atrios/rotaryd ]; then
+      /usr/lib/atrios/rotaryd wifi-power-ioctl 2>/dev/null || true
     fi
 
     # Pulse Bluetooth radio via rfkill if present

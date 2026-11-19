@@ -51,24 +51,24 @@ EOT
 c="$1"
 [ $# -gt 0 ] && shift
 case "$c" in
-  screen|ring|sensor) exec python3 $L/light "$c" "$@" ;;
-  kisser|cat|boykisser) exec python3 $L/light screen kisser "$@" ;;
-  eyes)               exec python3 $L/light screen eyes "$@" ;;
-  error|error:*)      exec python3 $L/light screen "$c" "$@" ;;
-  clock|ticker)       exec python3 $L/light screen "$c" "$@" ;;
-  light)              exec python3 $L/light "$@" ;;
+  screen|ring|sensor) exec $L/light "$c" "$@" ;;
+  kisser|cat|boykisser) exec $L/light screen kisser "$@" ;;
+  eyes)               exec $L/light screen eyes "$@" ;;
+  error|error:*)      exec $L/light screen "$c" "$@" ;;
+  clock|ticker)       exec $L/light screen "$c" "$@" ;;
+  light)              exec $L/light "$@" ;;
   check|check-audio)  exec /bin/sh $L/check_audio.sh "$@" ;;
   test|play|record|volume|mute|amps) exec /bin/sh $L/audio "$c" "$@" ;;
-  micprobe|mic-probe) exec python3 $L/micprobe "$@" ;;
+  micprobe|mic-probe) exec $L/micprobe "$@" ;;
   audio)              exec /bin/sh $L/audio "$@" ;;
   wifi|bt|bluetooth|zigbee) exec /bin/sh $L/wireless "$c" "$@" ;;
   wireless)           exec /bin/sh $L/wireless "$@" ;;
   status)             exec /bin/sh $L/wireless status ;;
   input|buttons)      exec /bin/sh $L/input "$@" ;;
   reset|factory-reset) exec /bin/sh $L/reset "$@" ;;
-  ota|swupdate)       exec python3 $L/ota "$@" ;;
-  time|ntp)           exec python3 $L/ntp "$@" ;;
-  ai|atriai)          exec python3 $L/atriai "$@" ;;
+  ota|swupdate)       exec $L/ota "$@" ;;
+  time|ntp)           exec $L/ntp "$@" ;;
+  ai|atriai)          exec $L/atriai "$@" ;;
   info|fetch|fastfetch) exec /bin/sh /usr/bin/fastfetch "$@" ;;
   ""|help|-h|--help)  usage ;;
   *) echo "atrios: unknown command '$c'"; echo; usage; exit 1 ;;

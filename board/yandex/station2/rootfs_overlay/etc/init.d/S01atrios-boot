@@ -2,7 +2,7 @@
 # Also mount BOOT on older images whose custom init does not process fstab.
 case "$1" in
   start)
-    /usr/bin/python3 -c 'import runpy,sys; sys.path.insert(0,"/usr/lib/atrios"); runpy.run_path("/usr/lib/atrios/ota",run_name="atrios_boot_mount")["ensure_boot_mounted"]()'
+    /usr/lib/atrios/ota ensure-boot-mounted
     ;;
   stop) : ;;
   *) exit 1 ;;

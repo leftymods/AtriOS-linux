@@ -74,8 +74,8 @@ case "$CMD" in
         iw dev wlan0 scan 2>/dev/null | grep -E 'SSID:|signal:' | head -n 30
       elif command -v iwlist >/dev/null 2>&1; then
         iwlist wlan0 scan 2>/dev/null | grep -E 'ESSID|Quality' | head -n 30
-      elif [ -f /usr/lib/atrios/wifi_scan.py ]; then
-        python3 /usr/lib/atrios/wifi_scan.py
+      elif [ -x /usr/lib/atrios/wifi-scan ]; then
+        /usr/lib/atrios/wifi-scan
       fi
     elif [ "$SUBCMD" = "power" ]; then
       STATE="${3:-1}"
@@ -116,7 +116,7 @@ case "$CMD" in
       ip link set wlan0 up
       wpa_supplicant -B -i wlan0 -c "$CONF" -D nl80211,wext
       sleep 2
-      udhcpc -i wlan0 -n -q -t 5 2>/dev/null && (python3 /usr/lib/atrios/ntp sync >/dev/null 2>&1 &)
+      udhcpc -i wlan0 -n -q -t 5 2>/dev/null && (/usr/lib/atrios/ntp sync >/dev/null 2>&1 &)
       echo "Connection requested. Run 'atrios wifi' to check status."
     else
       ip -4 addr show wlan0 2>/dev/null || ip link show wlan0 2>/dev/null
@@ -218,7 +218,7 @@ case "$CMD" in
           else
             if [ -x /usr/lib/atrios/bt-agent ] && ! pgrep -f /usr/lib/atrios/bt-agent >/dev/null 2>&1; then
               echo "Starting BlueZ auto-pairing agent..."
-              python3 /usr/lib/atrios/bt-agent 2>/dev/null &
+              /usr/lib/atrios/bt-agent 2>/dev/null &
               sleep 0.5
             fi
             if [ -x /usr/libexec/bluetooth/bluetoothd ] && ! pgrep -x bluetoothd >/dev/null 2>&1; then
@@ -243,7 +243,7 @@ case "$CMD" in
           fi
           if [ -x /usr/lib/atrios/bt-control ] && ! pgrep -f /usr/lib/atrios/bt-control >/dev/null 2>&1; then
             echo "Starting Bluetooth Remote Control daemon..."
-            python3 /usr/lib/atrios/bt-control &
+            /usr/lib/atrios/bt-control &
           fi
           echo "[OK] Bluetooth Speaker Mode ACTIVE!"
           echo "[OK] Discoverable as: 'Yandex Station Max'"
@@ -263,7 +263,7 @@ case "$CMD" in
       fi
     elif [ "$SUBCMD" = "test" ]; then
       if [ -f /usr/lib/atrios/rtk-bt-init ]; then
-        python3 /usr/lib/atrios/rtk-bt-init test
+        /usr/lib/atrios/rtk-bt-init test
       else
         echo "Error: /usr/lib/atrios/rtk-bt-init not found"
         exit 1
@@ -315,7 +315,7 @@ case "$CMD" in
       fi
       echo "Scanning for nearby Bluetooth devices..."
       if [ -f /tmp/atrios_bt_state ] && grep -q "^h5" /tmp/atrios_bt_state 2>/dev/null; then
-        python3 /usr/lib/atrios/rtk-bt-init scan
+        /usr/lib/atrios/rtk-bt-init scan
       elif [ -e /sys/class/bluetooth/hci0 ]; then
         if command -v hciconfig >/dev/null 2>&1; then
           hciconfig hci0 up 2>/dev/null || true
@@ -331,7 +331,7 @@ case "$CMD" in
           bluetoothctl --timeout 5 scan on 2>/dev/null || true
         fi
       else
-        python3 /usr/lib/atrios/rtk-bt-init scan 2>/dev/null || echo "Bluetooth controller not responding."
+        /usr/lib/atrios/rtk-bt-init scan 2>/dev/null || echo "Bluetooth controller not responding."
       fi
     else
       if [ -e /sys/class/bluetooth/hci0 ] && command -v hciconfig >/dev/null 2>&1; then

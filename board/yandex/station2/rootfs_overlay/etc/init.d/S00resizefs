@@ -46,52 +46,8 @@ case "$1" in
 
     echo "[AtriOS] Expanding $ROOT_DEV from $CUR_SIZE to $TARGET_SIZE sectors (reserve=$RESERVE_SECTORS on $DISK_DEV)..."
 
-    command -v python3 >/dev/null 2>&1 || exit 0
-    python3 - "$DISK_DEV" "$PART_NUM" "$CUR_START" "$CUR_SIZE" "$TARGET_SIZE" << 'PYEOF' || exit 1
-import os, struct, sys
-
-disk_dev = sys.argv[1]
-part_num = int(sys.argv[2])
-cur_start = int(sys.argv[3])
-cur_size = int(sys.argv[4])
-target_size = int(sys.argv[5])
-
-fd = os.open(disk_dev, os.O_RDWR | os.O_SYNC)
-try:
-    mbr = bytearray(os.read(fd, 512))
-    if len(mbr) != 512 or mbr[510] != 0x55 or mbr[511] != 0xAA:
-        sys.exit(1)
-
-    off = 0x1BE + (part_num - 1) * 16
-    ptype = mbr[off + 4]
-    mbr_start, mbr_size = struct.unpack_from("<II", mbr, off + 8)
-    if ptype == 0 or mbr_start != cur_start or mbr_size != cur_size:
-        sys.exit(1)
-
-    # Check no later partition overlaps the expanded range
-    target_end = cur_start + target_size
-    for idx in range(4):
-        if idx == part_num - 1:
-            continue
-        o = 0x1BE + idx * 16
-        if mbr[o + 4] != 0:
-            s, sz = struct.unpack_from("<II", mbr, o + 8)
-            if s >= cur_start and s < target_end:
-                sys.exit(1)
-
-    # Update partition size in MBR (keep start LBA and disk signature/PARTUUID intact)
-    struct.pack_into("<I", mbr, off + 12, target_size)
-    # Set EndCHS to LBA-only marker (FE FF FF)
-    mbr[off + 5] = 0xFE
-    mbr[off + 6] = 0xFF
-    mbr[off + 7] = 0xFF
-
-    os.lseek(fd, 0, os.SEEK_SET)
-    os.write(fd, bytes(mbr))
-    os.fsync(fd)
-finally:
-    os.close(fd)
-PYEOF
+    [ -x /usr/lib/atrios/rotaryd ] || exit 0
+    /usr/lib/atrios/rotaryd resize-mbr "$DISK_DEV" "$PART_NUM" "$CUR_START" "$CUR_SIZE" "$TARGET_SIZE" || exit 1
 
     sync
     if command -v resizepart >/dev/null 2>&1; then

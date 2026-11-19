@@ -17,18 +17,7 @@ export DBUS_SESSION_BUS_ADDRESS="unix:path=/var/run/dbus/system_bus_socket"
 # Perceptual 0..100 -> ALSA raw curve using pure integer arithmetic (no awk math).
 # zero_db_raw is 255 for the SY6045S speaker masters and 191 for the ES8156 headphone DAC.
 volume_raw() {
-    python3 -c '
-import sys
-p = float(sys.argv[1]) if len(sys.argv) > 1 else 0
-z = float(sys.argv[2]) if len(sys.argv) > 2 else 255
-if p <= 0:
-    print(0)
-else:
-    db = -40.0 * (1.0 - (p / 100.0) ** 0.65)
-    r = int(round(z + 2.0 * db))
-    r = max(1, min(int(z), r))
-    print(r)
-' "$1" "$2"
+    /usr/lib/atrios/rotaryd volume-raw "${1:-0}" "${2:-255}"
 }
 
 read_state_pct() {

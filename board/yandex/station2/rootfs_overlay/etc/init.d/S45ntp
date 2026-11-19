@@ -19,8 +19,8 @@ case "$1" in
     if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null; then
       exit 0
     fi
-    if [ -f /usr/lib/atrios/ntp ]; then
-      python3 /usr/lib/atrios/ntp daemon >/var/log/atrios-ntp.log 2>&1 &
+    if [ -x /usr/lib/atrios/ntp ]; then
+      /usr/lib/atrios/ntp daemon >/var/log/atrios-ntp.log 2>&1 &
       echo "$!" > "$PIDFILE"
     fi
     ;;
@@ -37,7 +37,7 @@ case "$1" in
     "$0" start
     ;;
   status)
-    python3 /usr/lib/atrios/ntp status 2>/dev/null || date
+    /usr/lib/atrios/ntp status 2>/dev/null || date
     ;;
   *)
     echo "Usage: $0 {start|stop|restart|status}"

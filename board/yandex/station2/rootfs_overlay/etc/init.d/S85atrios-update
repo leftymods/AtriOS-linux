@@ -5,10 +5,10 @@ PID=/var/run/atrios/update.pid
 case "$1" in
   start)
     mkdir -p /var/run/atrios /var/log
-    start-stop-daemon -S -b -m -p "$PID" -x /usr/bin/python3 -- "$DAEMON" daemon
+    start-stop-daemon -S -b -m -p "$PID" -x "$DAEMON" -- daemon
     ;;
   stop)
-    start-stop-daemon -K -p "$PID" -x /usr/bin/python3
+    start-stop-daemon -K -p "$PID" -x "$DAEMON"
     rm -f "$PID"
     ;;
   restart) "$0" stop; "$0" start ;;
