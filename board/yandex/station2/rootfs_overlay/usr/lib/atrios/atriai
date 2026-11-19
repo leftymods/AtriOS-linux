@@ -66,6 +66,7 @@ DEFAULT_CONFIG = {
 }
 
 _button_triggered = False
+_wake_triggered = False
 _resume_visual = False
 _current_phase = "idle"
 _current_ring_tag = "off"
@@ -178,6 +179,13 @@ def consume_button_trigger():
     return hit
 
 
+def consume_wake_trigger():
+    global _wake_triggered
+    hit = _wake_triggered
+    _wake_triggered = False
+    return hit
+
+
 def downsample_48k_s32_8ch_to_16k_s16_mono(raw_bytes):
     n_i32 = (len(raw_bytes) // 4)
     stride = CAP_CH * 3  # 8ch * 3 (48kHz -> 16kHz) = 24 int32s per output sample
@@ -200,13 +208,23 @@ def downsample_48k_s32_8ch_to_16k_s16_mono(raw_bytes):
 
 ATRI_WAKE_ALIASES = (
     "atri",
+    "atria",
     "атри",
     "атря",
     "атрия",
-    "atria",
+    "атре",
+    "атрий",
+    "атрии",
+    "отри",
     "этри",
+    "этрий",
+    "адри",
+    "антри",
+    "артри",
+    "актри",
     "а три",
     "о три",
+    "эй три",
 )
 
 ALICE_WAKE_ALIASES = (
@@ -217,22 +235,78 @@ ALICE_WAKE_ALIASES = (
     "alice",
 )
 
+_WAKE_FILLERS = {
+    "please",
+    "пожалуйста",
+    "эй",
+    "слушай",
+    "алло",
+    "давай",
+    "ну",
+    "окей",
+    "ок",
+    "hey",
+    "ok",
+    "okay",
+}
 
-def matches_wake_word(text, wake_word):
+
+def _wake_candidates(wake_word):
     ww = (wake_word or "").strip().lower()
     if not ww or ww in ("off", "none", "false"):
-        return True
-    norm = re.sub(r"[^\w\s]", " ", (text or "").lower().replace("ё", "е"))
-    norm = re.sub(r"\s+", " ", norm).strip()
-    if not norm:
-        return False
+        return set()
     tokens = [t.strip() for t in ww.split(",") if t.strip()]
     candidates = set(tokens)
     if "atri" in candidates or "атри" in candidates:
         candidates.update(ATRI_WAKE_ALIASES)
     if "алиса" in candidates or "alice" in candidates:
         candidates.update(ALICE_WAKE_ALIASES)
+    return candidates
+
+
+def matches_wake_word(text, wake_word):
+    candidates = _wake_candidates(wake_word)
+    if not candidates:
+        return True
+    norm = re.sub(r"[^\w\s]", " ", (text or "").lower().replace("ё", "е"))
+    norm = re.sub(r"\s+", " ", norm).strip()
+    if not norm:
+        return False
     return any(re.search(r"(?<!\w)" + re.escape(c) + r"(?!\w)", norm) for c in candidates)
+
+
+def strip_wake_word(text, wake_word):
+    norm = re.sub(r"[^\w\s]", " ", (text or "").lower().replace("ё", "е"))
+    norm = re.sub(r"\s+", " ", norm).strip()
+    if not norm:
+        return ""
+    aliases = _wake_candidates(wake_word)
+    if not aliases:
+        return norm
+    words = norm.split()
+    while words and words[0] in _WAKE_FILLERS:
+        words.pop(0)
+    s = " ".join(words)
+    for word in sorted(aliases, key=len, reverse=True):
+        if s == word:
+            s = ""
+            break
+        if s.startswith(word + " "):
+            s = s[len(word):].strip()
+            break
+    rest = s.split()
+    while rest and rest[0] in _WAKE_FILLERS:
+        rest.pop(0)
+    while rest and rest[-1] in _WAKE_FILLERS:
+        rest.pop()
+    return " ".join(rest)
+
+
+def is_wake_word_only(text, wake_word):
+    ww = (wake_word or "").strip().lower()
+    if not ww or ww in ("off", "none", "false"):
+        return False
+    return matches_wake_word(text, wake_word) and strip_wake_word(text, wake_word) == ""
 
 
 def load_config():
@@ -638,16 +712,10 @@ _DEVICE_COMMANDS = {'next_track': {'next',
 
 
 def local_command(text, wake_word):
-    norm = re.sub(r"[^\w\s]", " ", text.lower().replace("\u0451", "\u0435"))
-    norm = " ".join(norm.split())
-    aliases = set(ATRI_WAKE_ALIASES + ALICE_WAKE_ALIASES)
-    aliases.update(w.strip().lower() for w in wake_word.split(",") if w.strip())
-    for word in sorted(aliases, key=len, reverse=True):
-        if norm.startswith(word + " "):
-            norm = norm[len(word):].strip()
-            break
-    fillers = {"please", "\u043f\u043e\u0436\u0430\u043b\u0443\u0439\u0441\u0442\u0430", "\u044d\u0439", "\u0441\u043b\u0443\u0448\u0430\u0439", "\u0434\u0430\u0432\u0430\u0439", "\u043d\u0443"}
-    words = [word for word in norm.split() if word not in fillers]
+    if wake_word and not matches_wake_word(text, wake_word):
+        return None
+    norm = strip_wake_word(text, wake_word)
+    words = [word for word in norm.split() if word not in _WAKE_FILLERS]
     dedup = [word for i, word in enumerate(words) if i == 0 or word != words[i - 1]]
     candidates = {" ".join(words), " ".join(dedup)}
     return next((action for action, phrases in _DEVICE_COMMANDS.items() if candidates & phrases), None)
@@ -670,6 +738,7 @@ def send_phrase_to_server(server_url, pcm_bytes, wake_word=""):
         out.setsampwidth(2)
         out.setframerate(SR)
         out.writeframes(pcm_bytes)
+    keep_listening = False
     try:
         raw_asr = _voice_call(lambda: request_bytes(base + "/asr", data=wav.getvalue(), headers={**headers, "Content-Type": "audio/wav", "Accept": "application/json"}, ca_file=opts["ca_file"], limit=65536, timeout=25))
         recognized = json.loads(raw_asr)
@@ -679,12 +748,22 @@ def send_phrase_to_server(server_url, pcm_bytes, wake_word=""):
         if not text:
             set_error("voice")
             return text, ""
+        if wake_word and not matches_wake_word(text, wake_word):
+            print(f"[atriai] ignored phrase without wake word ({wake_word!r}): {text!r}", flush=True)
+            set_error("voice")
+            return text, ""
+        if is_wake_word_only(text, wake_word):
+            global _wake_triggered
+            _wake_triggered = True
+            keep_listening = True
+            print(f"[atriai] wake word activated ({text!r}) -> listening (6s)", flush=True)
+            set_vad_visual("vad")
+            play_command_chime("play")
+            set_error("voice")
+            return text, ""
         action = local_command(text, wake_word)
         if action:
             execute_device_command(action)
-            set_error("voice")
-            return text, ""
-        if wake_word and not matches_wake_word(text, wake_word):
             set_error("voice")
             return text, ""
         set_vad_visual("thinking")
@@ -705,7 +784,8 @@ def send_phrase_to_server(server_url, pcm_bytes, wake_word=""):
         set_error("voice", error_kind(exc, "server"), str(exc))
         raise
     finally:
-        set_vad_visual("idle")
+        if not keep_listening:
+            set_vad_visual("idle")
 
 
 def playback_running():
@@ -764,6 +844,8 @@ def run_daemon():
 
     print(f"[atriai] Starting voice client -> {cfg['server']}", flush=True)
     write_status("listening")
+    noise_floor = 350.0
+    pend_force_active = False
 
     while True:
         cfg = load_config()
@@ -772,6 +854,7 @@ def run_daemon():
             break
 
         if is_mic_muted():
+            pend_force_active = False
             write_status("muted")
             time.sleep(0.5)
             continue
@@ -791,11 +874,14 @@ def run_daemon():
             buf = bytearray()
             pre_roll = deque(maxlen=10)
             speaking = False
+            peak_rms = 0.0
             speech_hits = 0
             warmup_frames = 20
-            noise_floor = 200.0
             duck_orig = None
-            force_active = False
+            force_active = pend_force_active
+            pend_force_active = False
+            ww_cfg = str(cfg.get("wake_word", "Atri") or "").strip()
+            wake_required = bool(ww_cfg and ww_cfg.lower() not in ("off", "none", "false"))
             wait_speech_ms = 0.0
             silence_ms = 0.0
             frame_ms = (FRAME_SAMPLES / SR) * 1000.0
@@ -803,6 +889,8 @@ def run_daemon():
             max_sil = float(cfg.get("silence_ms", 600))
             min_bytes = int(SR * 2 * (float(cfg.get("min_speech_ms", 400)) / 1000.0))
 
+            if force_active:
+                set_vad_visual("vad")
             write_status("listening")
             while True:
                 check_resume_visual()
@@ -819,6 +907,7 @@ def run_daemon():
                         break
                     force_active = True
                     speaking = False
+                    peak_rms = 0.0
                     speech_hits = 0
                     silence_ms = 0.0
                     wait_speech_ms = 0.0
@@ -840,11 +929,12 @@ def run_daemon():
                     time.sleep(1.0)
                     break
                 chunk = raw if use_aec else downsample_48k_s32_8ch_to_16k_s16_mono(raw)
+                rms = pcm16_rms(chunk)
                 if warmup_frames > 0:
                     warmup_frames -= 1
+                    noise_floor = max(150.0, min(3000.0, noise_floor * 0.85 + rms * 0.15))
                     pre_roll.append(chunk)
                     continue
-                rms = pcm16_rms(chunk)
                 # Adaptive noise floor: falls fast, rises slowly (tracks music/TV level).
                 if not speaking:
                     if rms < noise_floor:
@@ -852,20 +942,23 @@ def run_daemon():
                     else:
                         noise_floor = noise_floor * 0.995 + rms * 0.005
                 music_on = playback_running()
-                dyn_thr = noise_floor * (1.8 if music_on else 2.2) + 60.0
-                dyn_thr = max(vad_thr * 0.6, min(dyn_thr, 6000.0))
-                active_thr = min(dyn_thr, 350.0) if force_active else dyn_thr
-                needed_hits = 2 if force_active else 4
+                dyn_thr = noise_floor * (1.8 if music_on else 2.2) + 80.0
+                dyn_thr = max(vad_thr, min(dyn_thr, 6000.0))
+                active_thr = min(dyn_thr, max(350.0, vad_thr * 0.65)) if force_active else dyn_thr
+                needed_hits = 2 if force_active else 5
                 if rms >= active_thr:
                     speech_hits += 1
                     if not speaking and speech_hits >= needed_hits:
                         speaking = True
+                        peak_rms = rms
                         for prev in pre_roll:
                             buf.extend(prev)
                         pre_roll.clear()
-                        if not force_active:
+                        if force_active or not wake_required:
                             set_vad_visual("vad")
                     if speaking:
+                        if rms > peak_rms:
+                            peak_rms = rms
                         silence_ms = 0.0
                         buf.extend(chunk)
                         if len(buf) >= SR * 2 * 12:
@@ -873,6 +966,8 @@ def run_daemon():
                     else:
                         pre_roll.append(chunk)
                 elif speaking:
+                    if rms > peak_rms:
+                        peak_rms = rms
                     speech_hits = 0
                     buf.extend(chunk)
                     silence_ms += frame_ms
@@ -884,7 +979,7 @@ def run_daemon():
                     if force_active:
                         wait_speech_ms += frame_ms
                         if wait_speech_ms >= 6000.0:
-                            print("[atriai] funcbutton timeout (6s without speech) -> clock", flush=True)
+                            print("[atriai] active listening timeout (6s without speech) -> clock", flush=True)
                             break
 
             if proc is not None:
@@ -905,14 +1000,15 @@ def run_daemon():
                 restore_volume(duck_orig)
                 duck_orig = None
 
-            if speaking and len(buf) >= min_bytes and not is_mic_muted():
+            if speaking and len(buf) >= min_bytes and not is_mic_muted() and (force_active or peak_rms >= active_thr * 1.12):
                 write_status("thinking")
-                set_vad_visual("thinking")
-                if force_active:
+                if force_active or not wake_required:
                     set_vad_visual("thinking")
                 try:
-                    ww = "" if force_active else cfg.get("wake_word", "")
+                    ww = "" if force_active else ww_cfg
                     asr, ans = send_phrase_to_server(cfg["server"], bytes(buf), wake_word=ww)
+                    if consume_wake_trigger():
+                        pend_force_active = True
                     write_status("listening", last_asr=asr, last_answer=ans)
                 except Exception as e:
                     write_status("error", error=str(e))
