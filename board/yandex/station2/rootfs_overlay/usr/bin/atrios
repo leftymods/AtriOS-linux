@@ -17,6 +17,7 @@ AtriOS - Yandex Station Max tools
   Screen (25x16):
     atrios screen kisser [1|2|animate]  Boykisser cat animation
     atrios screen eyes [state]          Eyes (idle listening thinking speaking[:variant] happy love surprised wink cool confused angry sad sleep boot bt_speaker clock volume ...)
+    atrios screen error [type]          Error display (default|wifi|no_internet|overheat|audio_err|kernel_panic)
     atrios screen clock|ticker "TEXT"|fill [0..255]|pixel X Y [B]|gradient|off
   LED ring (24 RGB):
     atrios ring rainbow|amber|amber_green|volume N|red|blue|green|off
@@ -53,6 +54,7 @@ case "$c" in
   screen|ring|sensor) exec python3 $L/light "$c" "$@" ;;
   kisser|cat|boykisser) exec python3 $L/light screen kisser "$@" ;;
   eyes)               exec python3 $L/light screen eyes "$@" ;;
+  error|error:*)      exec python3 $L/light screen "$c" "$@" ;;
   clock|ticker)       exec python3 $L/light screen "$c" "$@" ;;
   light)              exec python3 $L/light "$@" ;;
   check|check-audio)  exec /bin/sh $L/check_audio.sh "$@" ;;

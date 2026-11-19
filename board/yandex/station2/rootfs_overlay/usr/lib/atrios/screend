@@ -216,16 +216,96 @@ def get_screen_mode():
         pass
     return "clock"
 
-def render_error(code):
+ERROR_CODE_MAP = {
+    1: "wifi",
+    2: "no_internet",
+    3: "no_internet",
+    4: "audio_err",
+    5: "default",
+    6: "default",
+    7: "kernel_panic",
+}
+ERROR_KIND_MAP = {
+    "default": "default", "x": "default", "update": "default", "signature": "default",
+    "wifi": "wifi", "network": "wifi",
+    "no_internet": "no_internet", "internet": "no_internet", "tls": "no_internet", "server": "no_internet",
+    "overheat": "overheat", "thermal": "overheat",
+    "audio_err": "audio_err", "audio": "audio_err",
+    "kernel_panic": "kernel_panic", "panic": "kernel_panic", "storage": "kernel_panic",
+}
+ERR_X = ["##...##", "###.###", ".#####.", "..###..", ".#####.", "###.###", "##...##"]
+ERR_X_SM = ["##...##", ".##.##.", "..###..", ".##.##.", "##...##"]
+ERR_WIFI = ["..#######..", ".#.......#.", "#..#####..#", "..#.....#..", "....###....", "...........", ".....#.....", "....###...."]
+ERR_GLOBE = ["..#####..", ".#.#.#.#.", "#########", "#..#.#..#", "#########", ".#.#.#.#.", "..#####.."]
+ERR_THERM = [".###.", ".#.#.", ".#.#.", ".###.", ".###.", "#####", "#####", ".###."]
+ERR_SPK = ["...#", "..##", "####", "####", "####", "..##", "...#"]
+
+
+def _resolve_error_variant(code_or_error):
+    if isinstance(code_or_error, dict):
+        kind = str(code_or_error.get("kind", "")).lower()
+        if kind in ERROR_KIND_MAP:
+            return ERROR_KIND_MAP[kind]
+        return ERROR_CODE_MAP.get(code_or_error.get("code"), "default")
+    if isinstance(code_or_error, str):
+        low = code_or_error.strip().lower()
+        if low.startswith("error:"):
+            low = low[6:] or "default"
+        return ERROR_KIND_MAP.get(low, "default")
+    return ERROR_CODE_MAP.get(code_or_error, "default")
+
+
+def render_error(code, t=0.0):
     buf = bytearray(FRAME_SIZE)
-    # E followed by two digits, same readable 5x9 font as the clock.
-    glyphs = dict(FONT_LARGE_5X9)
-    glyphs["E"] = [31, 16, 16, 16, 30, 16, 16, 16, 31]
-    for char, x0 in zip("E%02d" % max(1, min(99, int(code))), (4, 10, 16)):
-        for y, bits in enumerate(glyphs[char]):
-            for x in range(5):
-                if bits & (1 << (4 - x)):
-                    set_pixel(buf, x0 + x, y + 3, 180)
+    variant = _resolve_error_variant(code)
+    bright = 200
+
+    def bmp(x0, y0, rows):
+        for r, row in enumerate(rows):
+            for c, ch in enumerate(row):
+                if ch == "#":
+                    set_pixel(buf, x0 + c, y0 + r, bright)
+
+    def rect(x0, y0, w, h):
+        for dy in range(h):
+            for dx in range(w):
+                set_pixel(buf, x0 + dx, y0 + dy, bright)
+
+    if variant == "default":
+        shake = 0 if int(t * 16) % 2 == 0 else (1 if int(t * 8) % 2 == 0 else -1)
+        if int(t * 5) % 4 != 3:
+            bmp(3 + shake, 4, ERR_X)
+            bmp(15 + shake, 4, ERR_X)
+    elif variant == "wifi":
+        bmp(2, 4, ERR_WIFI)
+        if int(t * 3.5) % 2 == 0:
+            bmp(16, 6, ERR_X_SM)
+    elif variant == "no_internet":
+        bmp(3, 4, ERR_GLOBE)
+        if int(t * 3.5) % 2 == 0:
+            rect(17, 4, 2, 5)
+            rect(17, 10, 2, 2)
+    elif variant == "overheat":
+        bmp(6, 4, ERR_THERM)
+        if int(t * 4.0) % 2 == 0:
+            rect(15, 4, 2, 5)
+            rect(15, 10, 2, 2)
+    elif variant == "audio_err":
+        bmp(5, 4, ERR_SPK)
+        if int(t * 3.5) % 2 == 0:
+            bmp(13, 5, ERR_X_SM)
+    elif variant == "kernel_panic":
+        glitch = (int(t * 18) % 3) - 1
+        bmp(3 + glitch, 2, ERR_X)
+        bmp(15 - glitch, 2, ERR_X)
+        seed = int(t * 20)
+        for x in range(WIDTH):
+            if ((x * 13 + seed * 7) % 11) < 3:
+                set_pixel(buf, x, 12 + ((x + seed) % 3), bright)
+        if seed % 4 == 0:
+            y_line = (seed * 3) % HEIGHT
+            for x in range(WIDTH):
+                set_pixel(buf, x, y_line, bright)
     send_frame(buf)
 
 
@@ -236,9 +316,9 @@ def main():
     while True:
         error = active_error()
         if error:
-            render_error(error["code"])
+            render_error(error, time.monotonic())
             last_rendered = ""
-            time.sleep(0.5)
+            time.sleep(1.0 / 15)
             continue
         if get_screen_mode() != "clock":
             last_rendered = ""

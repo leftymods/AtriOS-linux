@@ -885,6 +885,109 @@ def screen_eyes(state="open", brightness=200, duration=None):
         pass
 
 
+E_ERROR_VARIANTS = ("default", "wifi", "no_internet", "overheat", "audio_err", "kernel_panic")
+E_ERROR_ALIASES = {
+    "x": "default", "network": "wifi", "internet": "no_internet",
+    "tls": "no_internet", "server": "no_internet", "audio": "audio_err",
+    "thermal": "overheat", "panic": "kernel_panic",
+    "update": "default", "signature": "default", "storage": "kernel_panic",
+}
+E_X_SPRITE = ["##...##", "###.###", ".#####.", "..###..", ".#####.", "###.###", "##...##"]
+E_X_SMALL = ["##...##", ".##.##.", "..###..", ".##.##.", "##...##"]
+E_WIFI = ["..#######..", ".#.......#.", "#..#####..#", "..#.....#..", "....###....", "...........", ".....#.....", "....###...."]
+E_GLOBE = ["..#####..", ".#.#.#.#.", "#########", "#..#.#..#", "#########", ".#.#.#.#.", "..#####.."]
+E_THERM = [".###.", ".#.#.", ".#.#.", ".###.", ".###.", "#####", "#####", ".###."]
+
+
+def render_error_pixels(variant="default", t=0.0):
+    """Render one frame (16x25 bitmap of 0/1) for an `error:<variant>` indicator."""
+    v = E_ERROR_ALIASES.get(variant, variant)
+    if v not in E_ERROR_VARIANTS:
+        v = "default"
+    px_grid = [bytearray(E_W) for _ in range(E_H)]
+
+    def px(x, y):
+        ix, iy = _rnd(x), _rnd(y)
+        if 0 <= ix < E_W and 0 <= iy < E_H:
+            px_grid[iy][ix] = 1
+
+    def bmp(x0, y0, rows):
+        for r, row in enumerate(rows):
+            for c, ch in enumerate(row):
+                if ch == "#":
+                    px(x0 + c, y0 + r)
+
+    def rect(x0, y0, w, h):
+        for dy in range(h):
+            for dx in range(w):
+                px(x0 + dx, y0 + dy)
+
+    if v == "default":
+        shake = 0 if int(t * 16) % 2 == 0 else (1 if int(t * 8) % 2 == 0 else -1)
+        if int(t * 5) % 4 != 3:
+            bmp(E_LEFT_X + shake, 4, E_X_SPRITE)
+            bmp(E_RIGHT_X + shake, 4, E_X_SPRITE)
+    elif v == "wifi":
+        bmp(2, 4, E_WIFI)
+        if int(t * 3.5) % 2 == 0:
+            bmp(16, 6, E_X_SMALL)
+    elif v == "no_internet":
+        bmp(3, 4, E_GLOBE)
+        if int(t * 3.5) % 2 == 0:
+            rect(17, 4, 2, 5)
+            rect(17, 10, 2, 2)
+    elif v == "overheat":
+        bmp(6, 4, E_THERM)
+        if int(t * 4.0) % 2 == 0:
+            rect(15, 4, 2, 5)
+            rect(15, 10, 2, 2)
+    elif v == "audio_err":
+        bmp(5, 4, E_SPEAKER)
+        if int(t * 3.5) % 2 == 0:
+            bmp(13, 5, E_X_SMALL)
+    elif v == "kernel_panic":
+        glitch = (int(t * 18) % 3) - 1
+        bmp(E_LEFT_X + glitch, 2, E_X_SPRITE)
+        bmp(E_RIGHT_X - glitch, 2, E_X_SPRITE)
+        seed = int(t * 20)
+        for x in range(E_W):
+            if ((x * 13 + seed * 7) % 11) < 3:
+                px(x, 12 + ((x + seed) % 3))
+        if seed % 4 == 0:
+            y_line = (seed * 3) % E_H
+            for x in range(E_W):
+                px(x, y_line)
+    return px_grid
+
+
+def screen_error(variant="default", brightness=200, duration=None):
+    """Animate an error indicator (`default|wifi|no_internet|overheat|audio_err|kernel_panic`)."""
+    raw = (variant or "default").strip().lower()
+    if raw.startswith("error:"):
+        raw = raw[6:] or "default"
+    v = E_ERROR_ALIASES.get(raw, raw)
+    if v not in E_ERROR_VARIANTS:
+        print(f"[Screen] Unknown error type '{variant}'. Types: {', '.join(E_ERROR_VARIANTS)}", flush=True)
+        return
+    print(f"[Screen] Error: {v} (brightness={brightness}/255)", flush=True)
+    b = max(0, min(255, int(brightness)))
+    t0 = time.monotonic()
+    end = t0 + duration if duration else None
+    try:
+        while end is None or time.monotonic() < end:
+            grid = render_error_pixels(v, time.monotonic() - t0)
+            buf = bytearray(SCR_SIZE)
+            for y in range(E_H):
+                for x in range(E_W):
+                    if grid[y][x]:
+                        o = (y * E_W + x) * SCR_BPP
+                        buf[o] = buf[o + 1] = buf[o + 2] = b
+            screen_send_frame(buf)
+            time.sleep(1.0 / E_FPS)
+    except KeyboardInterrupt:
+        pass
+
+
 def screen_ticker(text, brightness=220, speed=0.07):
     text = " " + text.upper() + " "
     # Build complete text pixel buffer
@@ -1058,7 +1161,7 @@ def main():
     # Screen parser
     p_scr = subparsers.add_parser("screen", help="Front 25x16 monochrome matrix")
     p_scr.add_argument("action", nargs="?", default="clock",
-                       choices=["clock", "eyes", "kisser", "cat", "boykisser", "ticker", "pixel", "row", "col", "gradient", "fill", "clear", "off", "smile", "happy", "test"],
+                       choices=["clock", "eyes", "error", "kisser", "cat", "boykisser", "ticker", "pixel", "row", "col", "gradient", "fill", "clear", "off", "smile", "happy", "test"],
                        help="Action to perform")
     p_scr.add_argument("value", nargs="*", help="Arguments for action (e.g. text for ticker, X Y for pixel)")
     p_scr.add_argument("--brightness", type=int, default=220, help="Brightness level (0..255)")
@@ -1072,6 +1175,9 @@ def main():
 
     # Sensor parser
     subparsers.add_parser("sensor", help="Read ambient light sensor (Lux)")
+
+    if len(sys.argv) >= 3 and sys.argv[1] == "screen" and sys.argv[2].lower().startswith("error:"):
+        sys.argv[2:3] = ["error", sys.argv[2][6:] or "default"]
 
     args = parser.parse_args()
 
@@ -1125,6 +1231,9 @@ def main():
         elif act in ("eyes", "smile", "happy"):
             state = "happy" if act in ("smile", "happy") else (args.value[0] if args.value else "idle")
             screen_eyes(state, b)
+        elif act == "error":
+            variant = args.value[0] if args.value else "default"
+            screen_error(variant, b)
         elif act == "test":
             screen_fill(100)
             time.sleep(0.8)
@@ -1166,6 +1275,7 @@ def main():
         print("\nCommands:")
         print("  atrios screen kisser [1|2|animate] - Boykisser cat animation (Frame 1 calm / Frame 2 happy)")
         print("  atrios screen eyes [state]         - Eyes (idle listening thinking speaking[:variant] happy love surprised wink cool confused angry sad sleep boot bt_speaker clock volume ...)")
+        print("  atrios screen error [type]         - Error indicator (default|wifi|no_internet|overheat|audio_err|kernel_panic)")
         print("  atrios screen clock                - Display current time")
         print("  atrios screen ticker \"TEXT\"       - Scrolling marquee")
         print("  atrios screen pixel X Y [B]        - Individual LED control (0..255)")
