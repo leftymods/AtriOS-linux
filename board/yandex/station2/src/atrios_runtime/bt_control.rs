@@ -200,7 +200,7 @@ fn set_system_volume(pct: i32) {
 
 fn get_ai_info() -> Json {
     let mut enabled = false;
-    let mut server = "https://192.168.1.106:8090".to_string();
+    let mut server = "https://192.168.1.107:8090".to_string();
     let mut wake_word = "Atri".to_string();
     if let Ok(txt) = fs::read_to_string(AI_CONFIG_FILE) {
         if let Ok(j) = Json::parse(&txt) {

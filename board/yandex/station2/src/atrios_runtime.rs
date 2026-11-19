@@ -216,4 +216,13 @@ mod tests {
         let digest = sys::hex_lower(&sys::sha256_bytes(b"abc"));
         assert_eq!(digest, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
     }
+
+    #[test]
+    fn wifi_up_prevents_false_wifi_error_on_server_unreachable() {
+        let msg = "Connect 192.168.1.107:8090: No route to host (os error 113)";
+        assert_eq!(status::classify_error_kind(msg, "server", true), "server");
+        assert_eq!(status::classify_error_kind(msg, "server", false), "network");
+        assert_eq!(status::classify_error_kind(msg, "update", true), "update");
+        assert_eq!(status::classify_error_kind("TLS handshake error", "server", true), "tls");
+    }
 }

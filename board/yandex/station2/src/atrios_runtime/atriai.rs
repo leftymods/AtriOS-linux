@@ -1485,6 +1485,7 @@ fn send_phrase_to_server(
     let base = server_url.trim_end_matches('/').to_string();
     let wav = prepare_asr_wav(pcm);
     let mut keep_listening = false;
+    let mut user_addressed = force_active || wake_word.is_empty();
 
     let res: Result<(String, String, bool), String> = (|| {
         let base1 = base.clone();
@@ -1517,6 +1518,7 @@ fn send_phrase_to_server(
             set_error("voice", None, "", 120);
             return Ok((text, String::new(), false));
         }
+        user_addressed = true;
         if is_wake_word_only(&text, wake_word) {
             WAKE_TRIGGERED.store(true, Ordering::SeqCst);
             keep_listening = true;
@@ -1620,8 +1622,8 @@ fn send_phrase_to_server(
     })();
 
     if let Err(ref e) = res {
-        if !e.starts_with("InterruptedError") {
-            set_error("voice", Some(error_kind_from_msg(e, "server")), e, 120);
+        if user_addressed && !e.starts_with("InterruptedError") {
+            set_error("voice", Some(error_kind_from_msg(e, "server")), e, 15);
         }
     }
     if !keep_listening {

@@ -31,19 +31,53 @@ pub fn error_code(kind: &str) -> Option<i64> {
     }
 }
 
-pub fn error_kind_from_msg(msg: &str, default: &str) -> &'static str {
+pub fn wlan_is_connected() -> bool {
+    if let Ok(st) = fs::read_to_string("/sys/class/net/wlan0/operstate") {
+        if st.trim().eq_ignore_ascii_case("up") {
+            return true;
+        }
+    }
+    if let Ok(c) = fs::read_to_string("/sys/class/net/wlan0/carrier") {
+        if c.trim() == "1" {
+            return true;
+        }
+    }
+    false
+}
+
+pub fn classify_error_kind(msg: &str, default: &str, wifi_up: bool) -> &'static str {
     let low = msg.to_ascii_lowercase();
     if low.contains("tls") || low.contains("ssl") || low.contains("certificate") || low.contains("x509") {
         "tls"
     } else if low.contains("enospc") || low.contains("no space") || low.contains("read-only") || low.contains("eio") {
         "storage"
-    } else if low.contains("timed out") || low.contains("timeout") || low.contains("connect") || low.contains("dns") || low.contains("resolve") {
-        "network"
+    } else if low.contains("timed out")
+        || low.contains("timeout")
+        || low.contains("connect")
+        || low.contains("dns")
+        || low.contains("resolve")
+        || low.contains("no route")
+        || low.contains("unreachable")
+        || low.contains("network")
+    {
+        if wifi_up {
+            if default == "server" {
+                "server"
+            } else {
+                "update"
+            }
+        } else {
+            "network"
+        }
     } else if default == "server" {
         "server"
     } else {
         "update"
     }
+}
+
+pub fn error_kind_from_msg(msg: &str, default: &str) -> &'static str {
+    classify_error_kind(msg, default, wlan_is_connected())
 }
 
 pub fn get_errors_at(path: &Path) -> BTreeMap<String, ErrorEntry> {
