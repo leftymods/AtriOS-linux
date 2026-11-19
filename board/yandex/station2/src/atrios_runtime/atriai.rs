@@ -3,10 +3,11 @@ use std::fs;
 use std::io::{Read, Write};
 use std::net::UdpSocket;
 use std::os::raw::c_int;
+use std::os::unix::io::AsRawFd;
 use std::os::unix::net::UnixDatagram;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 use std::sync::{mpsc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -16,7 +17,8 @@ use crate::json::{obj, Json};
 use crate::light::{RING_OVERRIDE_FILE, SCREEN_MODE_FILE, VOICE_LEVEL_FILE};
 use crate::status::{error_kind_from_msg, set_error};
 use crate::sys::{
-    atomic_write_bytes, now_unix_i64, poll, signal, PollFd, POLLIN, SIGUSR1, SIGUSR2,
+    atomic_write_bytes, kill, now_unix_i64, poll, recv_or_read, signal, PollFd, POLLIN, SIGUSR1,
+    SIGUSR2,
 };
 
 const SR: usize = 16000;
@@ -38,6 +40,8 @@ const VOLUME_FILE: &str = "/var/lib/atrios/volume";
 static BUTTON_TRIGGERED: AtomicBool = AtomicBool::new(false);
 static WAKE_TRIGGERED: AtomicBool = AtomicBool::new(false);
 static RESUME_VISUAL: AtomicBool = AtomicBool::new(false);
+static CAPTURE_FD: AtomicI32 = AtomicI32::new(-1);
+static CAPTURE_FRAME_BYTES: AtomicUsize = AtomicUsize::new(FRAME_BYTES);
 
 extern "C" fn on_sigusr1(_sig: c_int) {
     BUTTON_TRIGGERED.store(true, Ordering::SeqCst);
@@ -66,9 +70,9 @@ impl Default for AiConfig {
             ca_file: String::new(),
             token: String::new(),
             wake_word: "Atri".into(),
-            vad_threshold: 650.0,
-            silence_ms: 600.0,
-            min_speech_ms: 400.0,
+            vad_threshold: 320.0,
+            silence_ms: 550.0,
+            min_speech_ms: 260.0,
         }
     }
 }
@@ -102,6 +106,12 @@ pub fn load_config() -> AiConfig {
                 cfg.min_speech_ms = n;
             }
         }
+    }
+    if cfg.vad_threshold >= 600.0 {
+        cfg.vad_threshold = 320.0;
+    }
+    if cfg.min_speech_ms >= 380.0 {
+        cfg.min_speech_ms = 260.0;
     }
     cfg
 }
@@ -175,7 +185,8 @@ fn normalize_text(text: &str) -> Vec<String> {
 
 const ATRI_ALIASES: &[&str] = &[
     "atri", "atria", "атри", "атря", "атрия", "атре", "атрий", "атрии", "отри", "этри", "этрий",
-    "адри", "антри", "артри", "актри", "а три", "о три", "эй три",
+    "адри", "антри", "артри", "актри", "а три", "о три", "эй три", "матри", "мотри", "утри",
+    "атриа", "атрей", "атрик", "отрыв", "и три", "ну три",
 ];
 const ALICE_ALIASES: &[&str] = &["алиса", "алису", "алисе", "алисой", "alice"];
 const FILLERS: &[&str] = &[
@@ -259,7 +270,13 @@ pub fn matches_wake_word(text: &str, wake_word: &str) -> bool {
         if idx < words.len() && FILLERS.contains(&words[idx].as_str()) {
             idx += 1;
         }
-        if idx + 1 < words.len() && matches!(words[idx].as_str(), "ри" | "три") {
+        if idx < words.len() && matches!(words[idx].as_str(), "ри" | "три") {
+            return true;
+        }
+        if words
+            .iter()
+            .any(|w| w.chars().count() >= 5 && w.ends_with("атри") && w != "смотри" && w != "посмотри")
+        {
             return true;
         }
     }
@@ -293,13 +310,36 @@ pub fn strip_wake_word(text: &str, wake_word: &str) -> String {
         }
     }
     if !matched && cands.iter().any(|c| c == "atri" || c == "атри") {
-        for cl in ["ри ", "три "] {
-            if let Some(rest) = s.strip_prefix(cl) {
-                if !rest.trim().is_empty() {
-                    s = rest.trim().to_string();
-                    break;
+        if s == "ри" || s == "три" {
+            s.clear();
+            matched = true;
+        } else {
+            for cl in ["ри ", "три "] {
+                if let Some(rest) = s.strip_prefix(cl) {
+                    if !rest.trim().is_empty() {
+                        s = rest.trim().to_string();
+                        matched = true;
+                        break;
+                    }
                 }
             }
+        }
+        if !matched {
+            if let Some(first) = words.first() {
+                if first.chars().count() >= 5
+                    && first.ends_with("атри")
+                    && first != "смотри"
+                    && first != "посмотри"
+                {
+                    s = words[1..].join(" ");
+                }
+            }
+        }
+    }
+    for w in &cands {
+        if let Some(rest) = s.strip_suffix(&format!(" {w}")) {
+            s = rest.trim().to_string();
+            break;
         }
     }
     let mut rest: Vec<&str> = s.split_whitespace().collect();
@@ -389,6 +429,7 @@ struct VisualState {
     ring_tag: String,
     screen_tag: String,
     ring_child: Option<Child>,
+    screen_child: Option<Child>,
     udp: Option<UdpSocket>,
 }
 
@@ -401,6 +442,7 @@ fn visual() -> &'static Mutex<VisualState> {
             ring_tag: "off".into(),
             screen_tag: "clock".into(),
             ring_child: None,
+            screen_child: None,
             udp: None,
         })
     })
@@ -434,6 +476,13 @@ fn send_voice_level(level: Option<f64>) {
 }
 
 fn set_vad_visual(phase: &str, force: bool, variant: &str) {
+    let ev = match variant.trim().to_ascii_lowercase().as_str() {
+        "happy" => "happy",
+        "sad" => "sad",
+        "angry" | "serious" => "angry",
+        "surprised" => "surprised",
+        _ => "default",
+    };
     let (ring_tag, ring_args, screen_tag, screen_args, mode_str): (
         &str,
         Vec<&str>,
@@ -455,22 +504,13 @@ fn set_vad_visual(phase: &str, force: bool, variant: &str) {
             vec!["screen".into(), "eyes".into(), "thinking".into()],
             "ai",
         ),
-        "speaking" => {
-            let ev = match variant.trim().to_ascii_lowercase().as_str() {
-                "happy" => "happy",
-                "sad" => "sad",
-                "angry" | "serious" => "angry",
-                "surprised" => "surprised",
-                _ => "default",
-            };
-            (
-                "amber_green",
-                vec!["ring", "amber_green", "60"],
-                format!("eyes_speaking_{ev}"),
-                vec!["screen".into(), "eyes".into(), format!("speaking:{ev}")],
-                "ai",
-            )
-        }
+        "speaking" => (
+            "amber_green",
+            vec!["ring", "amber_green", "60"],
+            format!("eyes_speaking_{ev}"),
+            vec!["screen".into(), "eyes".into(), format!("speaking:{ev}")],
+            "ai",
+        ),
         _ => (
             "off",
             vec!["ring", "off"],
@@ -503,7 +543,7 @@ fn set_vad_visual(phase: &str, force: bool, variant: &str) {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
-        v.ring_child = Command::new("/usr/bin/atrios")
+        v.ring_child = Command::new("/usr/lib/atrios/light")
             .args(&ring_args)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -512,18 +552,62 @@ fn set_vad_visual(phase: &str, force: bool, variant: &str) {
         v.ring_tag = ring_tag.to_string();
     }
 
-    if force || screen_tag != v.screen_tag {
-        let _ = Command::new("pkill")
-            .args(["-f", "/usr/lib/atrios/light screen"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        let _ = Command::new("/usr/bin/atrios")
-            .args(&screen_args)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn();
-        v.screen_tag = screen_tag;
+    if phase == "idle" {
+        if force || v.screen_tag != "clock" {
+            if let Some(mut old) = v.screen_child.take() {
+                let _ = old.kill();
+                let _ = old.wait();
+            }
+            let _ = Command::new("pkill")
+                .args(["-f", "/usr/lib/atrios/light screen"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+            let _ = Command::new("/usr/lib/atrios/light")
+                .args(&screen_args)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn();
+            v.screen_tag = "clock".into();
+        }
+    } else {
+        let udp_msg = match phase {
+            "vad" => "state:listening\n".to_string(),
+            "thinking" => "state:thinking\n".to_string(),
+            "speaking" => format!("speaking:{ev}\n"),
+            _ => "state:idle\n".to_string(),
+        };
+        let screen_alive = v
+            .screen_child
+            .as_mut()
+            .map(|c| matches!(c.try_wait(), Ok(None)))
+            .unwrap_or(false);
+        if screen_alive && !force {
+            if v.udp.is_none() {
+                v.udp = UdpSocket::bind("0.0.0.0:0").ok();
+            }
+            if let Some(ref s) = v.udp {
+                let _ = s.send_to(udp_msg.as_bytes(), "127.0.0.1:5055");
+            }
+            v.screen_tag = screen_tag;
+        } else {
+            if let Some(mut old) = v.screen_child.take() {
+                let _ = old.kill();
+                let _ = old.wait();
+            }
+            let _ = Command::new("pkill")
+                .args(["-f", "/usr/lib/atrios/light screen"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+            v.screen_child = Command::new("/usr/lib/atrios/light")
+                .args(&screen_args)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .ok();
+            v.screen_tag = screen_tag;
+        }
     }
 }
 
@@ -688,9 +772,35 @@ fn downsample_48k_8ch_s32_to_16k_s16(raw: &[u8]) -> Vec<u8> {
     out
 }
 
-fn play_audio_bytes(data: &[u8]) -> Result<(), String> {
+fn drain_capture_fd_now() {
+    let fd = CAPTURE_FD.load(Ordering::SeqCst);
+    if fd < 0 {
+        return;
+    }
+    let fsz = CAPTURE_FRAME_BYTES
+        .load(Ordering::SeqCst)
+        .clamp(FRAME_BYTES, CAP_FRAME_BYTES);
+    let mut tmp = vec![0u8; fsz];
+    loop {
+        let mut pfd = PollFd { fd, events: POLLIN, revents: 0 };
+        let rc = unsafe { poll(&mut pfd, 1, 0) };
+        if rc <= 0 || (pfd.revents & POLLIN) == 0 {
+            break;
+        }
+        let mut got = 0usize;
+        while got < fsz {
+            let n = recv_or_read(fd, &mut tmp[got..fsz]);
+            if n <= 0 {
+                return;
+            }
+            got += n as usize;
+        }
+    }
+}
+
+fn play_audio_bytes(data: &[u8]) -> Result<bool, String> {
     if data.is_empty() {
-        return Ok(());
+        return Ok(true);
     }
     let is_wav = data.starts_with(b"RIFF");
     if is_wav {
@@ -712,7 +822,7 @@ fn play_audio_bytes(data: &[u8]) -> Result<(), String> {
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
 
-    let res = (|| -> Result<(), String> {
+    let res = (|| -> Result<bool, String> {
         let mut child = cmd.spawn().map_err(|e| format!("aplay spawn: {e}"))?;
         let t0 = Instant::now();
         loop {
@@ -732,16 +842,17 @@ fn play_audio_bytes(data: &[u8]) -> Result<(), String> {
                         return Err(msg);
                     }
                     set_error("audio", None, "", 120);
-                    return Ok(());
+                    return Ok(true);
                 }
                 Ok(None) => {
                     check_resume_visual();
+                    drain_capture_fd_now();
                     if consume_button_trigger() {
                         println!("[atriai] funcbutton pressed during playback -> cancelled -> clock");
                         let _ = child.kill();
                         let _ = child.wait();
                         set_error("audio", None, "", 120);
-                        return Ok(());
+                        return Ok(false);
                     }
                     if !env.is_empty() {
                         let idx = (t0.elapsed().as_secs_f64() / 0.04) as usize;
@@ -808,6 +919,7 @@ fn play_command_chime(action: &str) {
         }
         let _ = child.wait();
     }
+    drain_capture_fd_now();
 }
 
 fn execute_device_command(action: &str) {
@@ -877,7 +989,12 @@ fn voice_call<T: Send + 'static>(f: impl FnOnce() -> Result<T, String> + Send + 
     }
 }
 
-fn send_phrase_to_server(server_url: &str, pcm: &[u8], wake_word: &str) -> Result<(String, String), String> {
+fn send_phrase_to_server(
+    server_url: &str,
+    pcm: &[u8],
+    wake_word: &str,
+    force_active: bool,
+) -> Result<(String, String, bool), String> {
     require_https(server_url)?;
     if pcm.len() > SR * 2 * 30 || pcm.len() % 2 != 0 {
         return Err("Invalid or oversized PCM16 phrase".into());
@@ -887,7 +1004,7 @@ fn send_phrase_to_server(server_url: &str, pcm: &[u8], wake_word: &str) -> Resul
     let wav = encode_wav_pcm16(pcm, SR as u32, 1);
     let mut keep_listening = false;
 
-    let res: Result<(String, String), String> = (|| {
+    let res: Result<(String, String, bool), String> = (|| {
         let base1 = base.clone();
         let tok1 = cfg.token.clone();
         let ca1 = cfg.ca_file.clone();
@@ -905,12 +1022,17 @@ fn send_phrase_to_server(server_url: &str, pcm: &[u8], wake_word: &str) -> Resul
         let text = rec.get_str("text").ok_or("Invalid ASR response")?.trim().to_string();
         if text.is_empty() {
             set_error("voice", None, "", 120);
-            return Ok((text, String::new()));
+            if force_active {
+                keep_listening = true;
+                set_vad_visual("vad", false, "default");
+                return Ok((text, String::new(), true));
+            }
+            return Ok((text, String::new(), false));
         }
         if !wake_word.is_empty() && !matches_wake_word(&text, wake_word) {
             println!("[atriai] ignored phrase without wake word ({wake_word:?}): {text:?}");
             set_error("voice", None, "", 120);
-            return Ok((text, String::new()));
+            return Ok((text, String::new(), false));
         }
         if is_wake_word_only(&text, wake_word) {
             WAKE_TRIGGERED.store(true, Ordering::SeqCst);
@@ -918,21 +1040,22 @@ fn send_phrase_to_server(server_url: &str, pcm: &[u8], wake_word: &str) -> Resul
             println!("[atriai] wake word activated ({text:?}) -> listening (7s)");
             set_vad_visual("vad", false, "default");
             play_command_chime("play");
+            drain_capture_fd_now();
             set_error("voice", None, "", 120);
-            return Ok((text, String::new()));
+            return Ok((text, String::new(), true));
         }
         if wake_word.is_empty() {
             let stripped = strip_wake_word(&text, "Atri");
             if CANCEL_PHRASES.contains(&stripped.as_str()) {
                 println!("[atriai] follow-up cancelled by phrase ({text:?}) -> idle");
                 set_error("voice", None, "", 120);
-                return Ok((text, String::new()));
+                return Ok((text, String::new(), false));
             }
         }
         if let Some(action) = local_command(&text, wake_word) {
             execute_device_command(action);
             set_error("voice", None, "", 120);
-            return Ok((text, String::new()));
+            return Ok((text, String::new(), false));
         }
 
         set_vad_visual("thinking", false, "default");
@@ -987,9 +1110,15 @@ fn send_phrase_to_server(server_url: &str, pcm: &[u8], wake_word: &str) -> Resul
         parse_wav(&audio)?;
         write_status("speaking", &text, &answer, "");
         set_vad_visual("speaking", false, &emotion);
-        play_audio_bytes(&audio)?;
+        let completed = play_audio_bytes(&audio)?;
         set_error("voice", None, "", 120);
-        Ok((text, answer))
+        if completed {
+            keep_listening = true;
+            set_vad_visual("vad", false, "default");
+            Ok((text, answer, true))
+        } else {
+            Ok((text, String::new(), false))
+        }
     })();
 
     if let Err(ref e) = res {
@@ -1002,7 +1131,7 @@ fn send_phrase_to_server(server_url: &str, pcm: &[u8], wake_word: &str) -> Resul
     }
     if let Err(e) = &res {
         if e.starts_with("InterruptedError") {
-            return Ok((String::new(), String::new()));
+            return Ok((String::new(), String::new(), false));
         }
     }
     res
@@ -1038,22 +1167,44 @@ fn playback_running() -> bool {
 }
 
 fn stop_capture(child: &mut Option<Child>) {
+    CAPTURE_FD.store(-1, Ordering::SeqCst);
     if let Some(mut c) = child.take() {
+        unsafe { kill(c.id() as i32, 15) };
+        for _ in 0..15 {
+            if matches!(c.try_wait(), Ok(Some(_))) {
+                return;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
         let _ = c.kill();
         let _ = c.wait();
     }
 }
 
 fn drain_capture_pipe(child: &mut Option<Child>, settle_ms: u64, frame_bytes: usize) {
-    use std::os::unix::io::AsRawFd;
     let Some(ref mut c) = child else { return };
     if matches!(c.try_wait(), Ok(Some(_))) {
         return;
     }
     let Some(ref mut out) = c.stdout else { return };
     let fd = out.as_raw_fd();
-    let deadline = Instant::now() + Duration::from_millis(settle_ms);
     let mut tmp = vec![0u8; frame_bytes];
+    // First flush all immediately available frames so settle_ms starts from now.
+    loop {
+        let mut pfd = PollFd { fd, events: POLLIN, revents: 0 };
+        let rc = unsafe { poll(&mut pfd, 1, 0) };
+        if rc <= 0 || (pfd.revents & POLLIN) == 0 {
+            break;
+        }
+        let n = recv_or_read(fd, &mut tmp);
+        if n <= 0 {
+            return;
+        }
+        if (n as usize) < frame_bytes && out.read_exact(&mut tmp[n as usize..frame_bytes]).is_err() {
+            return;
+        }
+    }
+    let deadline = Instant::now() + Duration::from_millis(settle_ms);
     loop {
         let now = Instant::now();
         let rem = deadline.saturating_duration_since(now).as_millis() as i32;
@@ -1061,12 +1212,12 @@ fn drain_capture_pipe(child: &mut Option<Child>, settle_ms: u64, frame_bytes: us
         let mut pfd = PollFd { fd, events: POLLIN, revents: 0 };
         let rc = unsafe { poll(&mut pfd, 1, to) };
         if rc > 0 && (pfd.revents & POLLIN) != 0 {
-            let n = crate::sys::recv_or_read(fd, &mut tmp);
+            let n = recv_or_read(fd, &mut tmp);
             if n <= 0 {
                 break;
             }
-            if (n as usize) < frame_bytes {
-                let _ = out.read_exact(&mut tmp[..frame_bytes - (n as usize)]);
+            if (n as usize) < frame_bytes && out.read_exact(&mut tmp[n as usize..frame_bytes]).is_err() {
+                break;
             }
         } else if rem <= 0 {
             break;
@@ -1094,8 +1245,9 @@ fn run_daemon() -> i32 {
     println!("[atriai] Starting voice client -> {}", cfg0.server);
     write_status("listening", "", "", "");
 
-    let mut noise_floor = 350.0f64;
+    let mut noise_floor = 220.0f64;
     let mut pend_force_active = false;
+    let mut empty_followups: usize = 0;
     let mut proc_child: Option<Child> = None;
     let mut use_aec = false;
 
@@ -1109,6 +1261,7 @@ fn run_daemon() -> i32 {
         if is_mic_muted() {
             stop_capture(&mut proc_child);
             pend_force_active = false;
+            empty_followups = 0;
             write_status("muted", "", "", "");
             thread::sleep(Duration::from_millis(500));
             continue;
@@ -1138,16 +1291,19 @@ fn run_daemon() -> i32 {
             };
         }
         let Some(ref mut child) = proc_child else {
+            CAPTURE_FD.store(-1, Ordering::SeqCst);
             write_status("error", "", "", "Failed starting audio capture");
             thread::sleep(Duration::from_secs(2));
             continue;
         };
         let read_bytes = if use_aec { FRAME_BYTES } else { CAP_FRAME_BYTES };
+        CAPTURE_FRAME_BYTES.store(read_bytes, Ordering::SeqCst);
+        let cap_fd = child.stdout.as_ref().map(|s| s.as_raw_fd()).unwrap_or(-1);
+        CAPTURE_FD.store(cap_fd, Ordering::SeqCst);
         let mut raw = vec![0u8; read_bytes];
         let mut buf: Vec<u8> = Vec::new();
         let mut pre_roll: VecDeque<Vec<u8>> = VecDeque::with_capacity(20);
         let mut speaking = false;
-        let mut peak_rms = 0.0f64;
         let mut speech_hits = 0usize;
         let mut warmup_frames = if first_start { 15usize } else { 0 };
         let mut force_active = pend_force_active;
@@ -1179,12 +1335,13 @@ fn run_daemon() -> i32 {
                     println!("[atriai] funcbutton pressed again -> cancelled -> clock");
                     speaking = false;
                     buf.clear();
+                    empty_followups = 0;
                     set_vad_visual("idle", false, "default");
                     break;
                 }
                 force_active = true;
+                empty_followups = 0;
                 speaking = false;
-                peak_rms = 0.0;
                 speech_hits = 0;
                 silence_ms = 0.0;
                 wait_speech_ms = 0.0;
@@ -1210,7 +1367,7 @@ fn run_daemon() -> i32 {
             let rms = pcm16_rms(&chunk);
             if warmup_frames > 0 {
                 warmup_frames -= 1;
-                noise_floor = (noise_floor * 0.85 + rms * 0.15).clamp(150.0, 3000.0);
+                noise_floor = (noise_floor * 0.85 + rms * 0.15).clamp(90.0, 1200.0);
                 if pre_roll.len() == 20 {
                     pre_roll.pop_front();
                 }
@@ -1220,24 +1377,23 @@ fn run_daemon() -> i32 {
             if !speaking {
                 if rms < noise_floor {
                     noise_floor = noise_floor * 0.85 + rms * 0.15;
-                } else {
-                    noise_floor = noise_floor * 0.995 + rms * 0.005;
+                } else if rms < noise_floor * 1.6 {
+                    noise_floor = noise_floor * 0.992 + rms * 0.008;
                 }
             }
             let music_on = playback_running();
-            let dyn_thr = (noise_floor * if music_on { 1.8 } else { 2.2 } + 70.0)
-                .clamp(vad_thr * 0.85, 5000.0);
+            let dyn_thr = (noise_floor * if music_on { 1.55 } else { 1.70 } + 40.0)
+                .clamp(vad_thr * 0.75, 2800.0);
             active_thr = if force_active {
-                dyn_thr.min((vad_thr * 0.6).max(320.0))
+                dyn_thr.min((vad_thr * 0.65).max(200.0))
             } else {
                 dyn_thr
             };
-            let needed_hits = if force_active { 2 } else { 3 };
+            let needed_hits = 2;
             if rms >= active_thr {
                 speech_hits += 1;
                 if !speaking && speech_hits >= needed_hits {
                     speaking = true;
-                    peak_rms = rms;
                     for p in pre_roll.drain(..) {
                         buf.extend_from_slice(&p);
                     }
@@ -1246,9 +1402,6 @@ fn run_daemon() -> i32 {
                     }
                 }
                 if speaking {
-                    if rms > peak_rms {
-                        peak_rms = rms;
-                    }
                     silence_ms = 0.0;
                     buf.extend_from_slice(&chunk);
                     if buf.len() >= SR * 2 * 12 {
@@ -1261,17 +1414,20 @@ fn run_daemon() -> i32 {
                     pre_roll.push_back(chunk);
                 }
             } else if speaking {
-                if rms > peak_rms {
-                    peak_rms = rms;
-                }
                 speech_hits = 0;
                 buf.extend_from_slice(&chunk);
                 silence_ms += frame_ms;
                 if silence_ms >= max_sil {
-                    break;
+                    if buf.len() >= min_bytes {
+                        break;
+                    }
+                    speaking = false;
+                    buf.clear();
+                    silence_ms = 0.0;
+                    speech_hits = 0;
                 }
             } else {
-                speech_hits = 0;
+                speech_hits = speech_hits.saturating_sub(1);
                 if pre_roll.len() == 20 {
                     pre_roll.pop_front();
                 }
@@ -1290,30 +1446,43 @@ fn run_daemon() -> i32 {
             thread::sleep(Duration::from_secs(1));
             continue;
         }
-        if speaking && buf.len() >= min_bytes && !is_mic_muted() && (force_active || peak_rms >= active_thr * 1.08) {
+        if speaking && buf.len() >= min_bytes && !is_mic_muted() {
             write_status("thinking", "", "", "");
             if force_active || !wake_required {
                 set_vad_visual("thinking", false, "default");
             }
             let ww = if force_active { "" } else { ww_cfg.as_str() };
-            match send_phrase_to_server(&cfg.server, &buf, ww) {
-                Ok((asr, ans)) => {
-                    drain_capture_pipe(&mut proc_child, if ans.is_empty() { 30 } else { 150 }, read_bytes);
+            match send_phrase_to_server(&cfg.server, &buf, ww, force_active) {
+                Ok((asr, ans, stay_active)) => {
+                    drain_capture_pipe(&mut proc_child, if stay_active { 260 } else { 40 }, read_bytes);
                     if WAKE_TRIGGERED.swap(false, Ordering::SeqCst) || !ans.trim().is_empty() {
                         pend_force_active = true;
+                        empty_followups = 0;
+                    } else if stay_active && force_active && asr.is_empty() && empty_followups < 1 {
+                        pend_force_active = true;
+                        empty_followups += 1;
+                    } else if force_active && !stay_active {
+                        set_vad_visual("idle", false, "default");
+                        empty_followups = 0;
+                    } else if !pend_force_active && force_active {
+                        set_vad_visual("idle", false, "default");
+                        empty_followups = 0;
                     }
                     write_status("listening", &asr, &ans, "");
                 }
                 Err(e) => {
                     write_status("error", "", "", &e);
                     set_vad_visual("idle", false, "default");
+                    empty_followups = 0;
                     eprintln!("[atriai] server error: {e}");
                     thread::sleep(Duration::from_secs(2));
                 }
             }
         } else if force_active {
             set_vad_visual("idle", false, "default");
+            empty_followups = 0;
         }
+        let _ = active_thr;
     }
     stop_capture(&mut proc_child);
     0
@@ -1406,8 +1575,8 @@ pub fn run(args: &[String]) -> i32 {
                     }
                 }
             }
-            match send_phrase_to_server(&cfg.server, &raw, &cfg.wake_word) {
-                Ok((asr, ans)) => {
+            match send_phrase_to_server(&cfg.server, &raw, &cfg.wake_word, false) {
+                Ok((asr, ans, _)) => {
                     println!(
                         "{}",
                         obj(vec![("asr", Json::Str(asr)), ("answer", Json::Str(ans))]).to_string_compact()

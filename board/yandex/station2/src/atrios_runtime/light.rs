@@ -1243,6 +1243,13 @@ fn poll_eyes_udp(
                 } else if k == "speaking" || k == "variant" {
                     let var = if arg.is_empty() { "default" } else { arg };
                     eyes.set_state("speaking", Some(var), now);
+                } else if k == "state" || k == "eyes" {
+                    if let Some((name, var, _, _)) = resolve_eye_state(arg) {
+                        let cur_v = if name == "speaking" { var.unwrap_or("default") } else { "" };
+                        if eyes.state != name || (name == "speaking" && eyes.variant != cur_v) {
+                            eyes.set_state(name, var, now);
+                        }
+                    }
                 }
             }
         }

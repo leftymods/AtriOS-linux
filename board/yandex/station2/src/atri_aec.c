@@ -74,7 +74,7 @@ static float g_noise_env = 40.0f;
 static double g_post_acc = 0.0;
 static float g_sig_env = 0.0f;
 static float g_nr_gain = 1.0f;
-static float g_agc_gain = 1.35f;
+static float g_agc_gain = 1.65f;
 
 static volatile sig_atomic_t g_stop = 0;
 static pid_t g_child = -1;
@@ -289,7 +289,7 @@ int main(int argc, char **argv) {
             for (int m = 0; m < VQE_MICS; m++) {
                 float d_acc = 0.0f;
                 for (int d = 0; d < DECIM; d++) {
-                    float raw_s = (float)fr[d * CAP_CH + m] * (8.0f / 16384.0f);
+                    float raw_s = (float)fr[d * CAP_CH + m] * (12.0f / 16384.0f);
                     g_lp48[m] += 0.55f * (raw_s - g_lp48[m]);
                     d_acc += g_lp48[m];
                 }
@@ -334,24 +334,24 @@ int main(int argc, char **argv) {
 
             /* VQE Background Noise Reducer (480 ms history) + smooth speech AGC */
             float ae = fabsf(e);
-            g_sig_env = (ae > g_sig_env) ? (g_sig_env * 0.75f + ae * 0.25f) : (g_sig_env * 0.997f + ae * 0.003f);
+            g_sig_env = (ae > g_sig_env) ? (g_sig_env * 0.65f + ae * 0.35f) : (g_sig_env * 0.995f + ae * 0.005f);
             float nr_tgt = 1.0f;
-            if (g_sig_env < g_noise_env * 1.45f) {
-                nr_tgt = 0.35f;
-            } else if (g_sig_env < g_noise_env * 2.2f) {
-                float frac = (g_sig_env - g_noise_env * 1.45f) / (g_noise_env * 0.75f + 1.0f);
-                nr_tgt = 0.35f + 0.65f * frac;
+            if (g_sig_env < g_noise_env * 1.18f) {
+                nr_tgt = 0.72f;
+            } else if (g_sig_env < g_noise_env * 1.65f) {
+                float frac = (g_sig_env - g_noise_env * 1.18f) / (g_noise_env * 0.47f + 1.0f);
+                nr_tgt = 0.72f + 0.28f * frac;
             }
-            g_nr_gain += ((nr_tgt > g_nr_gain) ? 0.08f : 0.004f) * (nr_tgt - g_nr_gain);
+            g_nr_gain += ((nr_tgt > g_nr_gain) ? 0.25f : 0.006f) * (nr_tgt - g_nr_gain);
 
-            if (g_sig_env > g_noise_env * 2.0f && g_sig_env > 120.0f) {
-                float agc_tgt = 3200.0f / g_sig_env;
+            if (g_sig_env > g_noise_env * 1.35f && g_sig_env > 55.0f) {
+                float agc_tgt = 3600.0f / g_sig_env;
                 if (agc_tgt < 1.0f) agc_tgt = 1.0f;
-                if (agc_tgt > 3.8f) agc_tgt = 3.8f;
-                float rate = (agc_tgt < g_agc_gain) ? 0.04f : 0.002f;
+                if (agc_tgt > 4.5f) agc_tgt = 4.5f;
+                float rate = (agc_tgt < g_agc_gain) ? 0.04f : 0.012f;
                 g_agc_gain += rate * (agc_tgt - g_agc_gain);
             } else {
-                g_agc_gain += 0.001f * (1.35f - g_agc_gain);
+                g_agc_gain += 0.002f * (1.65f - g_agc_gain);
             }
 
             float o = e * g_nr_gain * g_agc_gain;

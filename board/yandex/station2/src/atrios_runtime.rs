@@ -85,9 +85,17 @@ mod tests {
         assert!(atriai::matches_wake_word("Atri, привет!", "Atri"));
         assert!(atriai::matches_wake_word("эй атри, сделай громче", "Atri"));
         assert!(atriai::matches_wake_word("три какая погода", "Atri"));
+        assert!(atriai::matches_wake_word("три", "Atri"));
+        assert!(atriai::matches_wake_word("матри", "Atri"));
+        assert!(atriai::matches_wake_word("мотри", "Atri"));
+        assert!(atriai::matches_wake_word("дизайнератри", "Atri"));
+        assert!(!atriai::matches_wake_word("смотри", "Atri"));
         assert!(!atriai::matches_wake_word("atrium hello", "Atri"));
         assert!(!atriai::matches_wake_word("patriarch", "Atri"));
         assert_eq!(atriai::strip_wake_word("Эй, Атри, громче", "Atri"), "громче");
+        assert_eq!(atriai::strip_wake_word("три", "Atri"), "");
+        assert_eq!(atriai::strip_wake_word("дизайнератри", "Atri"), "");
+        assert_eq!(atriai::strip_wake_word("громче атри", "Atri"), "громче");
     }
 
     #[test]
