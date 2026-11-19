@@ -689,7 +689,4 @@
 	};
 };
 
-/* Built-in Vivante VIP8000 NPU (etnaviv / Mesa Teflon) */
-&npu {
-	status = "okay";
-};
+/* Note: S905X3 silicon on Yandex Station Max has NNA/NPU fused off; enabling &npu hangs AXI bus on 0xff100000 */

@@ -111,7 +111,7 @@ fn find_model_dir() -> Option<&'static str> {
 }
 
 pub fn npu_device_available() -> bool {
-    Path::new("/dev/dri/renderD128").exists() || Path::new("/dev/galcore").exists()
+    crate::npu::is_hardware_ready() || Path::new("/dev/dri/renderD128").exists()
 }
 
 fn load_engine() -> Option<Mutex<VoskEngine>> {
@@ -210,8 +210,14 @@ fn condition_pcm16_for_vosk(pcm: &[u8]) -> Vec<u8> {
     let mean = samples.iter().map(|&s| s as f64).sum::<f64>() / (samples.len() as f64);
     let mut peak = 0.0f64;
     let mut centered = Vec::with_capacity(samples.len());
+    let mut prev = 0.0f64;
     for &s in &samples {
-        let v = (s as f64) - mean;
+        let raw = (s as f64) - mean;
+        // Blend 55% raw + 45% speech pre-emphasis (y[n] = x[n] - 0.90*x[n-1]) to suppress
+        // residual low-frequency music bass while keeping speech formants crisp for Vosk.
+        let emph = raw - 0.90 * prev;
+        prev = raw;
+        let v = 0.55 * raw + 0.45 * emph;
         let av = v.abs();
         if av > peak {
             peak = av;

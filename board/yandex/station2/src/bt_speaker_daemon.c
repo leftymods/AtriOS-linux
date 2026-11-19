@@ -1022,6 +1022,15 @@ static unsigned int g_pcm_rate = 0;
 static unsigned int g_pcm_channels = 0;
 static int16_t g_rs_hist[4][2];
 static double g_rs_phase = 0.0;
+static float g_duck_gain = 1.0f;
+static float g_duck_target = 1.0f;
+static int64_t g_duck_until_ms = 0;
+
+static int64_t bt_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000LL + (int64_t)(ts.tv_nsec / 1000000LL);
+}
 
 static bool audio_load_libs(void) {
     if (p_sbc_decode && p_snd_pcm_writei) return true;
@@ -1209,6 +1218,26 @@ static void handle_avdtp_media(client_t *c, const uint8_t *pkt, size_t len) {
 
             if (!audio_ensure_pcm(rate, ch)) break;
 
+            static int16_t duck_buf[16384];
+            if (g_duck_until_ms > 0 && bt_now_ms() > g_duck_until_ms) {
+                g_duck_target = 1.0f;
+                g_duck_until_ms = 0;
+            }
+            if (g_duck_gain < 0.999f || g_duck_target < 0.999f) {
+                size_t total_samples = (size_t)total_frames * ch;
+                if (total_samples <= sizeof(duck_buf) / sizeof(duck_buf[0])) {
+                    const int16_t *src = (const int16_t *)play_buf;
+                    for (size_t si = 0; si < total_samples; si++) {
+                        g_duck_gain += (g_duck_target - g_duck_gain) * 0.0015f;
+                        float v = (float)src[si] * g_duck_gain;
+                        if (v > 32767.0f) v = 32767.0f;
+                        if (v < -32768.0f) v = -32768.0f;
+                        duck_buf[si] = (int16_t)v;
+                    }
+                    play_buf = (const uint8_t *)duck_buf;
+                }
+            }
+
             aec_tee(play_buf, total_frames, ch);
 
             size_t byte_off = 0;
@@ -1371,6 +1400,13 @@ static void handle_bt_cmd_socket(int fd_cmd) {
     else if (strcmp(p, "play") == 0) send_avrcp_passthrough(0x44);
     else if (strcmp(p, "pause") == 0) send_avrcp_passthrough(0x46);
     else if (strcmp(p, "stop") == 0) send_avrcp_passthrough(0x45);
+    else if (strcmp(p, "duck") == 0) {
+        g_duck_target = 0.18f;
+        g_duck_until_ms = bt_now_ms() + 12000;
+    } else if (strcmp(p, "unduck") == 0) {
+        g_duck_target = 1.0f;
+        g_duck_until_ms = 0;
+    }
 }
 
 static void handle_avctp(client_t *c, const uint8_t *pkt, size_t len) {

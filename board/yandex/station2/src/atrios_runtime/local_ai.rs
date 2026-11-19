@@ -1,21 +1,22 @@
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::atriai::{play_command_chime, set_vad_visual, split_trailing_stop};
+use crate::atriai::{drain_capture_fd_now, play_chime_interruptible, play_command_chime, set_vad_visual, split_trailing_stop};
 use crate::json::{obj, Json};
 use crate::light::SCREEN_MODE_FILE;
-use crate::sys::{atomic_write_bytes, format_local, now_unix_i64};
+use crate::sys::{atomic_write_bytes, format_local, kill, now_unix_i64};
 
 const TIMERS_FILE: &str = "/var/run/atrios/timers.json";
 const ALARMS_FILE: &str = "/var/lib/atrios/alarms.json";
 
 static ALERT_RINGING: AtomicBool = AtomicBool::new(false);
 static ALERT_STOP_REQ: AtomicBool = AtomicBool::new(false);
+static RING_APLAY_PID: AtomicI32 = AtomicI32::new(0);
 static SCHED_STARTED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -146,9 +147,25 @@ pub fn is_ringing() -> bool {
 }
 
 pub fn stop_ringing() {
-    if ALERT_RINGING.load(Ordering::SeqCst) {
-        ALERT_STOP_REQ.store(true, Ordering::SeqCst);
-        println!("[local-ai] alert stop requested");
+    let was_ringing = ALERT_RINGING.load(Ordering::SeqCst);
+    ALERT_STOP_REQ.store(true, Ordering::SeqCst);
+    let pid = RING_APLAY_PID.swap(0, Ordering::SeqCst);
+    if pid > 0 {
+        unsafe {
+            let _ = kill(pid, 9);
+        }
+    }
+    // Clear any timers that already expired so a back-to-back timer doesn't re-ring immediately
+    let now = now_unix_i64();
+    if let Ok(mut s) = store().lock() {
+        let before = s.timers.len();
+        s.timers.retain(|t| t.fire_at > now + 1);
+        if s.timers.len() != before {
+            save_timers_disk(&s.timers);
+        }
+    }
+    if was_ringing {
+        println!("[local-ai] alert stop requested (killed aplay pid={pid})");
     }
 }
 
@@ -742,15 +759,17 @@ fn ring_alert_loop(kind: &str) {
         .ok();
 
     let start = Instant::now();
+    let chime_name = if kind == "alarm" { "alarm_ring" } else { "timer_ring" };
     while !ALERT_STOP_REQ.load(Ordering::SeqCst) && start.elapsed() < Duration::from_secs(60) {
-        play_command_chime(if kind == "alarm" { "alarm_ring" } else { "timer_ring" });
-        for _ in 0..12 {
+        play_chime_interruptible(chime_name, &ALERT_STOP_REQ, &RING_APLAY_PID);
+        for _ in 0..16 {
             if ALERT_STOP_REQ.load(Ordering::SeqCst) {
                 break;
             }
-            thread::sleep(Duration::from_millis(65));
+            thread::sleep(Duration::from_millis(45));
         }
     }
+    RING_APLAY_PID.store(0, Ordering::SeqCst);
 
     if let Some(mut c) = screen_child.take() {
         let _ = c.kill();
@@ -760,15 +779,12 @@ fn ring_alert_loop(kind: &str) {
         let _ = c.kill();
         let _ = c.wait();
     }
-    let _ = Command::new("/usr/lib/atrios/light")
-        .args(["ring", "off"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-    let _ = fs::write(SCREEN_MODE_FILE, "clock");
+    // Force-restore idle clock display and turn off LED ring so the timer bell never freezes on screen.
+    set_vad_visual("idle", true, "default");
+    drain_capture_fd_now();
     ALERT_RINGING.store(false, Ordering::SeqCst);
     ALERT_STOP_REQ.store(false, Ordering::SeqCst);
-    println!("[local-ai] {kind} alert stopped -> clock");
+    println!("[local-ai] {kind} alert stopped -> clock (forced idle visual)");
 }
 
 pub fn start_scheduler() {

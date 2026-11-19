@@ -15,6 +15,8 @@ mod screend;
 mod rotaryd;
 #[path = "atrios_runtime/local_stt.rs"]
 mod local_stt;
+#[path = "atrios_runtime/npu.rs"]
+mod npu;
 #[path = "atrios_runtime/local_ai.rs"]
 mod local_ai;
 #[path = "atrios_runtime/atriai.rs"]

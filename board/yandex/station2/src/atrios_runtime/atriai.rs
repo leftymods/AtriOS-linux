@@ -1188,7 +1188,7 @@ fn read_capture_frames_now() -> Vec<Vec<u8>> {
     frames
 }
 
-fn drain_capture_fd_now() {
+pub fn drain_capture_fd_now() {
     let _ = read_capture_frames_now();
 }
 
@@ -1671,6 +1671,48 @@ fn play_pcm_48k(pcm: &[u8]) {
     drain_capture_fd_now();
 }
 
+pub fn send_bt_cmd(cmd: &str) {
+    if Path::new(BT_CMD_SOCK).exists() {
+        if let Ok(sock) = UnixDatagram::unbound() {
+            let _ = sock.send_to(cmd.as_bytes(), BT_CMD_SOCK);
+        }
+    }
+}
+
+pub fn play_chime_interruptible(action: &str, stop_flag: &AtomicBool, pid_slot: &AtomicI32) {
+    if stop_flag.load(Ordering::SeqCst) {
+        return;
+    }
+    let pcm = build_chime_pcm(action, None);
+    if pcm.is_empty() {
+        return;
+    }
+    if let Ok(mut child) = Command::new("aplay")
+        .args(["-q", "-t", "raw", "-f", "S16_LE", "-r", "48000", "-c", "1"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        pid_slot.store(child.id() as i32, Ordering::SeqCst);
+        if let Some(mut sin) = child.stdin.take() {
+            // Write in small 100ms chunks so stop_flag aborts immediately
+            let chunk_bytes = 48000 * 2 / 10;
+            for chunk in pcm.chunks(chunk_bytes) {
+                if stop_flag.load(Ordering::SeqCst) {
+                    let _ = child.kill();
+                    break;
+                }
+                if sin.write_all(chunk).is_err() {
+                    break;
+                }
+            }
+        }
+        let _ = child.wait();
+        pid_slot.store(0, Ordering::SeqCst);
+    }
+}
+
 pub fn play_command_chime(action: &str) {
     let pcm = build_chime_pcm(action, None);
     play_pcm_48k(&pcm);
@@ -1902,8 +1944,14 @@ fn send_phrase_to_server(
             && (is_cancel_phrase(&text)
                 || text.contains("стоп")
                 || text.contains("выключи")
+                || text.contains("отключи")
+                || text.contains("выруби")
+                || text.contains("отмена")
                 || text.contains("хватит")
-                || text.contains("тихо"))
+                || text.contains("тихо")
+                || text.contains("замолчи")
+                || text.contains("таймер")
+                || text.contains("будильник"))
         {
             crate::local_ai::stop_ringing();
             keep_listening = false;
@@ -1939,6 +1987,7 @@ fn send_phrase_to_server(
             WAKE_TRIGGERED.store(true, Ordering::SeqCst);
             keep_listening = true;
             println!("[wake] activated ({text:?}) -> ActiveCommand (7s)");
+            send_bt_cmd("duck");
             set_vad_visual("vad", false, "default");
             play_command_chime("wake");
             drain_capture_fd_now();
@@ -2052,6 +2101,7 @@ fn send_phrase_to_server(
         })?;
         parse_wav(&audio)?;
         write_status("speaking", &text, &answer, "");
+        send_bt_cmd("duck");
         set_vad_visual("speaking", false, &emotion);
         println!("[tts] playing {} bytes", audio.len());
         let completed = play_audio_bytes(&audio, &answer, &base, &cfg.token, &cfg.ca_file)?;
@@ -2081,6 +2131,7 @@ fn send_phrase_to_server(
         }
     }
     if !keep_listening {
+        send_bt_cmd("unduck");
         set_vad_visual("idle", false, "default");
     }
     if let Err(e) = &res {
@@ -2240,7 +2291,7 @@ impl VadProcessor {
     }
 }
 
-fn is_valid_speech(frame_rms: &[f64], noise_rms: f64, start_thr: f64) -> bool {
+fn is_valid_speech(frame_rms: &[f64], noise_rms: f64, start_thr: f64, music_on: bool) -> bool {
     if frame_rms.is_empty() {
         return false;
     }
@@ -2254,7 +2305,11 @@ fn is_valid_speech(frame_rms: &[f64], noise_rms: f64, start_thr: f64) -> bool {
             max_r = r;
         }
     }
-    max_r >= start_thr * 1.08 && max_r >= noise_rms * 2.1 + 100.0 && max_r >= min_r * 1.45
+    if music_on {
+        max_r >= start_thr * 1.03 && max_r >= noise_rms * 1.65 + 80.0 && max_r >= min_r * 1.22
+    } else {
+        max_r >= start_thr * 1.08 && max_r >= noise_rms * 2.1 + 100.0 && max_r >= min_r * 1.45
+    }
 }
 
 fn run_daemon() -> i32 {
@@ -2274,6 +2329,7 @@ fn run_daemon() -> i32 {
         println!("[atriai] Disabled in config; exiting.");
         return 0;
     }
+    let _ = crate::npu::init();
     let local_ok = crate::local_stt::init();
     crate::local_ai::start_scheduler();
     println!(
@@ -2436,7 +2492,7 @@ fn run_daemon() -> i32 {
                 music_on = playback_running();
             }
             frame_idx = frame_idx.wrapping_add(1);
-            let eff_thr = if music_on { vad_thr * 1.25 } else { vad_thr };
+            let eff_thr = if music_on { vad_thr * 1.05 } else { vad_thr };
             let (start_thr, keep_thr, max_utt_ms, end_silence_ms) =
                 vad.thresholds(mode, eff_thr, cfg.silence_ms);
             last_start_thr = start_thr;
@@ -2533,7 +2589,7 @@ fn run_daemon() -> i32 {
         if speaking && buf.len() >= min_bytes && !is_mic_muted() {
             let peak_rms = utt_rms.iter().copied().fold(0.0f64, f64::max);
             let mean_rms = utt_rms.iter().sum::<f64>() / (utt_rms.len().max(1) as f64);
-            if !is_valid_speech(&utt_rms, vad.noise_rms, last_start_thr) {
+            if !is_valid_speech(&utt_rms, vad.noise_rms, last_start_thr, music_on) {
                 vad.adapt_rejected(mean_rms);
                 if mode == PipelineMode::WakeSpotter && hit_max_utt {
                     vad.wait_quiet_frames = 10;
