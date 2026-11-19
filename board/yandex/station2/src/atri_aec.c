@@ -1,20 +1,14 @@
 /*
- * atri-aec.c - capture front-end with acoustic echo cancellation for AtriOS.
+ * atri-aec.c - VQE capture front-end with acoustic echo cancellation for AtriOS.
  *
- * Pipeline:
+ * Pipeline (informed by yandexstation_2 CIRC_6_PLUS_1_R425 preset):
  *   arecord (hw:0,3, 48 kHz, 8ch S32_LE PDM mics)
- *     -> average 8 channels, decimate 48k -> 16k (box filter)
- *     -> subtract the estimated echo of the speaker output (NLMS adaptive filter)
+ *     -> channels 0..6 (7 physical mics), 48 kHz LPF + decimate 48k -> 16k
+ *     -> 4th-order 192 Hz Butterworth HPF per mic (kills DC/hum/rumble)
+ *     -> VQE MicChooser (RmsAlgo alpha=0.90, micSwitchThreshold=0.20) + coherent blend
+ *     -> NLMS echo cancellation with double-talk protection
+ *     -> 480 ms stationary background noise reducer + smooth speech AGC + soft limiter
  *     -> 16 kHz mono S16_LE on stdout
- *
- * Reference signal: bt-speaker-daemon tees every decoded PCM block it plays
- * (48 kHz stereo S16_LE) to the unix datagram socket /var/run/atrios/aec_ref.sock.
- * The reference is placed on an absolute 16 kHz timeline; a coarse bulk delay
- * (ALSA buffer + acoustic path) is estimated from 100 Hz envelopes and then
- * removed, so the NLMS filter (128 ms) only has to model the room response.
- *
- * Without reference data (nothing playing) the filter output is zero and the
- * microphone signal passes through unchanged.
  */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -35,19 +29,52 @@
 
 #define SR        16000
 #define CAP_CH    8
+#define VQE_MICS  7
 #define DECIM     3
 #define BLK       128                       /* mic samples (16 kHz) per iteration */
 #define IN_BYTES  (BLK * DECIM * CAP_CH * 4)
 #define OUT_BLK   512
 #define TAPS      2048
 #define HN        (TAPS + 8192)
-#define RING      (1 << 17)
-#define RMASK     (RING - 1)
 #define ENV_HOP   160                       /* 10 ms */
 #define ENV_N     400                       /* 4 s of envelope history */
+#define NR_HOPS   48                        /* 480 ms (7680 samples @ 16 kHz) */
 #define MAXLAG    60                        /* 600 ms */
 #define REF_SOCK  "/var/run/atrios/aec_ref.sock"
 #define STAT_FILE "/var/run/atrios/aec.stat"
+#define RING      (1 << 17)
+#define RMASK     (RING - 1)
+
+/* ---- VQE mic array state (CIRC_6_PLUS_1_R425) ---- */
+typedef struct {
+    float z1, z2;
+} biquad_t;
+
+static inline float biquad_hpf192(biquad_t *q, float x) {
+    /* 2nd-order Butterworth HPF @ fc=192 Hz, fs=16000 Hz */
+    const float b0 = 0.948213f, b1 = -1.896426f, b2 = 0.948213f;
+    const float a1 = -1.893780f, a2 = 0.899072f;
+    float y = b0 * x + q->z1;
+    q->z1 = b1 * x - a1 * y + q->z2;
+    q->z2 = b2 * x - a2 * y;
+    return y;
+}
+
+static float g_lp48[VQE_MICS];
+static biquad_t g_hpf[VQE_MICS][2];
+static double g_msq_acc[VQE_MICS];
+static float g_m_ema[VQE_MICS];
+static float g_m_noise[VQE_MICS];
+static int g_best_mic = 0;
+
+/* ---- BNR + speech AGC state ---- */
+static float g_nr_hist[NR_HOPS];
+static int g_nr_idx = 0, g_nr_fill = 0;
+static float g_noise_env = 40.0f;
+static double g_post_acc = 0.0;
+static float g_sig_env = 0.0f;
+static float g_nr_gain = 1.0f;
+static float g_agc_gain = 1.35f;
 
 static volatile sig_atomic_t g_stop = 0;
 static pid_t g_child = -1;
@@ -198,31 +225,38 @@ static int spawn_arecord(void) {
     return pfd[0];
 }
 
-int main(void) {
+int main(int argc, char **argv) {
+    int use_stdin = (argc > 1 && strcmp(argv[1], "--stdin") == 0);
     signal(SIGTERM, on_sig);
     signal(SIGINT, on_sig);
     signal(SIGPIPE, SIG_DFL);
     clock_gettime(CLOCK_MONOTONIC, &g_t0);
 
-    mkdir("/var/run/atrios", 0755);
-    unlink(REF_SOCK);
-    int rs = socket(AF_UNIX, SOCK_DGRAM, 0);
-    if (rs >= 0) {
-        struct sockaddr_un a;
-        memset(&a, 0, sizeof(a));
-        a.sun_family = AF_UNIX;
-        snprintf(a.sun_path, sizeof(a.sun_path), "%s", REF_SOCK);
-        int rb = 1 << 20;
-        setsockopt(rs, SOL_SOCKET, SO_RCVBUF, &rb, sizeof(rb));
-        if (bind(rs, (struct sockaddr *)&a, sizeof(a)) < 0) {
-            close(rs);
-            rs = -1;
-        } else {
-            chmod(REF_SOCK, 0666);
+    for (int m = 0; m < VQE_MICS; m++) g_m_noise[m] = 30.0f;
+    for (int i = 0; i < NR_HOPS; i++) g_nr_hist[i] = 40.0f;
+
+    int rs = -1;
+    if (!use_stdin) {
+        mkdir("/var/run/atrios", 0755);
+        unlink(REF_SOCK);
+        rs = socket(AF_UNIX, SOCK_DGRAM, 0);
+        if (rs >= 0) {
+            struct sockaddr_un a;
+            memset(&a, 0, sizeof(a));
+            a.sun_family = AF_UNIX;
+            snprintf(a.sun_path, sizeof(a.sun_path), "%s", REF_SOCK);
+            int rb = 1 << 20;
+            setsockopt(rs, SOL_SOCKET, SO_RCVBUF, &rb, sizeof(rb));
+            if (bind(rs, (struct sockaddr *)&a, sizeof(a)) < 0) {
+                close(rs);
+                rs = -1;
+            } else {
+                chmod(REF_SOCK, 0666);
+            }
         }
     }
 
-    int afd = spawn_arecord();
+    int afd = use_stdin ? 0 : spawn_arecord();
     if (afd < 0) return 1;
 
     g_wp = now_pos();
@@ -248,10 +282,28 @@ int main(void) {
 
         const int32_t *in = (const int32_t *)inbuf;
         for (int i = 0; i < BLK; i++) {
-            double acc = 0;
             const int32_t *fr = in + i * DECIM * CAP_CH;
-            for (int k = 0; k < DECIM * CAP_CH; k++) acc += (double)fr[k];
-            float mic = (float)(acc / (DECIM * CAP_CH) * (8.0 / 16384.0));
+            float s16[VQE_MICS];
+            float h_sum = 0.0f;
+            int h_cnt = 0;
+            for (int m = 0; m < VQE_MICS; m++) {
+                float d_acc = 0.0f;
+                for (int d = 0; d < DECIM; d++) {
+                    float raw_s = (float)fr[d * CAP_CH + m] * (8.0f / 16384.0f);
+                    g_lp48[m] += 0.55f * (raw_s - g_lp48[m]);
+                    d_acc += g_lp48[m];
+                }
+                float x16 = biquad_hpf192(&g_hpf[m][0], d_acc / (float)DECIM);
+                x16 = biquad_hpf192(&g_hpf[m][1], x16);
+                s16[m] = x16;
+                g_msq_acc[m] += (double)x16 * x16;
+                if (g_m_noise[m] < 1950.0f && (g_m_ema[m] >= 1.0f || g_ecount < 5)) {
+                    h_sum += x16;
+                    h_cnt++;
+                }
+            }
+            float avg_h = (h_cnt > 0) ? (h_sum / (float)h_cnt) : s16[g_best_mic];
+            float mic = 0.72f * s16[g_best_mic] + 0.28f * avg_h;
 
             long q = mp - g_delay;
             float r = 0.f;
@@ -273,12 +325,37 @@ int main(void) {
 
             int active = g_en > (double)TAPS * 40.0;
             if (active) {
-                float g = 0.45f * e / (float)(g_en + (double)TAPS * 20.0);
+                float ref_rms = sqrtf((float)(g_en / TAPS) + 1.0f);
+                float mu = (fabsf(e) > 2.2f * ref_rms) ? 0.08f : 0.45f;
+                float g = mu * e / (float)(g_en + (double)TAPS * 20.0);
                 for (int t = 0; t < TAPS; t++) g_w[t] += g * x[t];
                 ref_active_cnt++;
             }
 
-            float o = e;
+            /* VQE Background Noise Reducer (480 ms history) + smooth speech AGC */
+            float ae = fabsf(e);
+            g_sig_env = (ae > g_sig_env) ? (g_sig_env * 0.75f + ae * 0.25f) : (g_sig_env * 0.997f + ae * 0.003f);
+            float nr_tgt = 1.0f;
+            if (g_sig_env < g_noise_env * 1.45f) {
+                nr_tgt = 0.35f;
+            } else if (g_sig_env < g_noise_env * 2.2f) {
+                float frac = (g_sig_env - g_noise_env * 1.45f) / (g_noise_env * 0.75f + 1.0f);
+                nr_tgt = 0.35f + 0.65f * frac;
+            }
+            g_nr_gain += ((nr_tgt > g_nr_gain) ? 0.08f : 0.004f) * (nr_tgt - g_nr_gain);
+
+            if (g_sig_env > g_noise_env * 2.0f && g_sig_env > 120.0f) {
+                float agc_tgt = 3200.0f / g_sig_env;
+                if (agc_tgt < 1.0f) agc_tgt = 1.0f;
+                if (agc_tgt > 3.8f) agc_tgt = 3.8f;
+                float rate = (agc_tgt < g_agc_gain) ? 0.04f : 0.002f;
+                g_agc_gain += rate * (agc_tgt - g_agc_gain);
+            } else {
+                g_agc_gain += 0.001f * (1.35f - g_agc_gain);
+            }
+
+            float o = e * g_nr_gain * g_agc_gain;
+            if (fabsf(o) > 26000.f) o = 26000.f * tanhf(o / 26000.f);
             if (o > 32767.f) o = 32767.f;
             if (o < -32768.f) o = -32768.f;
             outbuf[outn++] = (int16_t)o;
@@ -290,10 +367,49 @@ int main(void) {
 
             pw_in += (double)mic * mic;
             pw_out += (double)o * o;
+            g_post_acc += (double)ae;
 
             g_macc += fabsf(mic);
             g_racc_env += fabsf(rraw);
             if (++g_ecnt == ENV_HOP) {
+                /* Per-mic RMSChooser (alpha=0.90, micSwitchThreshold=0.20) */
+                int cand_m = g_best_mic;
+                float best_snr = -1.0f;
+                for (int m = 0; m < VQE_MICS; m++) {
+                    float mr = sqrtf((float)(g_msq_acc[m] / ENV_HOP));
+                    g_msq_acc[m] = 0.0;
+                    g_m_ema[m] = 0.90f * g_m_ema[m] + 0.10f * mr;
+                    if (mr < g_m_noise[m]) {
+                        g_m_noise[m] = 0.85f * g_m_noise[m] + 0.15f * mr;
+                    } else {
+                        g_m_noise[m] = 0.998f * g_m_noise[m] + 0.002f * mr;
+                    }
+                    if (g_m_noise[m] < 10.0f) g_m_noise[m] = 10.0f;
+                    if (g_m_noise[m] > 2000.0f) g_m_noise[m] = 2000.0f;
+                    if (g_m_ema[m] >= 1.0f && g_m_noise[m] < 1950.0f) {
+                        float snr = g_m_ema[m] / (g_m_noise[m] + 1.0f);
+                        if (snr > best_snr) {
+                            best_snr = snr;
+                            cand_m = m;
+                        }
+                    }
+                }
+                if (g_m_ema[g_best_mic] < 1.0f || g_m_ema[cand_m] > g_m_ema[g_best_mic] * 1.20f) {
+                    g_best_mic = cand_m;
+                }
+
+                /* Update 480 ms stationary noise floor */
+                float hop_env = (float)(g_post_acc / ENV_HOP);
+                g_post_acc = 0.0;
+                g_nr_hist[g_nr_idx] = hop_env;
+                g_nr_idx = (g_nr_idx + 1) % NR_HOPS;
+                if (g_nr_fill < NR_HOPS) g_nr_fill++;
+                float min_h = g_nr_hist[0];
+                for (int k = 1; k < g_nr_fill; k++) {
+                    if (g_nr_hist[k] < min_h) min_h = g_nr_hist[k];
+                }
+                g_noise_env = (min_h < 15.0f) ? 15.0f : min_h;
+
                 g_menv[g_ei] = (float)(g_macc / ENV_HOP);
                 g_renv[g_ei] = (float)(g_racc_env / ENV_HOP);
                 g_ei = (g_ei + 1) % ENV_N;
@@ -306,7 +422,7 @@ int main(void) {
         }
 
         stat_cnt += BLK;
-        if (stat_cnt >= SR * 2) {
+        if (!use_stdin && stat_cnt >= SR * 2) {
             double db = 0;
             if (pw_out > 1.0 && pw_in > 1.0) db = 10.0 * log10(pw_in / pw_out);
             write_stat(db, ref_active_cnt > SR);
@@ -316,10 +432,14 @@ int main(void) {
         }
     }
 
+    if (outn > 0) {
+        fwrite(outbuf, 2, (size_t)outn, stdout);
+        fflush(stdout);
+    }
     if (g_child > 0) {
         kill(g_child, SIGTERM);
         waitpid(g_child, NULL, 0);
     }
-    unlink(REF_SOCK);
+    if (!use_stdin) unlink(REF_SOCK);
     return 0;
 }
