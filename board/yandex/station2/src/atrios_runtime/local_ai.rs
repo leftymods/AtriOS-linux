@@ -424,19 +424,47 @@ pub fn parse_russian_alarm_time(words: &[&str]) -> Option<(u8, u8)> {
     Some((h, m))
 }
 
+fn strip_inline_wake_tokens<'a>(raw: &[&'a str]) -> Vec<&'a str> {
+    let mut out = Vec::with_capacity(raw.len());
+    let mut i = 0usize;
+    while i < raw.len() {
+        if i + 1 < raw.len()
+            && matches!(raw[i], "а" | "о" | "от" | "на" | "э")
+            && raw[i + 1] == "три"
+            && !(i > 0 && matches!(raw[i - 1], "на" | "в" | "во" | "через"))
+        {
+            i += 2;
+            continue;
+        }
+        if matches!(
+            raw[i],
+            "атри" | "отри" | "арти" | "атриум" | "натрий" | "астры" | "адрес" | "армия" | "актриса" | "атрибут" | "atri"
+        ) {
+            i += 1;
+            continue;
+        }
+        out.push(raw[i]);
+        i += 1;
+    }
+    out
+}
+
 pub fn parse_local_intent(text: &str, wake_word: &str) -> Option<LocalIntent> {
     let (clean, _) = split_trailing_stop(text, wake_word);
-    let words: Vec<&str> = clean.split_whitespace().collect();
+    let raw_words: Vec<&str> = clean.split_whitespace().collect();
+    let words = strip_inline_wake_tokens(&raw_words);
     if words.is_empty() {
         return None;
     }
 
-    let has_timer = words.iter().any(|&w| {
+    let timer_pos = words.iter().position(|&w| {
         w.starts_with("таймер") || matches!(w, "засеки" | "засечь" | "напомни")
     });
-    let has_alarm = words.iter().any(|&w| {
+    let alarm_pos = words.iter().position(|&w| {
         w.starts_with("будильник") || matches!(w, "разбуди" | "подними")
     });
+    let has_timer = timer_pos.is_some();
+    let has_alarm = alarm_pos.is_some();
     let has_cancel = words.iter().any(|&w| {
         matches!(
             w,
@@ -452,10 +480,13 @@ pub fn parse_local_intent(text: &str, wake_word: &str) -> Option<LocalIntent> {
         if has_cancel {
             return Some(LocalIntent::CancelTimers);
         }
-        if has_query && parse_russian_duration_secs(&words).is_none() {
+        // Only parse duration from words after the timer keyword so stray wake words ("три") never leak in
+        let tail = timer_pos.map(|p| &words[p + 1..]).unwrap_or(&words[..]);
+        let dur = parse_russian_duration_secs(tail).or_else(|| parse_russian_duration_secs(&words));
+        if has_query && dur.is_none() {
             return Some(LocalIntent::QueryTimers);
         }
-        if let Some(secs) = parse_russian_duration_secs(&words) {
+        if let Some(secs) = dur {
             return Some(LocalIntent::SetTimer { secs });
         }
         return Some(LocalIntent::QueryTimers);
@@ -469,10 +500,13 @@ pub fn parse_local_intent(text: &str, wake_word: &str) -> Option<LocalIntent> {
         if has_cancel {
             return Some(LocalIntent::CancelAlarms);
         }
-        if has_query && parse_russian_alarm_time(&words).is_none() {
+        // Only parse alarm time from words after the alarm keyword so stray wake words ("три") never leak in
+        let tail = alarm_pos.map(|p| &words[p + 1..]).unwrap_or(&words[..]);
+        let tm = parse_russian_alarm_time(tail).or_else(|| parse_russian_alarm_time(&words));
+        if has_query && tm.is_none() {
             return Some(LocalIntent::QueryAlarms);
         }
-        if let Some((hour, minute)) = parse_russian_alarm_time(&words) {
+        if let Some((hour, minute)) = tm {
             return Some(LocalIntent::SetAlarm { hour, minute });
         }
         return Some(LocalIntent::QueryAlarms);
