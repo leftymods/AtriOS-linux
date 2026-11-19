@@ -144,15 +144,25 @@ static void estimate_delay(void) {
         mvar += (m[i] - mm) * (m[i] - mm);
     }
     if (rvar < 1e-3 || mvar < 1e-3) return;
-    double best = -1.0;
+    double best = -1.0, second = -1.0;
     int best_lag = 0;
     for (int lag = 0; lag <= MAXLAG; lag++) {
         double s = 0;
         for (int i = lag; i < n; i++) s += (m[i] - mm) * (r[i - lag] - rm);
         double c = s / sqrt(rvar * mvar);
-        if (c > best) { best = c; best_lag = lag; }
+        if (c > best) {
+            if (abs(lag - best_lag) > 2) second = best;
+            best = c;
+            best_lag = lag;
+        } else if (abs(lag - best_lag) > 2 && c > second) {
+            second = c;
+        }
     }
-    if (best < 0.30) return;
+    /* Need a clear, unambiguous peak, confirmed twice in a row. */
+    static int pend_lag = -1;
+    if (best < 0.40 || best - second < 0.08) { pend_lag = -1; return; }
+    if (pend_lag < 0 || abs(pend_lag - best_lag) > 1) { pend_lag = best_lag; return; }
+    pend_lag = best_lag;
     long nd = (long)best_lag * ENV_HOP - 320;
     if (nd < 0) nd = 0;
     if (labs(nd - g_delay) > 480) {
@@ -263,7 +273,7 @@ int main(void) {
 
             int active = g_en > (double)TAPS * 40.0;
             if (active) {
-                float g = 0.15f * e / (float)(g_en + (double)TAPS * 20.0);
+                float g = 0.45f * e / (float)(g_en + (double)TAPS * 20.0);
                 for (int t = 0; t < TAPS; t++) g_w[t] += g * x[t];
                 ref_active_cnt++;
             }
