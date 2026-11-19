@@ -16,7 +16,7 @@ AtriOS - Yandex Station Max tools
 
   Screen (25x16):
     atrios screen kisser [1|2|animate]  Boykisser cat animation
-    atrios screen eyes [state]          Eyes (open/blink/wink/left/right/up/down/happy/love/wide/angry/sleep/cry/squint/dizzy/animate)
+    atrios screen eyes [state]          Eyes (idle listening thinking speaking[:variant] happy love surprised wink cool confused angry sad sleep boot bt_speaker clock volume ...)
     atrios screen clock|ticker "TEXT"|fill [0..255]|pixel X Y [B]|gradient|off
   LED ring (24 RGB):
     atrios ring rainbow|amber|amber_green|volume N|red|blue|green|off

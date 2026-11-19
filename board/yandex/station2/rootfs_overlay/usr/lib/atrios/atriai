@@ -47,7 +47,7 @@ RING_OVERRIDE_FILE = "/var/run/atrios/ring_override"
 
 DEFAULT_CONFIG = {
     "enabled": False,
-    "server": "https://192.168.1.106:8090",
+    "server": "",
     "ca_file": "",
     "token": "",
     "wake_word": "Atri",
@@ -176,10 +176,17 @@ def load_config():
 
 def save_config(cfg):
     os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
-    tmp = CONFIG_FILE + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, indent=2)
-    os.replace(tmp, CONFIG_FILE)
+    # mkstemp creates mode 0600 before any token reaches disk.
+    fd, tmp = tempfile.mkstemp(prefix=".ai-config-", dir=os.path.dirname(CONFIG_FILE))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(cfg, stream, indent=2)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(tmp, CONFIG_FILE)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
 
 
 def write_status(state, last_asr="", last_answer="", error=""):
@@ -244,20 +251,20 @@ def set_vad_visual(phase, force=False):
     if phase == "vad":
         ring_tag = "amber"
         ring_cmd = ["/usr/bin/atrios", "ring", "amber", "30"]
-        screen_tag = "eyes_open"
-        screen_cmd = ["/usr/bin/atrios", "screen", "eyes", "open"]
+        screen_tag = "eyes_listening"
+        screen_cmd = ["/usr/bin/atrios", "screen", "eyes", "listening"]
         _write_screen_mode("ai")
     elif phase == "thinking":
         ring_tag = "amber"
         ring_cmd = ["/usr/bin/atrios", "ring", "amber", "30"]
-        screen_tag = "eyes_open"
-        screen_cmd = ["/usr/bin/atrios", "screen", "eyes", "open"]
+        screen_tag = "eyes_thinking"
+        screen_cmd = ["/usr/bin/atrios", "screen", "eyes", "thinking"]
         _write_screen_mode("ai")
     elif phase == "speaking":
         ring_tag = "amber_green"
         ring_cmd = ["/usr/bin/atrios", "ring", "amber_green", "60"]
-        screen_tag = "eyes_happy"
-        screen_cmd = ["/usr/bin/atrios", "screen", "eyes", "happy"]
+        screen_tag = "eyes_speaking"
+        screen_cmd = ["/usr/bin/atrios", "screen", "eyes", "speaking:default"]
         _write_screen_mode("ai")
     else:
         ring_tag = "off"
@@ -582,12 +589,15 @@ def send_phrase_to_server(server_url, pcm_bytes, wake_word=""):
         if not isinstance(recognized, dict) or not isinstance(recognized.get("text"), str):
             raise ValueError("Invalid ASR response")
         text = recognized["text"].strip()
-        if not text or (wake_word and not matches_wake_word(text, wake_word)):
+        if not text:
             set_error("voice")
             return text, ""
         action = local_command(text, wake_word)
         if action:
             execute_device_command(action)
+            set_error("voice")
+            return text, ""
+        if wake_word and not matches_wake_word(text, wake_word):
             set_error("voice")
             return text, ""
         set_vad_visual("thinking")
@@ -840,6 +850,7 @@ def main():
         run_daemon()
     elif cmd == "enable":
         cfg = load_config()
+        require_https(cfg.get("server", ""))
         cfg["enabled"] = True
         save_config(cfg)
         print("AtriAI enabled.")
@@ -881,7 +892,9 @@ def main():
                     st = json.load(f)
         except Exception:
             pass
-        print(json.dumps({"config": cfg, "status": st}, ensure_ascii=False, indent=2))
+        public_cfg = dict(cfg)
+        public_cfg["token"] = "***" if cfg.get("token") else ""
+        print(json.dumps({"config": public_cfg, "status": st}, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":

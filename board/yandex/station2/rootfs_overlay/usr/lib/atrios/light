@@ -12,6 +12,7 @@ import os
 import time
 import argparse
 import math
+import random
 
 import glob
 from atrios_status import active_error
@@ -275,209 +276,614 @@ def screen_boykisser(mode="animate", brightness=220, loops=None):
     except KeyboardInterrupt:
         pass
 
-def screen_eyes(state="open", brightness=220):
-    buf = bytearray(SCR_SIZE)
-    if state == "open":
-        for y in range(4, 11):
-            for x in range(4, 9):
-                screen_set_pixel(buf, x, y, brightness)
-            for x in range(16, 21):
-                screen_set_pixel(buf, x, y, brightness)
-        screen_set_pixel(buf, 5, 5, 255)
-        screen_set_pixel(buf, 17, 5, 255)
-    elif state == "blink":
-        for x in range(3, 10):
-            screen_set_pixel(buf, x, 7, brightness)
-        for x in range(15, 22):
-            screen_set_pixel(buf, x, 7, brightness)
-    elif state == "left":
-        for y in range(4, 11):
-            for x in range(2, 7):
-                screen_set_pixel(buf, x, y, brightness)
-            for x in range(14, 19):
-                screen_set_pixel(buf, x, y, brightness)
-        screen_set_pixel(buf, 3, 5, 255)
-        screen_set_pixel(buf, 15, 5, 255)
-    elif state == "right":
-        for y in range(4, 11):
-            for x in range(6, 11):
-                screen_set_pixel(buf, x, y, brightness)
-            for x in range(18, 23):
-                screen_set_pixel(buf, x, y, brightness)
-        screen_set_pixel(buf, 9, 5, 255)
-        screen_set_pixel(buf, 21, 5, 255)
-    elif state == "up":
-        for y in range(2, 9):
-            for x in range(4, 9):
-                screen_set_pixel(buf, x, y, brightness)
-            for x in range(16, 21):
-                screen_set_pixel(buf, x, y, brightness)
-        screen_set_pixel(buf, 5, 3, 255)
-        screen_set_pixel(buf, 17, 3, 255)
-    elif state == "down":
-        for y in range(6, 13):
-            for x in range(4, 9):
-                screen_set_pixel(buf, x, y, brightness)
-            for x in range(16, 21):
-                screen_set_pixel(buf, x, y, brightness)
-        screen_set_pixel(buf, 5, 11, 255)
-        screen_set_pixel(buf, 17, 11, 255)
-    elif state == "wink":
-        for y in range(4, 11):
-            for x in range(4, 9):
-                screen_set_pixel(buf, x, y, brightness)
-        screen_set_pixel(buf, 5, 5, 255)
-        for x in range(15, 22):
-            screen_set_pixel(buf, x, 7, brightness)
-    elif state in ("happy", "smile"):
-        for x in range(4, 9):
-            screen_set_pixel(buf, x, 4, brightness)
-        screen_set_pixel(buf, 3, 5, brightness)
-        screen_set_pixel(buf, 9, 5, brightness)
-        for x in range(16, 21):
-            screen_set_pixel(buf, x, 4, brightness)
-        screen_set_pixel(buf, 15, 5, brightness)
-        screen_set_pixel(buf, 21, 5, brightness)
-    elif state in ("love", "heart", "hearts"):
-        pattern = [
-            "   ##   ##     ##   ##   ",
-            "  #### ####   #### ####  ",
-            "  #########   #########  ",
-            "   #######     #######   ",
-            "    #####       #####    ",
-            "     ###         ###     ",
-            "      #           #      ",
-        ]
-        for y_idx, row in enumerate(pattern):
-            for x_idx, ch in enumerate(row):
-                if ch == '#':
-                    screen_set_pixel(buf, x_idx, 4 + y_idx, brightness)
-    elif state in ("surprised", "wide"):
-        for y in range(3, 12):
-            for x in range(3, 10):
-                if 4 <= y <= 10 and 4 <= x <= 8:
-                    continue
-                screen_set_pixel(buf, x, y, brightness)
-            for x in range(15, 22):
-                if 4 <= y <= 10 and 16 <= x <= 20:
-                    continue
-                screen_set_pixel(buf, x, y, brightness)
-        screen_set_pixel(buf, 6, 7, brightness)
-        screen_set_pixel(buf, 18, 7, brightness)
-    elif state == "angry":
-        pattern = [
-            "  ######         ######  ",
-            "   #####         #####   ",
-            "    ####         ####    ",
-            "     ###         ###     ",
-            "      ##         ##      ",
-            "       #         #       ",
-        ]
-        for y_idx, row in enumerate(pattern):
-            for x_idx, ch in enumerate(row):
-                if ch == '#':
-                    screen_set_pixel(buf, x_idx, 5 + y_idx, brightness)
-    elif state in ("sleep", "sleeping"):
-        for x in range(3, 9):
-            screen_set_pixel(buf, x, 9, brightness)
-        for x in range(16, 22):
-            screen_set_pixel(buf, x, 9, brightness)
-    elif state in ("sad", "cry"):
-        for x in range(4, 9):
-            screen_set_pixel(buf, x, 7, brightness)
-        screen_set_pixel(buf, 3, 6, brightness)
-        screen_set_pixel(buf, 9, 8, brightness)
-        for x in range(16, 21):
-            screen_set_pixel(buf, x, 7, brightness)
-        screen_set_pixel(buf, 15, 8, brightness)
-        screen_set_pixel(buf, 21, 6, brightness)
-    elif state == "squint":
-        for x in range(3, 10):
-            screen_set_pixel(buf, x, 7, brightness)
-            screen_set_pixel(buf, x, 8, brightness)
-        for x in range(15, 22):
-            screen_set_pixel(buf, x, 7, brightness)
-            screen_set_pixel(buf, x, 8, brightness)
-    elif state in ("dizzy", "spiral"):
-        coords = [
-            (5, 5), (6, 5), (7, 5), (8, 6), (8, 7), (8, 8), (7, 9), (6, 9), (5, 8), (6, 7),
-            (17, 5), (18, 5), (19, 5), (20, 6), (20, 7), (20, 8), (19, 9), (18, 9), (17, 8), (18, 7)
-        ]
-        for x, y in coords:
-            screen_set_pixel(buf, x, y, brightness)
-    screen_send_frame(buf)
-    print(f"[Screen] Eyes: {state} (brightness={brightness}/255)", flush=True)
+# --- Eyes (Ч/Б глаза 25x16): animated, runs until killed (atrios screen eyes <state>[:variant]) ---
+E_W, E_H = 25, 16
+E_EYE_W, E_EYE_H = 7, 10
+E_LEFT_X, E_RIGHT_X, E_BASE_Y = 3, 15, 3
+E_EQ_COLS = 17
+E_SLEEP_MS = 950
+E_FPS = 15
+E_SPEAK_VARIANTS = ("default", "happy", "angry", "sad", "surprised")
+E_EYE_STATES = frozenset(("idle", "listening", "thinking", "speaking", "happy", "love", "surprised",
+                          "wink", "cool", "confused", "angry", "sad"))
+E_STATES = tuple(sorted(E_EYE_STATES | {"sleep", "boot", "setup", "bt_speaker", "bt_on", "clock", "volume",
+                                         "timer", "weather", "mic_muted", "updating"}))
+E_ALIASES = {
+    "open": "idle", "blink": "idle", "left": "idle", "right": "idle", "up": "idle", "down": "idle",
+    "look": "idle", "animate": "idle", "smile": "happy", "heart": "love", "hearts": "love",
+    "wide": "surprised", "cry": "sad", "squint": "cool", "dizzy": "confused", "sleeping": "sleep",
+    "bt": "bt_speaker", "muted": "mic_muted", "update": "updating",
+}
+E_GAZE = {"left": (-1, 0), "right": (1, 0), "up": (0, -1), "down": (0, 1)}
 
-def screen_eyes_animated(sequence="animate", brightness=220):
-    print(f"[Screen] Running animated eyes: {sequence}...", flush=True)
-    try:
-        if sequence in ("sleep", "sleeping"):
-            for _ in range(5):
-                for z_step in range(4):
-                    buf = bytearray(SCR_SIZE)
-                    for x in range(3, 9):
-                        screen_set_pixel(buf, x, 9, brightness)
-                    for x in range(16, 22):
-                        screen_set_pixel(buf, x, 9, brightness)
-                    # Floating Z
-                    if z_step >= 1:
-                        screen_set_pixel(buf, 18, 6, int(brightness * 0.5))
-                    if z_step >= 2:
-                        screen_set_pixel(buf, 20, 4, int(brightness * 0.75))
-                    if z_step >= 3:
-                        screen_set_pixel(buf, 22, 2, brightness)
-                    screen_send_frame(buf)
-                    time.sleep(0.4)
-        elif sequence in ("sad", "cry"):
-            for _ in range(3):
-                for tear_y in range(8, 14):
-                    buf = bytearray(SCR_SIZE)
-                    # Sad eyes
-                    for x in range(4, 9):
-                        screen_set_pixel(buf, x, 7, brightness)
-                    screen_set_pixel(buf, 3, 6, brightness)
-                    screen_set_pixel(buf, 9, 8, brightness)
-                    for x in range(16, 21):
-                        screen_set_pixel(buf, x, 7, brightness)
-                    screen_set_pixel(buf, 15, 8, brightness)
-                    screen_set_pixel(buf, 21, 6, brightness)
-                    # Tear drop
-                    screen_set_pixel(buf, 6, tear_y, 255)
-                    screen_set_pixel(buf, 18, tear_y, 255)
-                    screen_send_frame(buf)
-                    time.sleep(0.12)
-        elif sequence in ("love", "heart", "hearts"):
-            for _ in range(4):
-                screen_eyes("love", brightness)
-                time.sleep(0.5)
-                screen_eyes("love", int(brightness * 0.4))
-                time.sleep(0.25)
-        elif sequence == "look":
-            for s in ["open", "left", "up", "right", "down", "open"]:
-                screen_eyes(s, brightness)
-                time.sleep(0.5)
+E_DIG4 = {
+    "0": [".###", "#..#", "#..#", "#..#", "#..#", "#..#", ".###"], "1": ["..#.", ".##.", "..#.", "..#.", "..#.", "..#.", ".###"],
+    "2": [".###", "#..#", "...#", "..#.", ".#..", "#...", "####"], "3": ["###.", "...#", "...#", ".##.", "...#", "...#", "###."],
+    "4": ["#..#", "#..#", "#..#", "####", "...#", "...#", "...#"], "5": ["####", "#...", "###.", "...#", "...#", "#..#", ".##."],
+    "6": [".###", "#...", "###.", "#..#", "#..#", "#..#", ".##."], "7": ["####", "...#", "..#.", "..#.", ".#..", ".#..", ".#.."],
+    "8": [".###", "#..#", "#..#", ".##.", "#..#", "#..#", ".###"], "9": [".###", "#..#", "#..#", ".###", "...#", "...#", ".##."],
+}
+E_DIG3 = {
+    "0": ["###", "#.#", "#.#", "#.#", "###"], "1": [".#.", "##.", ".#.", ".#.", "###"], "2": ["###", "..#", "###", "#..", "###"],
+    "3": ["###", "..#", "###", "..#", "###"], "4": ["#.#", "#.#", "###", "..#", "..#"], "5": ["###", "#..", "###", "..#", "###"],
+    "6": ["###", "#..", "###", "#.#", "###"], "7": ["###", "..#", "..#", ".#.", ".#."], "8": ["###", "#.#", "###", "#.#", "###"],
+    "9": ["###", "#.#", "###", "..#", "###"],
+}
+E_ARCH = ["..###..", ".#####.", "#######", "##...##", "#.....#"]
+E_WINK_ARCH = ["..###..", ".#####.", "##...##"]
+E_CIRCLE8 = ["..####..", ".######.", "########", "########", "########", "########", ".######.", "..####.."]
+E_CIRCLE9 = ["..#####..", ".#######.", "#########", "#########", "#########", "#########", "#########", ".#######.", "..#####.."]
+E_HEART_BIG = [".##.##.", "#######", "#######", ".#####.", "..###..", "...#..."]
+E_HEART_SMALL = [".#.#.", "#####", ".###.", "..#.."]
+E_BT_SMALL = ["..#..", "..##.", "#.#.#", ".###.", "..#..", ".###.", "#.#.#", "..##.", "..#.."]
+E_BT_BIG = ["...#...", "...##..", "#..#.#.", ".#.#.#.", "..###..", "...#...", "..###..", ".#.#.#.", "#..#.#.", "...##..", "...#..."]
+E_MIC = ["..###..", ".#####.", ".#####.", ".#####.", "..###..", "#.....#", ".#####.", "...#...", "..###.."]
+E_SPEAKER = ["...#", "..##", "####", "####", "####", "..##", "...#"]
+E_BELL = ["...#...", "..###..", ".#####.", ".#####.", ".#####.", "#######", "...#..."]
+E_SUN = [".###.", "#####", "#####", "#####", ".###."]
+E_CLOUD = ["..###..", ".#####.", "#######", "#######"]
+E_PHONE = ["#####", "#...#", "#.#.#", "#...#", "#...#", "#.#.#", "#####"]
+
+
+def _rnd(v):
+    return int(math.floor(v + 0.5))
+
+
+class _Eyes:
+    """Renderer for the 25x16 matrix: render(now_ms) fills .pixels, frame_rgb888() packs it."""
+
+    def __init__(self, now_ms):
+        self.pixels = [bytearray(E_W) for _ in range(E_H)]
+        self.state = "idle"
+        self.variant = "default"
+        self.volume = 50
+        self.boot_start = self.setup_start = now_ms
+        self.sleep_mode, self.sleep_start = "none", 0
+        self.manual_gaze = False
+        self.tdx = self.tdy = 0
+        self.cdx = self.cdy = 0.0
+        self.next_look, self.next_blink = now_ms + 2000, now_ms + 2800
+        self.blink_start, self.double_blink = -1.0, False
+        self.peaks, self.smooth = [0.0] * E_EQ_COLS, [1.0] * E_EQ_COLS
+        self.disp_vol = 50.0
+
+    def set_state(self, state, variant=None, now_ms=0):
+        if variant in E_SPEAK_VARIANTS:
+            self.variant = variant
+        prev, self.state = self.state, state
+        if state == "boot":
+            self.boot_start = now_ms
+        elif state == "setup":
+            self.setup_start = now_ms
+        if state == "sleep" and prev in E_EYE_STATES:
+            self.sleep_mode, self.sleep_start = "falling_asleep", now_ms
+        elif state == "idle" and prev == "sleep":
+            self.sleep_mode, self.sleep_start = "waking", now_ms
         else:
-            # Idle alive sequence
-            seq = [
-                ("open", 1.2),
-                ("blink", 0.15),
-                ("open", 0.8),
-                ("left", 0.6),
-                ("open", 0.5),
-                ("right", 0.6),
-                ("open", 0.8),
-                ("wink", 0.4),
-                ("open", 0.5),
-                ("happy", 1.0),
-                ("open", 0.8),
-                ("love", 1.0),
-                ("open", 1.0),
-            ]
-            for s, pause in seq:
-                screen_eyes(s, brightness)
-                time.sleep(pause)
+            self.sleep_mode = "none"
+
+    def boot_done(self, now_ms):
+        return (now_ms - self.boot_start) / 1000.0 > 4.6
+
+    # primitives
+    def _px(self, x, y, v=1):
+        ix, iy = _rnd(x), _rnd(y)
+        if 0 <= ix < E_W and 0 <= iy < E_H:
+            self.pixels[iy][ix] = 1 if v else 0
+
+    def _rect(self, x0, y0, w, h, r=1, v=1):
+        for dy in range(h):
+            for dx in range(w):
+                if r > 0 and w >= 3 and h >= 3 and ((dx < r or dx >= w - r) and (dy < r or dy >= h - r)):
+                    continue
+                self._px(x0 + dx, y0 + dy, v)
+
+    def _line(self, x0, y0, x1, y1, v=1):
+        x0, y0, x1, y1 = _rnd(x0), _rnd(y0), _rnd(x1), _rnd(y1)
+        dx, dy = abs(x1 - x0), -abs(y1 - y0)
+        sx, sy = (1 if x0 < x1 else -1), (1 if y0 < y1 else -1)
+        err = dx + dy
+        while True:
+            self._px(x0, y0, v)
+            if x0 == x1 and y0 == y1:
+                break
+            e2 = 2 * err
+            if e2 >= dy:
+                err += dy
+                x0 += sx
+            if e2 <= dx:
+                err += dx
+                y0 += sy
+
+    def _bmp(self, x0, y0, rows):
+        for r, line in enumerate(rows):
+            for c, ch in enumerate(line):
+                if ch == "#":
+                    self._px(x0 + c, y0 + r)
+
+    def _lash(self, x, y, w, right):
+        if not right:
+            self._px(x - 1, y + 1)
+            self._px(x - 2, y)
+        else:
+            self._px(x + w, y + 1)
+            self._px(x + w + 1, y)
+
+    def _eye(self, x, y, w, h, slant=0, right=False, cheek=0):
+        if h <= 2:
+            self._rect(x, y, w, max(1, h), 0)
+            return
+        self._rect(x, y, w, h, 1)
+        if h >= 5:
+            self._lash(x, (y + abs(slant)) if slant < 0 else y, w, right)
+        if slant:
+            for dx in range(w):
+                n = dx / max(1, w - 1)
+                f = ((1 - n) if right else n) if slant > 0 else (n if right else (1 - n))
+                for dy in range(_rnd(f * abs(slant))):
+                    self._px(x + dx, y + dy, 0)
+        if cheek > 0 and h >= 5:
+            for dx in range(1, w - 1):
+                if abs(dx - (w - 1) / 2) <= 1.6:
+                    for k in range(cheek):
+                        self._px(x + dx, y + h - 1 - k, 0)
+
+    def _level(self, t, speed):
+        return 0.55 + 0.45 * math.sin(t * (speed * 0.43))
+
+    def _strip(self, t, speed=11.5, amp=1.15, freq=0.78):
+        lvl = self._level(t, speed)
+        for x in range(7, 18):
+            if lvl < 0.06:
+                self._px(x, 14)
+                continue
+            dist = abs(x - 12) / 5.0
+            w = math.sin(x * freq - t * speed) + 0.5 * math.cos(x * freq * 1.6 + t * speed * 1.25)
+            off = _rnd(w * amp * (1.0 - 0.55 * dist * dist) * lvl)
+            self._px(x, max(12, min(15, 14 + off)))
+            if abs(off) >= 1 and dist < 0.6 and lvl > 0.65:
+                self._px(x, 14)
+
+    def _blink(self, now):
+        if now >= self.next_blink and self.blink_start < 0:
+            self.blink_start, self.double_blink = now, random.random() < 0.25
+            self.next_blink = now + 2800 + random.random() * 3200
+        if self.blink_start >= 0:
+            el = now - self.blink_start
+            if 0 <= el < 210:
+                return abs(el / 210 * 2 - 1)
+            if el >= 210:
+                self.blink_start = -1
+                if self.double_blink:
+                    self.double_blink, self.blink_start = False, now + 80
+        return 1.0
+
+    def _sleep_tr(self, now, waking):
+        el = now - self.sleep_start
+        p = max(0.0, min(1.0, el / E_SLEEP_MS))
+        ease = p * p * (3 - 2 * p)
+        op = ease if waking else 1 - ease
+        if op <= 0.18:
+            for bx in (E_LEFT_X, E_RIGHT_X):
+                self._px(bx, 9)
+                self._line(bx + 1, 10, bx + 5, 10)
+                self._px(bx + 6, 9)
+        else:
+            h = max(2, _rnd(2 + (E_EYE_H - 2) * op))
+            y = _rnd(E_BASE_Y + (1 - op) * 5)
+            self._eye(E_LEFT_X, y, E_EYE_W, h)
+            self._eye(E_RIGHT_X, y, E_EYE_W, h, right=True)
+        if el >= E_SLEEP_MS:
+            self.sleep_mode = "none"
+            if waking:
+                self.blink_start, self.double_blink = now, True
+
+    def render(self, now):
+        t = now / 1000.0
+        for row in self.pixels:
+            for i in range(E_W):
+                row[i] = 0
+        self.cdx += (self.tdx - self.cdx) * 0.28
+        self.cdy += (self.tdy - self.cdy) * 0.28
+        dx, dy, bo = _rnd(self.cdx), _rnd(self.cdy), self._blink(now)
+        fn = getattr(self, "_s_" + self.state, None)
+        if fn:
+            fn(now, t, dx, dy, bo)
+
+    def frame_rgb888(self, brightness):
+        out = bytearray(E_W * E_H * 3)
+        v = max(0, min(255, int(brightness)))
+        for y in range(E_H):
+            for x in range(E_W):
+                if self.pixels[y][x]:
+                    o = (y * E_W + x) * 3
+                    out[o] = out[o + 1] = out[o + 2] = v
+        return out
+
+    # --- eye states ---
+    def _s_idle(self, now, t, dx, dy, bo):
+        if self.sleep_mode == "waking":
+            return self._sleep_tr(now, True)
+        if not self.manual_gaze and now >= self.next_look:
+            self.tdx, self.tdy = random.choice((-1, 0, 0, 1)), random.choice((-1, 0, 0, 1))
+            self.next_look = now + 1400 + random.random() * 2200
+        h = max(1, _rnd(1 + (E_EYE_H - 1) * bo))
+        y = E_BASE_Y + dy + (E_EYE_H - h) // 2
+        self._eye(E_LEFT_X + dx, y, E_EYE_W, h)
+        self._eye(E_RIGHT_X + dx, y, E_EYE_W, h, right=True)
+
+    def _s_listening(self, now, t, dx, dy, bo):
+        h = max(1, _rnd(1 + (11 + (1 if math.sin(t * 2.8) > 0.25 else 0) - 1) * bo))
+        y, tilt = (E_H - h) // 2, _rnd(math.sin(t * 1.4) * 0.6)
+        self._eye(2 + tilt, y, 8, h)
+        self._eye(15 + tilt, y, 8, h, right=True)
+
+    def _s_thinking(self, now, t, dx, dy, bo):
+        c = math.sin(t * 1.25)
+        sh = 1 if c > 0.35 else (-1 if c < -0.35 else 0)
+        lb, rb = (5, 8) if sh >= 0 else (8, 5)
+        lh, rh = max(1, _rnd(1 + (lb - 1) * bo)), max(1, _rnd(1 + (rb - 1) * bo))
+        self._eye(E_LEFT_X + sh, (4 if sh >= 0 else 1) + (lb - lh) // 2, E_EYE_W, lh)
+        self._eye(E_RIGHT_X + sh, (1 if sh >= 0 else 4) + (rb - rh) // 2, E_EYE_W, rh, right=True)
+        for i in range(3):
+            self._px(9 + i * 3, 13 if math.sin(t * 6.0 - i * 1.1) > 0.45 else 14)
+
+    def _s_speaking(self, now, t, dx, dy, bo):
+        v = self.variant
+        if v == "happy":
+            bob = 0 if (self._level(t, 13.5) > 0.55 or math.sin(t * 6.5) > 0.25) else 1
+            self._bmp(E_LEFT_X, 3 + bob, E_ARCH)
+            self._bmp(E_RIGHT_X, 3 + bob, E_ARCH)
+            self._lash(E_LEFT_X, 4 + bob, E_EYE_W, False)
+            self._lash(E_RIGHT_X, 4 + bob, E_EYE_W, True)
+            self._strip(t, 13.5, 1.15, 0.85)
+        elif v == "angry":
+            press = 1 if self._level(t, 19.0) > 0.6 else 0
+            bh = 8 - press
+            h = max(1, _rnd(1 + (bh - 1) * bo))
+            y = 2 + press + (bh - h) // 2
+            self._eye(E_LEFT_X, y, E_EYE_W, h, slant=4)
+            self._eye(E_RIGHT_X, y, E_EYE_W, h, slant=4, right=True)
+            self._strip(t, 19.0, 1.35, 1.05)
+        elif v == "sad":
+            h = max(1, _rnd(1 + 6 * bo))
+            y = 2 + (1 if math.sin(t * 2.0) > 0.4 else 0) + (7 - h) // 2
+            self._eye(E_LEFT_X, y, E_EYE_W, h, slant=-3)
+            self._eye(E_RIGHT_X, y, E_EYE_W, h, slant=-3, right=True)
+            tear = int((t * 3.5) % 6)
+            if tear < 4:
+                self._px(E_LEFT_X + 1, 9 + tear)
+            self._strip(t, 6.0, 0.8, 0.6)
+        elif v == "surprised":
+            lift = 0 if self._level(t, 14.5) > 0.6 else 1
+            if bo < 0.35:
+                self._line(2, 5 + lift, 9, 5 + lift)
+                self._line(15, 5 + lift, 22, 5 + lift)
+            else:
+                self._bmp(2, 1 + lift, E_CIRCLE8)
+                self._bmp(15, 1 + lift, E_CIRCLE8)
+                self._lash(2, 2 + lift, 8, False)
+                self._lash(15, 2 + lift, 8, True)
+            self._strip(t, 14.5, 1.2, 0.9)
+        else:
+            lvl = self._level(t, 12.0)
+            lift, glance = (0 if lvl > 0.62 else 1), _rnd(math.sin(t * 1.8) * 0.6)
+            bh = 8 if lvl > 0.55 else 7
+            h = max(1, _rnd(1 + (bh - 1) * bo))
+            y = 2 + lift + (bh - h) // 2
+            self._eye(E_LEFT_X + glance, y, E_EYE_W, h, cheek=2)
+            self._eye(E_RIGHT_X + glance, y, E_EYE_W, h, cheek=2, right=True)
+            self._strip(t, 12.0, 1.1, 0.78)
+
+    def _s_happy(self, now, t, dx, dy, bo):
+        b = 0 if math.sin(t * 5.2) > 0.1 else 1
+        self._bmp(E_LEFT_X, 5 + b, E_ARCH)
+        self._bmp(E_RIGHT_X, 5 + b, E_ARCH)
+        self._lash(E_LEFT_X, 6 + b, E_EYE_W, False)
+        self._lash(E_RIGHT_X, 6 + b, E_EYE_W, True)
+
+    def _s_love(self, now, t, dx, dy, bo):
+        ph = (t * 1.15) % 1.0
+        if ph < 0.16 or 0.26 < ph < 0.42:
+            self._bmp(E_LEFT_X, 5, E_HEART_BIG)
+            self._bmp(E_RIGHT_X, 5, E_HEART_BIG)
+        else:
+            self._bmp(E_LEFT_X + 1, 6, E_HEART_SMALL)
+            self._bmp(E_RIGHT_X + 1, 6, E_HEART_SMALL)
+
+    def _s_surprised(self, now, t, dx, dy, bo):
+        lift = 0 if math.sin(t * 2.5) > 0.5 else 1
+        if bo < 0.35:
+            self._line(2, 7 + lift, 10, 7 + lift)
+            self._line(14, 7 + lift, 22, 7 + lift)
+        else:
+            self._bmp(2, 3 + lift, E_CIRCLE9)
+            self._bmp(14, 3 + lift, E_CIRCLE9)
+            self._lash(2, 4 + lift, 9, False)
+            self._lash(14, 4 + lift, 9, True)
+
+    def _s_wink(self, now, t, dx, dy, bo):
+        bob = 0 if math.sin(t * 3.0) > 0.3 else 1
+        self._eye(E_LEFT_X, E_BASE_Y + bob, E_EYE_W, E_EYE_H - 1, cheek=1)
+        if (t * 0.7) % 1.0 < 0.82:
+            self._bmp(E_RIGHT_X, 7 + bob, E_WINK_ARCH)
+            self._lash(E_RIGHT_X, 7 + bob, E_EYE_W, True)
+        else:
+            self._eye(E_RIGHT_X, E_BASE_Y + bob, E_EYE_W, E_EYE_H - 1, right=True)
+
+    def _s_cool(self, now, t, dx, dy, bo):
+        y = 6 + (-1 if math.sin(t * 2.2) > 0.6 else 0)
+        for bx in (E_LEFT_X, E_RIGHT_X):
+            self._rect(bx, y, E_EYE_W, 5, 1)
+            self._line(bx, y, bx + E_EYE_W - 1, y)
+        self._lash(E_LEFT_X, y, E_EYE_W, False)
+        self._lash(E_RIGHT_X, y, E_EYE_W, True)
+        shine = int(t * 7) % 13
+        for k in range(3):
+            if 0 <= shine - k < E_EYE_W:
+                self._px(E_LEFT_X + shine - k, y + k, 0)
+                self._px(E_RIGHT_X + shine - k, y + k, 0)
+
+    def _s_confused(self, now, t, dx, dy, bo):
+        tilt = 1 if math.sin(t * 2.4) > 0 else 0
+        lh, rh = max(1, _rnd(1 + 5 * bo)), max(1, _rnd(1 + 9 * bo))
+        self._eye(E_LEFT_X, 5 + tilt + (6 - lh) // 2, E_EYE_W, lh, slant=2)
+        self._eye(E_RIGHT_X, 2 + (10 - rh) // 2, E_EYE_W, rh, right=True)
+
+    def _s_angry(self, now, t, dx, dy, bo):
+        press = 1 if math.sin(t * 5.5) > 0.35 else 0
+        bh = 9 - press
+        h = max(1, _rnd(1 + (bh - 1) * bo))
+        y = 4 + press + (bh - h) // 2
+        self._eye(E_LEFT_X, y, E_EYE_W, h, slant=4)
+        self._eye(E_RIGHT_X, y, E_EYE_W, h, slant=4, right=True)
+
+    def _s_sad(self, now, t, dx, dy, bo):
+        h = max(1, _rnd(1 + 6 * bo))
+        y = 4 + (1 if math.sin(t * 1.8) > 0.4 else 0) + (7 - h) // 2
+        self._eye(E_LEFT_X, y, E_EYE_W, h, slant=-3)
+        self._eye(E_RIGHT_X, y, E_EYE_W, h, slant=-3, right=True)
+        for off, bx in ((0.0, E_LEFT_X + 1), (3.5, E_RIGHT_X + E_EYE_W - 2)):
+            ph = int(((t * 4.0) + off) % 7)
+            if ph < 5:
+                self._px(bx, 11 + ph)
+                if 12 + ph < E_H:
+                    self._px(bx, 12 + ph)
+
+    def _s_sleep(self, now, t, dx, dy, bo):
+        if self.sleep_mode == "falling_asleep":
+            return self._sleep_tr(now, False)
+        y = 9 + (0 if math.sin(t * 1.5) > 0 else 1)
+        for bx in (E_LEFT_X, E_RIGHT_X):
+            self._px(bx, y)
+            self._line(bx + 1, y + 1, bx + 5, y + 1)
+            self._px(bx + 6, y)
+        zy = 4 - (int(t * 1.8) % 4)
+        if zy >= 1:
+            self._line(21, zy, 23, zy)
+            self._px(22, zy + 1)
+            self._line(21, zy + 2, 23, zy + 2)
+
+    # --- modes ---
+    def _s_bt_speaker(self, now, t, dx, dy, bo):
+        self._bmp(1, 3, E_BT_SMALL)
+        kick = max(0.0, math.sin(t * 5.2)) ** 4
+        snare = max(0.0, math.sin(t * 2.6 + 1.57)) ** 6
+        for i in range(E_EQ_COLS):
+            n = i / (E_EQ_COLS - 1)
+            if n < 0.35:
+                band = 0.20 + 0.80 * kick + 0.14 * math.sin(t * 7.5 + i * 0.7)
+            elif n < 0.72:
+                band = 0.16 + 0.60 * ((math.sin(t * 7.2 + i * 0.75) + math.cos(t * 4.5 - i * 0.5) + 2) * 0.25) + 0.24 * snare
+            else:
+                band = 0.10 + 0.68 * ((math.cos(t * 12.0 + i) + math.sin(t * 8.5 + i * 0.6) + 2) * 0.25)
+            sc = max(0.0, min(1.0, band * (1.0 - 0.28 * (n * 2 - 1) ** 2)))
+            tg = 1 if sc < 0.05 else max(1, min(7, 1 + sc * 6))
+            self.smooth[i] += (tg - self.smooth[i]) * (0.68 if tg > self.smooth[i] else 0.30)
+            half = max(1, _rnd(self.smooth[i]))
+            self.peaks[i] = float(half) if half >= self.peaks[i] else max(float(half), self.peaks[i] - 0.22)
+            bx = 7 + i
+            for k in range(half):
+                self._px(bx, 7 - k)
+                self._px(bx, 8 + k)
+            pk = _rnd(self.peaks[i])
+            if pk > half:
+                if 7 - pk >= 0:
+                    self._px(bx, 7 - pk)
+                if 8 + pk < E_H:
+                    self._px(bx, 8 + pk)
+
+    def _s_bt_on(self, now, t, dx, dy, bo):
+        self._bmp(9, 2, E_BT_BIG)
+        w = int(t * 3.5) % 3
+        if w >= 1:
+            self._bmp(5, 5, [".#", "#.", "#.", "#.", ".#"])
+            self._bmp(18, 5, ["#.", ".#", ".#", ".#", "#."])
+        if w >= 2:
+            self._bmp(2, 3, [".#", "#.", "#.", "#.", "#.", "#.", "#.", "#.", ".#"])
+            self._bmp(21, 3, ["#.", ".#", ".#", ".#", ".#", ".#", ".#", ".#", "#."])
+
+    def _s_mic_muted(self, now, t, dx, dy, bo):
+        self._bmp(9, 3, E_MIC)
+        if int(t * 2.5) % 4 != 3:
+            self._line(5, 13, 19, 2)
+            self._line(6, 13, 20, 2)
+
+    def _s_clock(self, now, t, dx, dy, bo):
+        lt = time.localtime()
+        s = "%02d%02d" % (lt.tm_hour, lt.tm_min)
+        self._bmp(2, 4, E_DIG4[s[0]])
+        self._bmp(7, 4, E_DIG4[s[1]])
+        if int(t * 2) % 2 == 0:
+            self._px(12, 6)
+            self._px(12, 9)
+        self._bmp(14, 4, E_DIG4[s[2]])
+        self._bmp(19, 4, E_DIG4[s[3]])
+
+    def _s_volume(self, now, t, dx, dy, bo):
+        tg = max(0, min(100, int(self.volume)))
+        self.disp_vol = float(tg) if abs(tg - self.disp_vol) < 1 else self.disp_vol + (tg - self.disp_vol) * 0.35
+        vol = max(0, min(100, _rnd(self.disp_vol)))
+        self._bmp(2, 2, E_SPEAKER)
+        if vol == 0:
+            self._line(7, 4, 9, 6)
+            self._line(9, 4, 7, 6)
+        s = str(vol)
+        sx = 23 - (len(s) * 4 - 1)
+        for i, ch in enumerate(s):
+            self._bmp(sx + i * 4, 3, E_DIG3[ch])
+        self._line(2, 12, 22, 12)
+        self._line(2, 14, 22, 14)
+        self._px(2, 13)
+        self._px(22, 13)
+        fill = _rnd(vol / 100.0 * 19)
+        if fill > 0:
+            self._line(3, 13, 3 + fill - 1, 13)
+
+    def _s_timer(self, now, t, dx, dy, bo):
+        self._bmp(9 + (-1 if int(t * 12) % 2 == 0 else 1), 4, E_BELL)
+        if int(t * 6) % 2 == 0:
+            self._bmp(4, 5, [".#", "#.", "#.", ".#"])
+            self._bmp(19, 5, ["#.", ".#", ".#", "#."])
+
+    def _s_weather(self, now, t, dx, dy, bo):
+        self._bmp(4, 4, E_SUN)
+        pts = ((6, 2), (6, 10), (2, 6), (10, 6)) if int(t * 3) % 2 == 0 else ((3, 3), (9, 3), (3, 9), (9, 9))
+        for p in pts:
+            self._px(*p)
+        self._bmp(14 + _rnd(math.sin(t * 1.5)), 9, E_CLOUD)
+
+    def _orbits(self, sub):
+        for orb in range(2):
+            prev = None
+            for step in range(6):
+                a = sub * 3.8 + orb * math.pi - step * 0.14
+                ox, oy = _rnd(12 + math.sin(a) * 8.5), _rnd(7.5 + math.sin(a * 2) * 4.2)
+                if prev:
+                    self._line(prev[0], prev[1], ox, oy)
+                if step == 0:
+                    self._rect(ox, oy, 2, 2, 0)
+                prev = (ox, oy)
+
+    def _beam(self, p):
+        hw = _rnd(math.sin(min(1.0, p * 1.3) * math.pi * 0.5) * 12)
+        self._line(12 - hw, 7, 12 + hw, 7)
+        if 0.3 < p < 0.7:
+            b = _rnd(hw * 0.5)
+            self._line(12 - b, 6, 12 + b, 6)
+            self._line(12 - b, 8, 12 + b, 8)
+
+    def _s_boot(self, now, t, dx, dy, bo):
+        ph = (now - self.boot_start) / 1000.0
+        if ph < 0.75:
+            self._beam(ph / 0.75)
+        elif ph < 2.85:
+            self._orbits(ph - 0.75)
+        elif ph < 3.55:
+            p = (ph - 2.85) / 0.7
+            ease = p * p * (3 - 2 * p)
+            ea = 2.1 * 3.8
+            a = (12 + math.sin(ea) * 8.5, 7.5 + math.sin(ea * 2) * 4.2)
+            b = (12 + math.sin(ea + math.pi) * 8.5, 7.5 + math.sin((ea + math.pi) * 2) * 4.2)
+            l, r = (a, b) if a[0] < b[0] else (b, a)
+            lx, ly = _rnd(l[0] + (6 - l[0]) * ease), _rnd(l[1] + (8 - l[1]) * ease)
+            rx, ry = _rnd(r[0] + (18 - r[0]) * ease), _rnd(r[1] + (8 - r[1]) * ease)
+            hl = _rnd(1 + ease * 2)
+            self._line(lx - hl, ly, lx + hl, ly)
+            self._line(rx - hl, ry, rx + hl, ry)
+        else:
+            sub = ph - 3.55
+            h = max(1, _rnd(1 + (E_EYE_H - 1) * min(1.0, sub / 0.45)))
+            if 0.60 < sub < 0.72 or 0.84 < sub < 0.96:
+                h = 1
+            y = E_BASE_Y + (E_EYE_H - h) // 2
+            self._eye(E_LEFT_X, y, E_EYE_W, h)
+            self._eye(E_RIGHT_X, y, E_EYE_W, h, right=True)
+
+    def _s_setup(self, now, t, dx, dy, bo):
+        el = (now - self.setup_start) / 1000.0
+        if el < 0.75:
+            self._beam(el / 0.75)
+        elif el < 2.65:
+            self._orbits(el - 0.75)
+        elif el < 3.35:
+            p = (el - 2.65) / 0.7
+            ease = p * p * (3 - 2 * p)
+            lx, rx = _rnd(8 - ease * 6), _rnd(14 + ease * 3)
+            self._line(lx, 4, lx + 4, 4)
+            self._line(lx, 10, lx + 4, 10)
+            self._line(lx, 4, lx, 10)
+            self._line(lx + 4, 4, lx + 4, 10)
+            self._px(rx + 2, 10)
+            if p > 0.35:
+                self._bmp(rx, 7, [".###.", "#...#"])
+            if p > 0.7:
+                self._bmp(rx - 1, 4, [".#####.", "#.....#"])
+        else:
+            self._bmp(2, 4, E_PHONE)
+            pk = 8 + (int(t * 9) % 8)
+            self._px(pk, 7)
+            if pk > 8:
+                self._px(pk - 1, 7)
+            self._px(19, 10)
+            self._bmp(17, 7, [".###.", "#...#"])
+            if pk >= 14 or int(t * 2.5) % 2 == 0:
+                self._bmp(16, 4, [".#####.", "#.....#"])
+
+    def _s_updating(self, now, t, dx, dy, bo):
+        d = int(t * 5) % 3
+        self._line(12, 2 + d, 12, 7 + d)
+        self._line(10, 5 + d, 12, 7 + d)
+        self._line(14, 5 + d, 12, 7 + d)
+        self._line(3, 12, 21, 12)
+        self._line(3, 14, 21, 14)
+        self._px(3, 13)
+        self._px(21, 13)
+        self._line(4, 13, 4 + (1 + int(t * 6) % 17) - 1, 13)
+
+
+def screen_eyes(state="open", brightness=200, duration=None):
+    """Animate the eyes/mode `state[:variant]` at 15 FPS until killed (or `duration` seconds)."""
+    raw = state
+    name, _, variant = state.partition(":")
+    name = name.lower()
+    if name == "variant" and variant:
+        name, variant = "speaking", variant
+    special = name if name in ("phone_connected", "wake") else None
+    gaze = E_GAZE.get(name)
+    name = E_ALIASES.get(name, "sleep" if special == "phone_connected" else ("idle" if special == "wake" else name))
+    if name not in E_STATES:
+        print(f"[Screen] Unknown eyes state '{raw}'. States: {', '.join(E_STATES)}", flush=True)
+        return
+    ms = lambda: time.monotonic() * 1000.0
+    now0 = ms()
+    eyes = _Eyes(now0)
+    if name == "volume":
+        try:
+            with open("/var/lib/atrios/volume") as f:
+                eyes.volume = int(f.read().strip())
+        except (OSError, ValueError):
+            pass
+    eyes.set_state(name, variant.lower() or None, now0)
+    if special == "phone_connected":
+        eyes.sleep_mode = "none"
+    elif special == "wake":
+        eyes.sleep_mode, eyes.sleep_start = "waking", now0
+    if gaze:
+        eyes.manual_gaze, (eyes.tdx, eyes.tdy) = True, gaze
+    print(f"[Screen] Eyes: {name}{(':' + eyes.variant) if name == 'speaking' else ''} (brightness={brightness}/255)", flush=True)
+    end = time.monotonic() + duration if duration else None
+    try:
+        while end is None or time.monotonic() < end:
+            now = ms()
+            eyes.render(now)
+            screen_send_frame(eyes.frame_rgb888(brightness))
+            if eyes.state == "boot" and eyes.boot_done(now):
+                eyes.set_state("idle", None, now)
+            time.sleep(1.0 / E_FPS)
     except KeyboardInterrupt:
         pass
+
 
 def screen_ticker(text, brightness=220, speed=0.07):
     text = " " + text.upper() + " "
@@ -717,16 +1123,12 @@ def main():
             mode = args.value[0] if args.value else "animate"
             screen_boykisser(mode, b)
         elif act in ("eyes", "smile", "happy"):
-            state = "happy" if act in ("smile", "happy") else (args.value[0] if args.value else "open")
-            if state in ("animate", "sleep", "sleeping", "cry", "sad", "love", "heart", "hearts", "look"):
-                screen_eyes_animated(state, b)
-            else:
-                screen_eyes(state, b)
+            state = "happy" if act in ("smile", "happy") else (args.value[0] if args.value else "idle")
+            screen_eyes(state, b)
         elif act == "test":
             screen_fill(100)
             time.sleep(0.8)
-            screen_eyes("happy", b)
-            time.sleep(1.0)
+            screen_eyes("happy", b, 1.5)
             screen_ticker("ATRIOS", b)
             screen_clock(b)
         elif act == "ticker":
@@ -763,7 +1165,7 @@ def main():
         print(f"  * Top RGB Ring: 24 Channels ({FB_RING}, 72B RGB)", flush=True)
         print("\nCommands:")
         print("  atrios screen kisser [1|2|animate] - Boykisser cat animation (Frame 1 calm / Frame 2 happy)")
-        print("  atrios screen eyes [state]         - Eyes (open/blink/wink/left/right/up/down/happy/love/wide/angry/sleep/cry/squint/dizzy/animate)")
+        print("  atrios screen eyes [state]         - Eyes (idle listening thinking speaking[:variant] happy love surprised wink cool confused angry sad sleep boot bt_speaker clock volume ...)")
         print("  atrios screen clock                - Display current time")
         print("  atrios screen ticker \"TEXT\"       - Scrolling marquee")
         print("  atrios screen pixel X Y [B]        - Individual LED control (0..255)")
