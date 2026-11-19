@@ -228,11 +228,6 @@ case "$CMD" in
           hciconfig hci0 class 0x240414 2>/dev/null || true
           hciconfig hci0 name "$DEV_NAME" 2>/dev/null || true
           hciconfig hci0 piscan 2>/dev/null || true
-          hciconfig hci0 sspmode 1 2>/dev/null || true
-          hciconfig hci0 noauth 2>/dev/null || true
-          if [ -x /usr/bin/bt-visible ]; then
-            /usr/bin/bt-visible "$DEV_NAME" >/dev/null 2>&1 || true
-          fi
           command -v gdbus >/dev/null 2>&1 && {
             gdbus call --system --dest org.bluez --object-path /org/bluez/hci0 --method org.freedesktop.DBus.Properties.Set org.bluez.Adapter1 Pairable '<true>' >/dev/null 2>&1 || true
             gdbus call --system --dest org.bluez --object-path /org/bluez/hci0 --method org.freedesktop.DBus.Properties.Set org.bluez.Adapter1 Discoverable '<true>' >/dev/null 2>&1 || true

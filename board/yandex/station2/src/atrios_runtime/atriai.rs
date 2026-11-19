@@ -613,10 +613,10 @@ pub fn local_command(text: &str, wake_word: &str) -> Option<DeviceCommand> {
     }
 
     let has_bt = words.iter().any(|&w| {
-        matches!(
-            w,
-            "блютуз" | "блютус" | "блютуза" | "блютузу" | "bluetooth" | "бт" | "bt"
-        )
+        matches!(w, "бт" | "bt")
+            || w.starts_with("блюту")
+            || w.starts_with("блют")
+            || w.starts_with("bluet")
     });
     if has_bt {
         if words.iter().any(|&w| {
