@@ -688,3 +688,8 @@
 		remote-endpoint = <&hdmi_connector_in>;
 	};
 };
+
+/* Built-in Vivante VIP8000 NPU (etnaviv / Mesa Teflon) */
+&npu {
+	status = "okay";
+};

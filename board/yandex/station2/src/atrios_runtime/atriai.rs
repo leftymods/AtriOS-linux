@@ -7,7 +7,7 @@ use std::os::unix::io::AsRawFd;
 use std::os::unix::net::UnixDatagram;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicUsize, Ordering};
 use std::sync::{mpsc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -184,6 +184,7 @@ fn normalize_text(text: &str) -> Vec<String> {
 }
 
 const ATRI_ALIASES: &[&str] = &[
+    "арти", "атриум", "натрий", "астры",
     "atri", "atria", "атри", "атря", "атрия", "атре", "атрий", "атрии", "отри", "этри", "этрий",
     "адри", "антри", "артри", "актри", "а три", "о три", "эй три", "матри", "мотри", "утри",
     "атриа", "атрей", "атрик", "отрыв", "и три", "ну три", "на три", "а тры",
@@ -401,7 +402,7 @@ pub fn matches_wake_word(text: &str, wake_word: &str) -> bool {
         }
         if idx < words.len()
             && (is_fuzzy_atri_token(&words[idx])
-                || (words.len() > idx + 1 && words[idx] == "адрес"))
+                || (words.len() > idx + 1 && matches!(words[idx].as_str(), "адрес" | "армия" | "актриса" | "атрибут")))
         {
             return true;
         }
@@ -453,7 +454,7 @@ pub fn strip_wake_word(text: &str, wake_word: &str) -> String {
                 s = toks[2..].join(" ");
                 progressed = true;
             } else if let Some(first) = toks.first() {
-                if is_fuzzy_atri_token(first) || (toks.len() >= 2 && first == "адрес") {
+                if is_fuzzy_atri_token(first) || (toks.len() >= 2 && matches!(first.as_str(), "адрес" | "армия" | "актриса" | "атрибут")) {
                     s = toks[1..].join(" ");
                     progressed = true;
                 }
@@ -761,6 +762,38 @@ pub fn local_command(text: &str, wake_word: &str) -> Option<DeviceCommand> {
     }
     None
 }
+
+pub fn is_direct_bluetooth_command(text: &str) -> Option<DeviceCommand> {
+    let words = normalize_text(text);
+    if words.len() < 2 {
+        return None;
+    }
+    let has_bt = words
+        .iter()
+        .any(|w| matches!(w.as_str(), "блютуз" | "блютус" | "блютуф" | "bluetooth"));
+    if !has_bt {
+        return None;
+    }
+    if words.iter().any(|w| {
+        matches!(
+            w.as_str(),
+            "выключи" | "выключить" | "отключи" | "отключить" | "выруби" | "убери" | "закрой" | "стоп" | "off"
+        )
+    }) {
+        return Some(DeviceCommand::BluetoothOff);
+    }
+    if words.iter().any(|w| {
+        matches!(
+            w.as_str(),
+            "включи" | "включить" | "вруби" | "запусти" | "активируй" | "открой" | "подключи" | "сопряжение" | "поиск" | "on"
+        )
+    }) {
+        return Some(DeviceCommand::BluetoothOn);
+    }
+    None
+}
+
+static REMOTE_DOWN_UNTIL: AtomicI64 = AtomicI64::new(0);
 
 // --- Visuals ---
 struct VisualState {
@@ -1837,9 +1870,12 @@ fn send_phrase_to_server(
     let mut user_addressed = force_active || wake_word.is_empty();
 
     let res: Result<(String, String, bool), String> = (|| {
+        let mut had_unk = false;
         let text = if use_local_stt {
-            let t = crate::local_stt::transcribe_pcm16(pcm)?;
-            println!("[local-stt] text={t:?}");
+            let t0 = Instant::now();
+            let (t, unk) = crate::local_stt::transcribe_command_pcm16(pcm)?;
+            had_unk = unk;
+            println!("[local-stt] fast ({}ms, unk={unk}) text={t:?}", t0.elapsed().as_millis());
             t
         } else {
             let wav = prepare_asr_wav(pcm);
@@ -1870,6 +1906,16 @@ fn send_phrase_to_server(
                 || text.contains("тихо"))
         {
             crate::local_ai::stop_ringing();
+            keep_listening = false;
+            return Ok((text, String::new(), false));
+        }
+
+        // Direct Bluetooth fast-path: bypasses wake-word loss, mini-AI, and remote LLM completely (<100ms).
+        if let Some(bt_cmd) = is_direct_bluetooth_command(&text) {
+            user_addressed = true;
+            println!("[atriai] direct fast-path bluetooth command ({text:?}) -> {bt_cmd:?}");
+            execute_device_command(bt_cmd);
+            set_error("voice", None, "", 15);
             keep_listening = false;
             return Ok((text, String::new(), false));
         }
@@ -1930,22 +1976,35 @@ fn send_phrase_to_server(
             return Ok((text, String::new(), false));
         }
 
-        if !has_remote {
-            println!("[local-ai] unhandled phrase in offline mode: {clean_query:?}");
+        let now_unix = now_unix_i64();
+        let remote_backed_off = now_unix < REMOTE_DOWN_UNTIL.load(Ordering::Relaxed);
+        if !has_remote || remote_backed_off {
+            println!("[local-ai] unhandled phrase in offline mode (backed_off={remote_backed_off}): {clean_query:?}");
             play_command_chime("offline");
             keep_listening = false;
             return Ok((text, String::new(), false));
+        }
+
+        // Only run the heavier unconstrained Vosk pass when forwarding a free-form question to remote LLM.
+        let mut q_text = if clean_query.is_empty() {
+            text.clone()
+        } else {
+            clean_query.clone()
+        };
+        if use_local_stt && had_unk {
+            if let Ok(full_text) = crate::local_stt::transcribe_pcm16(pcm) {
+                let (full_clean, _) = split_trailing_stop(&full_text, wake_word);
+                if !full_clean.is_empty() {
+                    println!("[local-stt] unconstrained fallback text={full_text:?}");
+                    q_text = full_clean;
+                }
+            }
         }
 
         set_vad_visual("thinking", false, "default");
         let base2 = base.clone();
         let tok2 = cfg.token.clone();
         let ca2 = cfg.ca_file.clone();
-        let q_text = if clean_query.is_empty() {
-            text.clone()
-        } else {
-            clean_query.clone()
-        };
         let chat = voice_call(move || {
             let auth = format!("Bearer {tok2}");
             let mut h = Vec::new();
@@ -2013,7 +2072,8 @@ fn send_phrase_to_server(
     if let Err(ref e) = res {
         if user_addressed && !e.starts_with("InterruptedError") {
             if use_local_stt {
-                println!("[local-ai] remote AtriAI unreachable ({e}); staying in local offline mode");
+                REMOTE_DOWN_UNTIL.store(now_unix_i64() + 45, Ordering::Relaxed);
+                println!("[local-ai] remote AtriAI unreachable ({e}); offline backoff 45s");
                 play_command_chime("offline");
             } else {
                 set_error("voice", Some(error_kind_from_msg(e, "server")), e, 15);

@@ -253,7 +253,7 @@ fn tls_connect(
             return Err("TimeoutError: HTTPS connection deadline exceeded".into());
         }
         let rem = deadline - Instant::now();
-        match TcpStream::connect_timeout(&addr, rem.min(Duration::from_secs(10))) {
+        match TcpStream::connect_timeout(&addr, rem.min(Duration::from_secs(3))) {
             Ok(s) => {
                 tcp = Some(s);
                 break;
