@@ -262,6 +262,7 @@ fn tls_connect(
         }
     }
     let tcp = tcp.ok_or(last_err)?;
+    let _ = tcp.set_nodelay(true);
     tcp.set_nonblocking(true).map_err(|e| e.to_string())?;
     let fd = tcp.as_raw_fd();
 
@@ -532,9 +533,18 @@ pub fn https_stream(
         }
         req.push_str("\r\n");
 
-        ssl_write_all(&guard, fd, req.as_bytes(), deadline, cancel)?;
         if let Some(b) = cur_body {
-            ssl_write_all(&guard, fd, b, deadline, cancel)?;
+            if b.len() <= 262_144 {
+                let mut full = Vec::with_capacity(req.len() + b.len());
+                full.extend_from_slice(req.as_bytes());
+                full.extend_from_slice(b);
+                ssl_write_all(&guard, fd, &full, deadline, cancel)?;
+            } else {
+                ssl_write_all(&guard, fd, req.as_bytes(), deadline, cancel)?;
+                ssl_write_all(&guard, fd, b, deadline, cancel)?;
+            }
+        } else {
+            ssl_write_all(&guard, fd, req.as_bytes(), deadline, cancel)?;
         }
 
         let mut head_buf = Vec::with_capacity(4096);

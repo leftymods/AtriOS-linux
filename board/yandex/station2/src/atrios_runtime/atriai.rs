@@ -187,6 +187,17 @@ const ATRI_ALIASES: &[&str] = &[
     "atri", "atria", "атри", "атря", "атрия", "атре", "атрий", "атрии", "отри", "этри", "этрий",
     "адри", "антри", "артри", "актри", "а три", "о три", "эй три", "матри", "мотри", "утри",
     "атриа", "атрей", "атрик", "отрыв", "и три", "ну три", "на три", "а тры",
+    "адре", "адра", "адря", "адрии", "адрия", "адрей", "отре", "одре", "одри",
+    "этре", "эдре", "эдри", "утре", "удре", "атру", "атро", "антре", "артре", "актре",
+    "матре", "мотре", "натри", "натре", "ватри", "ватре", "патри", "патре",
+    "катри", "катре", "татри", "татре", "датри", "датре", "сатри", "хатри", "латри",
+    "ати", "ади", "ари", "а дри", "а дре", "а тре", "о дре", "о тре", "о дри",
+    "э три", "у три", "да три", "за три", "по три", "в три", "не три", "но три", "ты три",
+];
+const ATRI_EXCLUSIONS: &[&str] = &[
+    "смотри", "посмотри", "присмотри", "осмотри", "пересмотри", "досмотри",
+    "рассмотри", "подсмотри", "усмотри", "внутри", "изнутри", "утром", "утра",
+    "утру", "хитри", "бодри", "мудри", "пудри",
 ];
 const ALICE_ALIASES: &[&str] = &["алиса", "алису", "алисе", "алисой", "alice"];
 const FILLERS: &[&str] = &[
@@ -203,10 +214,127 @@ const FILLERS: &[&str] = &[
     "ok",
     "okay",
 ];
-const CANCEL_PHRASES: &[&str] = &[
-    "стоп", "stop", "отмена", "хватит", "ничего", "не надо", "забудь", "молчи",
-    "замолчи", "заткнись", "стой", "прекрати", "достаточно",
+const CANCEL_FILLERS: &[&str] = &[
+    "все", "ладно", "ну", "да", "эй", "ой", "уже", "пожалуйста", "просто", "быстро", "сейчас",
+    "же", "ты", "ок", "окей", "а", "и",
 ];
+
+fn is_fuzzy_atri_token(w: &str) -> bool {
+    if ATRI_EXCLUSIONS.contains(&w) {
+        return false;
+    }
+    if matches!(w, "ри" | "три" | "дри" | "дре" | "тре" | "ат" | "ать") {
+        return true;
+    }
+    let chars: Vec<char> = w.chars().collect();
+    if chars.len() >= 5
+        && (w.ends_with("атри") || w.ends_with("атре") || w.ends_with("адри") || w.ends_with("адре"))
+    {
+        return true;
+    }
+    if (4..=6).contains(&chars.len()) {
+        let first = chars[0];
+        let last = *chars.last().unwrap();
+        if matches!(first, 'а' | 'о' | 'э' | 'у' | 'и' | 'я')
+            && matches!(last, 'и' | 'е' | 'а' | 'я' | 'у' | 'ы' | 'ю')
+        {
+            let rest: String = chars[1..].iter().collect();
+            if rest.starts_with("тр") || rest.starts_with("др") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn is_fuzzy_atri_inline(w: &str) -> bool {
+    w.chars().count() >= 4 && is_fuzzy_atri_token(w)
+}
+
+fn is_fuzzy_atri_pair(w1: &str, w2: &str) -> bool {
+    matches!(
+        w1,
+        "а" | "о" | "э" | "у" | "да" | "за" | "по" | "в" | "не" | "но" | "ты" | "ну" | "и" | "эй"
+    ) && matches!(w2, "три" | "тре" | "тры" | "дри" | "дре" | "ри" | "ти" | "ди")
+}
+
+pub fn is_cancel_token(w: &str) -> bool {
+    if matches!(
+        w,
+        "стоп" | "stop" | "отмена" | "хватит" | "ничего" | "забудь" | "молчи" | "молчать"
+            | "замолчи" | "заткнись" | "завались" | "заглохни" | "умолкни" | "закройся"
+            | "стой" | "прекрати" | "достаточно" | "тихо" | "выключись" | "отключись"
+            | "отстань" | "перестань" | "стопе" | "стопэ" | "стоб" | "ша" | "отбой" | "уйди"
+    ) {
+        return true;
+    }
+    if w.chars().count() >= 4
+        && (w.starts_with("стоп")
+            || w.ends_with("стоп")
+            || w.starts_with("замолч")
+            || w.starts_with("заткн")
+            || w.starts_with("завал")
+            || w.starts_with("заглох")
+            || w.starts_with("умолк")
+            || w.starts_with("закройс")
+            || w.starts_with("молч")
+            || w.starts_with("прекрат")
+            || w.starts_with("отмен")
+            || w.starts_with("отключ")
+            || w.starts_with("выключ")
+            || w.starts_with("отстан")
+            || w.starts_with("перестан")
+            || w.starts_with("хват"))
+    {
+        return true;
+    }
+    false
+}
+
+pub fn is_cancel_phrase(text: &str) -> bool {
+    let words = normalize_text(text);
+    if words.is_empty() {
+        return false;
+    }
+    let mut start = 0usize;
+    let mut end = words.len();
+    while start < end && CANCEL_FILLERS.contains(&words[start].as_str()) {
+        start += 1;
+    }
+    while end > start && CANCEL_FILLERS.contains(&words[end - 1].as_str()) {
+        end -= 1;
+    }
+    let core = &words[start..end];
+    if core.is_empty() {
+        return false;
+    }
+    let joined = core.join(" ");
+    if matches!(joined.as_str(), "не надо" | "не слушай" | "с топ") {
+        return true;
+    }
+    let mut i = 0usize;
+    let mut has_cancel = false;
+    while i < core.len() {
+        if i + 1 < core.len()
+            && matches!(
+                (core[i].as_str(), core[i + 1].as_str()),
+                ("не", "надо") | ("не", "слушай") | ("с", "топ")
+            )
+        {
+            has_cancel = true;
+            i += 2;
+            continue;
+        }
+        let w = core[i].as_str();
+        if is_cancel_token(w) {
+            has_cancel = true;
+        } else if !CANCEL_FILLERS.contains(&w) {
+            return false;
+        }
+        i += 1;
+    }
+    has_cancel
+}
 
 fn wake_candidates(wake_word: &str) -> Vec<String> {
     let ww = wake_word.trim().to_lowercase();
@@ -268,16 +396,16 @@ pub fn matches_wake_word(text: &str, wake_word: &str) -> bool {
     }
     if cands.iter().any(|c| c == "atri" || c == "атри") {
         let mut idx = 0;
-        if idx < words.len() && FILLERS.contains(&words[idx].as_str()) {
+        while idx < words.len() && FILLERS.contains(&words[idx].as_str()) {
             idx += 1;
         }
-        if idx < words.len() && matches!(words[idx].as_str(), "ри" | "три") {
+        if idx < words.len() && is_fuzzy_atri_token(&words[idx]) {
             return true;
         }
-        if words
-            .iter()
-            .any(|w| w.chars().count() >= 5 && w.ends_with("атри") && w != "смотри" && w != "посмотри")
-        {
+        if idx + 1 < words.len() && is_fuzzy_atri_pair(&words[idx], &words[idx + 1]) {
+            return true;
+        }
+        if words.iter().any(|w| is_fuzzy_atri_inline(w)) {
             return true;
         }
     }
@@ -318,28 +446,13 @@ pub fn strip_wake_word(text: &str, wake_word: &str) -> String {
             }
         }
         if !progressed && has_atri {
-            if s == "ри" || s == "три" {
-                s.clear();
+            if toks.len() >= 2 && is_fuzzy_atri_pair(&toks[0], &toks[1]) {
+                s = toks[2..].join(" ");
                 progressed = true;
-            } else {
-                for cl in ["ри ", "три "] {
-                    if let Some(rest) = s.strip_prefix(cl) {
-                        s = rest.trim().to_string();
-                        progressed = true;
-                        break;
-                    }
-                }
-            }
-            if !progressed {
-                if let Some(first) = toks.first() {
-                    if first.chars().count() >= 5
-                        && first.ends_with("атри")
-                        && first != "смотри"
-                        && first != "посмотри"
-                    {
-                        s = toks[1..].join(" ");
-                        progressed = true;
-                    }
+            } else if let Some(first) = toks.first() {
+                if is_fuzzy_atri_token(first) {
+                    s = toks[1..].join(" ");
+                    progressed = true;
                 }
             }
         }
@@ -347,10 +460,21 @@ pub fn strip_wake_word(text: &str, wake_word: &str) -> String {
             break;
         }
     }
+    let mut stripped_suffix = false;
     for w in &cands {
         if let Some(rest) = s.strip_suffix(&format!(" {w}")) {
             s = rest.trim().to_string();
+            stripped_suffix = true;
             break;
+        }
+    }
+    if !stripped_suffix && has_atri {
+        let mut end_toks: Vec<&str> = s.split_whitespace().collect();
+        if let Some(&last) = end_toks.last() {
+            if is_fuzzy_atri_inline(last) {
+                end_toks.pop();
+                s = end_toks.join(" ");
+            }
         }
     }
     let mut rest: Vec<&str> = s.split_whitespace().collect();
@@ -457,12 +581,15 @@ pub fn split_trailing_stop(text: &str, wake_word: &str) -> (String, bool) {
     while !toks.is_empty() && FILLERS.contains(toks.last().unwrap()) {
         toks.pop();
     }
-    if toks.len() >= 2 && matches!(*toks.last().unwrap(), "стоп" | "stop" | "хватит") {
+    if toks.len() >= 2 && is_cancel_token(toks.last().unwrap()) {
         toks.pop();
         while !toks.is_empty() && FILLERS.contains(toks.last().unwrap()) {
             toks.pop();
         }
-        if !toks.is_empty() {
+        let only_cancel_or_filler = toks
+            .iter()
+            .all(|&w| CANCEL_FILLERS.contains(&w) || is_cancel_token(w));
+        if !toks.is_empty() && !only_cancel_or_filler {
             return (toks.join(" "), true);
         }
     }
@@ -1026,19 +1153,17 @@ pub fn is_barge_in_stop(asr_text: &str, tts_answer: &str) -> bool {
     if asr_words.is_empty() {
         return false;
     }
+    if is_cancel_phrase(asr_text) {
+        return true;
+    }
     let ans_words = normalize_text(tts_answer);
-    const BARGE_STOP_WORDS: &[&str] = &[
-        "стоп", "stop", "хватит", "молчи", "замолчи", "заткнись", "отмена", "стой", "тихо",
-        "выключись", "прекрати", "достаточно", "ша",
-    ];
     for w in &asr_words {
-        let is_stop = BARGE_STOP_WORDS.contains(&w.as_str())
-            || (w.chars().count() >= 4
-                && (w.starts_with("стоп")
-                    || w.ends_with("стоп")
-                    || w.starts_with("замолч")
-                    || w.starts_with("заткн")));
-        if is_stop && (!ans_words.contains(w) || asr_words.len() <= 3) {
+        if is_cancel_token(w) && (!ans_words.contains(w) || asr_words.len() <= 3) {
+            return true;
+        }
+    }
+    for pair in asr_words.windows(2) {
+        if pair[0] == "с" && pair[1] == "топ" {
             return true;
         }
     }
@@ -1116,27 +1241,41 @@ fn play_audio_bytes(
     let res = (|| -> Result<bool, String> {
         let mut child = cmd.spawn().map_err(|e| format!("aplay spawn: {e}"))?;
         let t0 = Instant::now();
-        let mut bg_rms = 220.0f64;
+        let mut bg_rms = 280.0f64;
         let mut pre_roll: VecDeque<Vec<u8>> = VecDeque::with_capacity(8);
         let mut barge_buf: Vec<u8> = Vec::new();
         let mut in_barge = false;
         let mut barge_hits = 0usize;
         let mut barge_silence_ms = 0.0f64;
+        let mut barge_peak = 0.0f64;
+        let mut barge_rms_sum = 0.0f64;
+        let mut barge_frames = 0usize;
         let mut barge_rx: Option<mpsc::Receiver<bool>> = None;
+        let mut pending_barge: Option<(Vec<u8>, f64)> = None;
+        let mut last_barge_rms = 280.0f64;
 
         loop {
             match child.try_wait() {
                 Ok(Some(status)) => {
-                    if in_barge
-                        && barge_buf.len() >= (SR * 2) * 200 / 1000
-                        && barge_rx.is_none()
-                        && !server_base.is_empty()
-                    {
-                        barge_rx = Some(spawn_barge_asr(std::mem::take(&mut barge_buf)));
+                    if in_barge && barge_buf.len() >= (SR * 2) * 200 / 1000 && !server_base.is_empty() {
+                        let avg_rms = barge_rms_sum / (barge_frames.max(1) as f64);
+                        let seg = std::mem::take(&mut barge_buf);
+                        if barge_rx.is_none() {
+                            barge_rx = Some(spawn_barge_asr(seg));
+                        } else {
+                            pending_barge = Some((seg, avg_rms));
+                        }
                     }
                     if let Some(rx) = barge_rx.take() {
                         if let Ok(true) = rx.recv_timeout(Duration::from_millis(650)) {
                             println!("[atriai] voice barge-in STOP at end of playback -> clock");
+                            set_error("audio", None, "", 120);
+                            return Ok(false);
+                        }
+                    }
+                    if let Some((pcm, _)) = pending_barge.take() {
+                        if let Ok(true) = spawn_barge_asr(pcm).recv_timeout(Duration::from_millis(650)) {
+                            println!("[atriai] voice barge-in STOP queued at end of playback -> clock");
                             set_error("audio", None, "", 120);
                             return Ok(false);
                         }
@@ -1168,40 +1307,59 @@ fn play_audio_bytes(
                                 set_error("audio", None, "", 120);
                                 return Ok(false);
                             }
-                            Ok(false) | Err(mpsc::TryRecvError::Disconnected) => {
+                            Ok(false) => {
+                                bg_rms = (bg_rms * 0.65 + last_barge_rms * 0.35).clamp(180.0, 1600.0);
                                 barge_rx = None;
+                                if let Some((pcm, avg_rms)) = pending_barge.take() {
+                                    last_barge_rms = avg_rms;
+                                    barge_rx = Some(spawn_barge_asr(pcm));
+                                }
+                            }
+                            Err(mpsc::TryRecvError::Disconnected) => {
+                                barge_rx = None;
+                                if let Some((pcm, avg_rms)) = pending_barge.take() {
+                                    last_barge_rms = avg_rms;
+                                    barge_rx = Some(spawn_barge_asr(pcm));
+                                }
                             }
                             Err(mpsc::TryRecvError::Empty) => {}
                         }
                     }
+                    let tts_idx = (t0.elapsed().as_secs_f64() / 0.04) as usize;
+                    let tts_lvl = env.get(tts_idx).copied().unwrap_or(0.0);
                     let armed = t0.elapsed() >= Duration::from_millis(160);
                     for chunk in read_capture_frames_now() {
                         let rms = pcm16_rms(&chunk);
                         if !armed {
-                            bg_rms = (bg_rms * 0.90 + rms * 0.10).clamp(80.0, 1400.0);
+                            bg_rms = (bg_rms * 0.90 + rms * 0.10).clamp(180.0, 1600.0);
                             if pre_roll.len() == 8 {
                                 pre_roll.pop_front();
                             }
                             pre_roll.push_back(chunk);
                             continue;
                         }
-                        let start_thr = (bg_rms * 1.65 + 110.0).clamp(260.0, 2200.0);
-                        let keep_thr = (bg_rms * 1.25 + 60.0).clamp(190.0, start_thr * 0.80);
+                        let start_thr = (bg_rms * 1.65 + tts_lvl * 380.0 + 180.0).clamp(580.0, 2600.0);
+                        let keep_thr = (bg_rms * 1.25 + 60.0).clamp(240.0, start_thr * 0.80);
                         if !in_barge {
                             if rms >= start_thr {
                                 barge_hits += 1;
                                 if barge_hits >= 2 {
                                     in_barge = true;
                                     barge_buf.clear();
+                                    barge_peak = rms;
+                                    barge_rms_sum = 0.0;
+                                    barge_frames = 0;
                                     for p in pre_roll.drain(..) {
                                         barge_buf.extend_from_slice(&p);
                                     }
                                     barge_buf.extend_from_slice(&chunk);
+                                    barge_rms_sum += rms;
+                                    barge_frames += 1;
                                     barge_silence_ms = 0.0;
                                     continue;
                                 }
                             } else {
-                                bg_rms = (bg_rms * 0.94 + rms * 0.06).clamp(80.0, 1400.0);
+                                bg_rms = (bg_rms * 0.94 + rms * 0.06).clamp(180.0, 1600.0);
                                 barge_hits = barge_hits.saturating_sub(1);
                             }
                             if pre_roll.len() == 8 {
@@ -1210,15 +1368,28 @@ fn play_audio_bytes(
                             pre_roll.push_back(chunk);
                         } else {
                             barge_buf.extend_from_slice(&chunk);
-                            if rms >= keep_thr {
+                            if rms > barge_peak {
+                                barge_peak = rms;
+                            }
+                            barge_rms_sum += rms;
+                            barge_frames += 1;
+                            let eff_keep = keep_thr.max((barge_peak * 0.42).min(950.0));
+                            if rms >= eff_keep {
                                 barge_silence_ms = 0.0;
                             } else {
                                 barge_silence_ms += 32.0;
                             }
                             let dur_ms = (barge_buf.len() * 1000) / (SR * 2);
-                            if barge_silence_ms >= 260.0 || dur_ms >= 1150 {
-                                if dur_ms >= 200 && barge_rx.is_none() && !server_base.is_empty() {
-                                    barge_rx = Some(spawn_barge_asr(std::mem::take(&mut barge_buf)));
+                            if barge_silence_ms >= 160.0 || dur_ms >= 850 {
+                                if dur_ms >= 200 && !server_base.is_empty() {
+                                    let avg_rms = barge_rms_sum / (barge_frames.max(1) as f64);
+                                    let seg = std::mem::take(&mut barge_buf);
+                                    if barge_rx.is_none() {
+                                        last_barge_rms = avg_rms;
+                                        barge_rx = Some(spawn_barge_asr(seg));
+                                    } else {
+                                        pending_barge = Some((seg, avg_rms));
+                                    }
                                 } else {
                                     barge_buf.clear();
                                 }
@@ -1236,8 +1407,7 @@ fn play_audio_bytes(
                         return Ok(false);
                     }
                     if !env.is_empty() {
-                        let idx = (t0.elapsed().as_secs_f64() / 0.04) as usize;
-                        send_voice_level(Some(env.get(idx).copied().unwrap_or(0.0)));
+                        send_voice_level(Some(tts_lvl));
                     }
                     thread::sleep(Duration::from_millis(40));
                 }
@@ -1435,8 +1605,8 @@ fn voice_call<T: Send + 'static>(f: impl FnOnce() -> Result<T, String> + Send + 
 }
 
 pub fn prepare_asr_wav(pcm: &[u8]) -> Vec<u8> {
-    let lead_samples = 1920usize; // 120 ms @ 16 kHz
-    let min_total_samples = 19200usize; // 1.20 s @ 16 kHz
+    let lead_samples = 1280usize; // 80 ms @ 16 kHz
+    let min_total_samples = 14400usize; // 0.90 s @ 16 kHz
     let samples: Vec<i16> = pcm
         .chunks_exact(2)
         .map(|b| i16::from_le_bytes([b[0], b[1]]))
@@ -1530,10 +1700,10 @@ fn send_phrase_to_server(
             return Ok((text, String::new(), true));
         }
         let (clean_query, has_trailing_stop) = split_trailing_stop(&text, wake_word);
-        if CANCEL_PHRASES.contains(&clean_query.as_str()) {
+        if is_cancel_phrase(&clean_query) {
             println!("[atriai] cancelled by phrase ({text:?}) -> idle");
             keep_listening = false;
-            set_error("voice", None, "", 120);
+            set_error("voice", None, "", 15);
             return Ok((text, String::new(), false));
         }
         if let Some(cmd) = local_command(&text, wake_word) {
@@ -1883,8 +2053,9 @@ fn run_daemon() -> i32 {
         let mut raw = vec![0u8; read_bytes];
         let mut buf: Vec<u8> = Vec::new();
         let mut utt_rms: Vec<f64> = Vec::new();
-        let mut pre_roll: VecDeque<(Vec<u8>, f64)> = VecDeque::with_capacity(16);
+        let mut pre_roll: VecDeque<(Vec<u8>, f64)> = VecDeque::with_capacity(8);
         let mut speaking = false;
+        let mut utt_peak = 0.0f64;
         let mut speech_hits = 0usize;
         let mut hit_max_utt = false;
         let mut warmup_frames = if first_start { 15usize } else { 0 };
@@ -1961,7 +2132,7 @@ fn run_daemon() -> i32 {
             if warmup_frames > 0 {
                 warmup_frames -= 1;
                 vad.warmup(rms);
-                if pre_roll.len() == 16 {
+                if pre_roll.len() == 8 {
                     pre_roll.pop_front();
                 }
                 pre_roll.push_back((chunk, rms));
@@ -1984,7 +2155,7 @@ fn run_daemon() -> i32 {
                     } else {
                         vad.wait_quiet_frames = 10;
                     }
-                    if pre_roll.len() == 16 {
+                    if pre_roll.len() == 8 {
                         pre_roll.pop_front();
                     }
                     pre_roll.push_back((chunk, rms));
@@ -1995,6 +2166,7 @@ fn run_daemon() -> i32 {
                     if speech_hits >= 2 {
                         speaking = true;
                         utt_rms.clear();
+                        utt_peak = pre_roll.iter().map(|(_, r)| *r).fold(rms, f64::max);
                         for (p, r) in pre_roll.drain(..) {
                             buf.extend_from_slice(&p);
                             utt_rms.push(r);
@@ -2018,7 +2190,7 @@ fn run_daemon() -> i32 {
                         }
                     }
                 }
-                if pre_roll.len() == 16 {
+                if pre_roll.len() == 8 {
                     pre_roll.pop_front();
                 }
                 pre_roll.push_back((chunk, rms));
@@ -2026,17 +2198,30 @@ fn run_daemon() -> i32 {
                 speech_hits = 0;
                 buf.extend_from_slice(&chunk);
                 utt_rms.push(rms);
-                if rms >= keep_thr {
+                if rms > utt_peak {
+                    utt_peak = rms;
+                }
+                let eff_keep_thr = keep_thr.max((utt_peak * 0.22).min(680.0));
+                if rms >= eff_keep_thr {
                     silence_ms = 0.0;
                 } else {
                     silence_ms += frame_ms;
                 }
                 let utt_ms = (buf.len() as f64) / ((SR * 2) as f64) * 1000.0;
-                if silence_ms >= end_silence_ms {
+                let eff_end_silence_ms = match mode {
+                    PipelineMode::WakeSpotter => {
+                        if utt_ms <= 1100.0 { 260.0 } else { 320.0 }
+                    }
+                    PipelineMode::ActiveCommand => {
+                        if utt_ms <= 950.0 { 280.0 } else { end_silence_ms.min(400.0) }
+                    }
+                };
+                if silence_ms >= eff_end_silence_ms {
                     if buf.len() >= min_bytes {
                         break;
                     }
                     speaking = false;
+                    utt_peak = 0.0;
                     buf.clear();
                     utt_rms.clear();
                     silence_ms = 0.0;
@@ -2082,7 +2267,13 @@ fn run_daemon() -> i32 {
             let ww = if force_active { "" } else { ww_cfg.as_str() };
             match send_phrase_to_server(&cfg.server, &buf, ww, force_active) {
                 Ok((asr, ans, stay_active)) => {
-                    let drain_ms = if stay_active { 260 } else if !ans.is_empty() { 120 } else { 40 };
+                    let drain_ms = if stay_active && ans.is_empty() {
+                        30
+                    } else if stay_active || !ans.is_empty() {
+                        60
+                    } else {
+                        40
+                    };
                     drain_capture_pipe(&mut proc_child, drain_ms, read_bytes);
                     if stay_active && (WAKE_TRIGGERED.swap(false, Ordering::SeqCst) || !ans.trim().is_empty()) {
                         pend_force_active = true;

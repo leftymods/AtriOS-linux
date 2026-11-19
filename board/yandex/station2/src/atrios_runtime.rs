@@ -111,11 +111,11 @@ mod tests {
         }
         let wav = atriai::prepare_asr_wav(&pcm);
         assert!(wav.starts_with(b"RIFF"));
-        assert!(wav.len() >= 44 + 19200 * 2);
-        // Leading 120ms (1920 samples) must be zero silence
-        assert!(wav[44..44 + 1920 * 2].iter().all(|&b| b == 0));
+        assert!(wav.len() >= 44 + 14400 * 2);
+        // Leading 80ms (1280 samples) must be zero silence
+        assert!(wav[44..44 + 1280 * 2].iter().all(|&b| b == 0));
         // Normalized peak should be lifted (> 3500)
-        let peak = wav[44 + 1920 * 2..]
+        let peak = wav[44 + 1280 * 2..]
             .chunks_exact(2)
             .map(|b| i16::from_le_bytes([b[0], b[1]]).abs())
             .max()
@@ -172,7 +172,38 @@ mod tests {
 
         assert!(is_barge_in_stop("я работаю стоп", "Я работаю стабильно"));
         assert!(is_barge_in_stop("замолчи пожалуйста", "Привет"));
+        assert!(is_barge_in_stop("завались", "Скорее всего"));
+        assert!(is_barge_in_stop("ну все стоп", "Привет"));
         assert!(!is_barge_in_stop("я работаю стабильно", "Я работаю стабильно"));
+    }
+
+    #[test]
+    fn fuzzy_atri_and_extended_cancel_phrases() {
+        use atriai::{
+            is_cancel_phrase, matches_wake_word, split_trailing_stop, strip_wake_word,
+        };
+
+        assert!(matches_wake_word("адре", "Atri"));
+        assert!(matches_wake_word("эй адре какая погода", "Atri"));
+        assert!(matches_wake_word("одри привет", "Atri"));
+        assert!(!matches_wake_word("утром прохладно", "Atri"));
+        assert!(!matches_wake_word("внутри пусто", "Atri"));
+        assert_eq!(strip_wake_word("Эй адре громче", "Atri"), "громче");
+
+        assert!(is_cancel_phrase("завались"));
+        assert!(is_cancel_phrase("всё стоп"));
+        assert!(is_cancel_phrase("ладно хватит уже"));
+        assert!(is_cancel_phrase("не слушай"));
+        assert!(!is_cancel_phrase("расскажи про слово стоп"));
+
+        assert_eq!(
+            split_trailing_stop("всё стоп", "Atri"),
+            ("все стоп".to_string(), false)
+        );
+        assert_eq!(
+            split_trailing_stop("какая погода хватит", "Atri"),
+            ("какая погода".to_string(), true)
+        );
     }
 
     #[test]
