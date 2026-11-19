@@ -6,7 +6,7 @@ use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::atriai::{drain_capture_fd_now, play_chime_interruptible, play_command_chime, set_vad_visual, split_trailing_stop};
+use crate::atriai::{drain_capture_fd_now, play_chime_interruptible, play_command_chime, set_vad_visual, speak_via_remote_tts, split_trailing_stop};
 use crate::json::{obj, Json};
 use crate::light::SCREEN_MODE_FILE;
 use crate::sys::{atomic_write_bytes, format_local, kill, now_unix_i64};
@@ -532,6 +532,46 @@ pub fn parse_local_intent(text: &str, wake_word: &str) -> Option<LocalIntent> {
     None
 }
 
+fn ru_plural<'a>(n: u64, one: &'a str, few: &'a str, many: &'a str) -> &'a str {
+    let m100 = n % 100;
+    let m10 = n % 10;
+    if (11..=14).contains(&m100) {
+        many
+    } else if m10 == 1 {
+        one
+    } else if (2..=4).contains(&m10) {
+        few
+    } else {
+        many
+    }
+}
+
+fn format_duration_ru(secs: u64) -> String {
+    let h = secs / 3600;
+    let m = (secs % 3600) / 60;
+    let s = secs % 60;
+    let mut parts = Vec::new();
+    if h > 0 {
+        parts.push(format!("{h} {}", ru_plural(h, "час", "часа", "часов")));
+    }
+    if m > 0 {
+        parts.push(format!("{m} {}", ru_plural(m, "минуту", "минуты", "минут")));
+    }
+    if s > 0 || parts.is_empty() {
+        parts.push(format!("{s} {}", ru_plural(s, "секунду", "секунды", "секунд")));
+    }
+    parts.join(" ")
+}
+
+fn format_time_ru(hour: u8, minute: u8) -> String {
+    let hs = format!("{hour} {}", ru_plural(hour as u64, "час", "часа", "часов"));
+    if minute == 0 {
+        format!("{hs} ровно")
+    } else {
+        format!("{hs} {minute} {}", ru_plural(minute as u64, "минута", "минуты", "минут"))
+    }
+}
+
 fn show_ticker_briefly(text: &str) {
     let _ = fs::create_dir_all("/var/run/atrios");
     let _ = fs::write(SCREEN_MODE_FILE, "ticker");
@@ -566,8 +606,11 @@ pub fn execute_local_intent(intent: LocalIntent) {
             }
             let lbl = format!("TMR {}", format_duration_short(secs));
             println!("[local-ai] timer set: {secs}s ({lbl})");
-            play_command_chime("timer_set");
-            show_ticker_briefly(&lbl);
+            let spoken = format!("Поставила таймер на {}!", format_duration_ru(secs));
+            if !speak_via_remote_tts(&spoken, "happy", false) {
+                play_command_chime("timer_set");
+                show_ticker_briefly(&lbl);
+            }
         }
         LocalIntent::CancelTimers => {
             {
@@ -577,8 +620,10 @@ pub fn execute_local_intent(intent: LocalIntent) {
             }
             stop_ringing();
             println!("[local-ai] all timers cancelled");
-            play_command_chime("cancel");
-            show_ticker_briefly("TMR OFF");
+            if !speak_via_remote_tts("Хорошо, все таймеры отменены.", "neutral", false) {
+                play_command_chime("cancel");
+                show_ticker_briefly("TMR OFF");
+            }
         }
         LocalIntent::QueryTimers => {
             let now = now_unix_i64();
@@ -590,13 +635,18 @@ pub fn execute_local_intent(intent: LocalIntent) {
                     .map(|t| (t.fire_at - now) as u64)
                     .min()
             };
-            let lbl = match rem {
-                Some(r) => format!("TMR {}", format_duration_short(r)),
-                None => "NO TMR".into(),
+            let (lbl, spoken) = match rem {
+                Some(r) => (
+                    format!("TMR {}", format_duration_short(r)),
+                    format!("До конца таймера осталось {}.", format_duration_ru(r)),
+                ),
+                None => ("NO TMR".into(), "Активных таймеров сейчас нет.".into()),
             };
             println!("[local-ai] query timers -> {lbl}");
-            play_command_chime("tick");
-            show_ticker_briefly(&lbl);
+            if !speak_via_remote_tts(&spoken, "neutral", false) {
+                play_command_chime("tick");
+                show_ticker_briefly(&lbl);
+            }
         }
         LocalIntent::SetAlarm { hour, minute } => {
             {
@@ -615,8 +665,11 @@ pub fn execute_local_intent(intent: LocalIntent) {
             }
             let lbl = format!("ALM {:02}:{:02}", hour, minute);
             println!("[local-ai] alarm set: {lbl}");
-            play_command_chime("alarm_set");
-            show_ticker_briefly(&lbl);
+            let spoken = format!("Будильник на {} установлен!", format_time_ru(hour, minute));
+            if !speak_via_remote_tts(&spoken, "happy", false) {
+                play_command_chime("alarm_set");
+                show_ticker_briefly(&lbl);
+            }
         }
         LocalIntent::CancelAlarms => {
             {
@@ -626,27 +679,45 @@ pub fn execute_local_intent(intent: LocalIntent) {
             }
             stop_ringing();
             println!("[local-ai] all alarms cancelled");
-            play_command_chime("cancel");
-            show_ticker_briefly("ALM OFF");
+            if !speak_via_remote_tts("Хорошо, будильники отменены.", "neutral", false) {
+                play_command_chime("cancel");
+                show_ticker_briefly("ALM OFF");
+            }
         }
         LocalIntent::QueryAlarms => {
-            let lbl = {
+            let (lbl, spoken) = {
                 let s = store().lock().unwrap();
                 if let Some(a) = s.alarms.iter().find(|a| a.enabled) {
-                    format!("ALM {:02}:{:02}", a.hour, a.minute)
+                    (
+                        format!("ALM {:02}:{:02}", a.hour, a.minute),
+                        format!("Будильник стоит на {}.", format_time_ru(a.hour, a.minute)),
+                    )
                 } else {
-                    "NO ALM".into()
+                    ("NO ALM".into(), "Будильников пока нет.".into())
                 }
             };
             println!("[local-ai] query alarms -> {lbl}");
-            play_command_chime("tick");
-            show_ticker_briefly(&lbl);
+            if !speak_via_remote_tts(&spoken, "neutral", false) {
+                play_command_chime("tick");
+                show_ticker_briefly(&lbl);
+            }
         }
         LocalIntent::QueryTime => {
             let hm = format_local("%H:%M", None);
             println!("[local-ai] time -> {hm}");
-            play_command_chime("tick");
-            show_ticker_briefly(&hm);
+            let spoken = if let Some((hs, ms)) = hm.split_once(':') {
+                if let (Ok(h), Ok(m)) = (hs.parse::<u8>(), ms.parse::<u8>()) {
+                    format!("Сейчас {}.", format_time_ru(h, m))
+                } else {
+                    format!("Сейчас {hm}.")
+                }
+            } else {
+                format!("Сейчас {hm}.")
+            };
+            if !speak_via_remote_tts(&spoken, "neutral", false) {
+                play_command_chime("tick");
+                show_ticker_briefly(&hm);
+            }
         }
         LocalIntent::QueryDate => {
             let dt = format_local("%d.%m", None);
@@ -760,7 +831,20 @@ fn ring_alert_loop(kind: &str) {
 
     let start = Instant::now();
     let chime_name = if kind == "alarm" { "alarm_ring" } else { "timer_ring" };
+    let ring_phrase = if kind == "alarm" {
+        "Доброе утро! Сработал будильник!"
+    } else {
+        "Время вышло! Таймер сработал!"
+    };
+    let mut ring_cycle = 0u32;
     while !ALERT_STOP_REQ.load(Ordering::SeqCst) && start.elapsed() < Duration::from_secs(60) {
+        if ring_cycle % 3 == 0 {
+            let _ = speak_via_remote_tts(ring_phrase, "happy", true);
+        }
+        ring_cycle += 1;
+        if ALERT_STOP_REQ.load(Ordering::SeqCst) {
+            break;
+        }
         play_chime_interruptible(chime_name, &ALERT_STOP_REQ, &RING_APLAY_PID);
         for _ in 0..16 {
             if ALERT_STOP_REQ.load(Ordering::SeqCst) {

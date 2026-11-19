@@ -10,7 +10,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::sys::{
     atomic_write_bytes, cfmakeraw, close, format_local, format_utc, geteuid, grantpt, if_nametoindex,
@@ -25,11 +25,17 @@ use crate::sys::{
 // 1. NTP (SNTP UDP/123 + RTC + timezone)
 // =====================================================================
 const NTP_DELTA: u64 = 2_208_988_800;
+const LAST_TIME_FILE: &str = "/var/lib/atrios/last_time";
 const NTP_SERVERS: &[&str] = &[
+    // Direct IPv4 NTP fallbacks first/mixed so boot sync succeeds even before DNS/resolv.conf settles
+    "162.159.200.1",
     "ru.pool.ntp.org",
+    "216.239.35.0",
+    "162.159.200.123",
     "pool.ntp.org",
-    "time.google.com",
     "time.cloudflare.com",
+    "time.google.com",
+    "194.190.168.1",
     "ntp1.stratum2.ru",
 ];
 
@@ -43,22 +49,25 @@ fn sntp_query(host: &str) -> Result<f64, String> {
         .collect();
     let addr = *addrs.first().ok_or("No IPv4 address for NTP host")?;
     let sock = UdpSocket::bind("0.0.0.0:0").map_err(|e| e.to_string())?;
-    let _ = sock.set_read_timeout(Some(Duration::from_secs(3)));
-    let _ = sock.set_write_timeout(Some(Duration::from_secs(3)));
-    let t0 = now_unix_secs();
+    let _ = sock.set_read_timeout(Some(Duration::from_secs(2)));
+    let _ = sock.set_write_timeout(Some(Duration::from_secs(2)));
+    let t0 = Instant::now();
     sock.send_to(&pkt, addr).map_err(|e| e.to_string())?;
     let mut resp = [0u8; 1024];
     let (n, _) = sock.recv_from(&mut resp).map_err(|e| e.to_string())?;
-    let t1 = now_unix_secs();
+    let rtt = t0.elapsed().as_secs_f64();
     if n < 48 {
         return Err("short NTP response".into());
     }
+    let stratum = resp[1];
+    if stratum == 0 || stratum > 15 {
+        return Err(format!("invalid NTP stratum {stratum}"));
+    }
     let sec = u32::from_be_bytes(resp[40..44].try_into().unwrap()) as u64;
     let frac = u32::from_be_bytes(resp[44..48].try_into().unwrap()) as f64;
-    if sec <= NTP_DELTA {
+    if sec <= NTP_DELTA + 1_700_000_000 {
         return Err("invalid NTP timestamp".into());
     }
-    let rtt = (t1 - t0).max(0.0);
     Ok(((sec - NTP_DELTA) as f64) + (frac / 4_294_967_296.0) + rtt / 2.0)
 }
 
@@ -71,6 +80,7 @@ fn set_system_time(unix_ts: f64) {
         let t_str = format_utc("%Y-%m-%d %H:%M:%S", secs);
         let _ = Command::new("date").args(["-u", "-s", &t_str]).status();
     }
+    let _ = atomic_write_bytes(Path::new(LAST_TIME_FILE), format!("{secs}\n").as_bytes(), 0o644, true);
     for hw in ["/sbin/hwclock", "/usr/sbin/hwclock"] {
         if Path::new(hw).exists() {
             let _ = Command::new(hw)
@@ -113,7 +123,7 @@ pub fn run_ntp(args: &[String]) -> i32 {
             if ntp_sync_once(false) { 0 } else { 1 }
         }
         "daemon" => {
-            if now_unix_i64() < 1_600_000_000 {
+            if now_unix_i64() < 1_700_000_000 {
                 for hw in ["/sbin/hwclock", "/usr/sbin/hwclock"] {
                     if Path::new(hw).exists() {
                         let _ = Command::new(hw)
@@ -125,11 +135,21 @@ pub fn run_ntp(args: &[String]) -> i32 {
                     }
                 }
             }
+            if now_unix_i64() < 1_700_000_000 {
+                if let Ok(saved) = fs::read_to_string(LAST_TIME_FILE) {
+                    if let Ok(ts) = saved.trim().parse::<i64>() {
+                        if ts >= 1_700_000_000 {
+                            set_system_time(ts as f64);
+                            println!("[atrios-ntp] Restored fallback clock from {LAST_TIME_FILE}");
+                        }
+                    }
+                }
+            }
             loop {
                 if ntp_sync_once(false) {
-                    thread::sleep(Duration::from_secs(6 * 3600));
+                    thread::sleep(Duration::from_secs(15 * 60));
                 } else {
-                    thread::sleep(Duration::from_secs(10));
+                    thread::sleep(Duration::from_secs(3));
                 }
             }
         }
