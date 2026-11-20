@@ -7,6 +7,7 @@ use crate::json::Json;
 use crate::sys::{atomic_write_bytes, flock, now_unix_secs, LOCK_EX};
 
 pub const ERROR_FILE: &str = "/var/run/atrios/errors.json";
+pub const OTA_STATUS_FILE: &str = "/var/run/atrios/ota_status.json";
 
 #[derive(Clone, Debug)]
 pub struct ErrorEntry {
@@ -105,11 +106,20 @@ pub fn get_errors_at(path: &Path) -> BTreeMap<String, ErrorEntry> {
     out
 }
 
-pub fn active_error() -> Option<ErrorEntry> {
-    let errors = get_errors_at(Path::new(ERROR_FILE));
+pub fn is_non_blocking_ota_error(entry: &ErrorEntry) -> bool {
+    entry.source == "ota" && matches!(entry.kind.as_str(), "update" | "network" | "tls" | "server")
+}
+
+pub fn active_error_at(path: &Path) -> Option<ErrorEntry> {
+    let errors = get_errors_at(path);
     errors
         .into_values()
+        .filter(|e| !is_non_blocking_ota_error(e))
         .max_by(|a, b| a.code.cmp(&b.code).then_with(|| a.time.total_cmp(&b.time)))
+}
+
+pub fn active_error() -> Option<ErrorEntry> {
+    active_error_at(Path::new(ERROR_FILE))
 }
 
 pub fn errors_json_value() -> Json {
@@ -173,4 +183,36 @@ pub fn set_error(source: &str, kind: Option<&str>, message: &str, ttl: u64) {
         root.insert(k, Json::Obj(entry));
     }
     let _ = atomic_write_bytes(path, Json::Obj(root).to_string_compact().as_bytes(), 0o644, false);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn non_blocking_ota_errors_do_not_hijack_active_error() {
+        let dir = std::env::temp_dir().join(format!("atrios-status-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let err_path = dir.join("errors.json");
+        let now = now_unix_secs();
+        let json = format!(
+            r#"{{"ota":{{"source":"ota","kind":"update","code":5,"message":"DNS lookup failed","time":{now},"expires":{exp}}}}}"#,
+            exp = now + 120.0
+        );
+        fs::write(&err_path, json).unwrap();
+        // Low-priority OTA check/update error must NOT hijack LED screen via active_error_at
+        assert!(active_error_at(&err_path).is_none());
+
+        // Real audio error must still surface
+        let json2 = format!(
+            r#"{{"ota":{{"source":"ota","kind":"update","code":5,"message":"DNS failed","time":{now},"expires":{exp}}},"audio":{{"source":"audio","kind":"audio","code":4,"message":"amp fault","time":{now},"expires":{exp}}}}}"#,
+            exp = now + 120.0
+        );
+        fs::write(&err_path, json2).unwrap();
+        let active = active_error_at(&err_path).expect("audio error should be active");
+        assert_eq!(active.source, "audio");
+        assert_eq!(active.code, 4);
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

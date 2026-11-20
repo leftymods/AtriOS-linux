@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "board": "station-max",
+  "name": "Yandex Station Max",
+  "vendor": "yandex",
+  "soc": "sm1",
+  "dtb": "meson-sm1-yandex-station-max.dtb",
+  "display": {
+    "type": "matrix-fb",
+    "width": 25,
+    "height": 16
+  },
+  "led_ring": {
+    "count": 24
+  },
+  "audio": {
+    "amp_i2c_bus": 2,
+    "amp_tweeter_addr": "0x2a",
+    "amp_woofer_addr": "0x2b",
+    "mic_channels": 8,
+    "capture_device": "hw:0,3"
+  },
+  "uarts": {
+    "bluetooth": "/dev/ttyAML1",
+    "zigbee": "/dev/ttyAML2"
+  },
+  "features": {
+    "rotary": true,
+    "als": true,
+    "zigbee": true,
+    "bluetooth": true
+  }
+}

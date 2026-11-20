@@ -27,6 +27,9 @@ const BT_PAIR_UNTIL_FILE: &str = "/var/run/atrios-bt-pair-until";
 const BUTTONS_STATE_FILE: &str = "/var/run/atrios/buttons.json";
 const AI_CONFIG_FILE: &str = "/var/lib/atrios/ai.json";
 const AI_STATUS_FILE: &str = "/var/run/atrios/ai_status.json";
+const TIMERS_FILE: &str = "/var/run/atrios/timers.json";
+const ALARMS_FILE: &str = "/var/lib/atrios/alarms.json";
+const BT_ACTIVE_FILE: &str = "/var/run/atrios/bt_active";
 const DEVICE_FILE: &str = "/etc/atrios-device";
 
 static CLIENT_COUNT: Mutex<usize> = Mutex::new(0);
@@ -202,11 +205,17 @@ fn get_ai_info() -> Json {
     let mut enabled = false;
     let mut server = "https://192.168.1.107:8090".to_string();
     let mut wake_word = "Atri".to_string();
+    let mut mode = "remote".to_string();
+    let mut tts_voice = "anna".to_string();
+    let mut tts_emotion = "neutral".to_string();
     if let Ok(txt) = fs::read_to_string(AI_CONFIG_FILE) {
         if let Ok(j) = Json::parse(&txt) {
             if let Some(b) = j.get("enabled").and_then(|v| v.as_bool()) { enabled = b; }
             if let Some(s) = j.get_str("server") { server = s.into(); }
             if let Some(s) = j.get_str("wake_word") { wake_word = s.into(); }
+            if let Some(s) = j.get_str("mode") { mode = s.into(); }
+            if let Some(s) = j.get_str("tts_voice") { tts_voice = s.into(); }
+            if let Some(s) = j.get_str("tts_emotion") { tts_emotion = s.into(); }
         }
     }
     let mut state = if enabled { "idle" } else { "disabled" }.to_string();
@@ -225,11 +234,157 @@ fn get_ai_info() -> Json {
         ("enabled", Json::Bool(enabled)),
         ("server", Json::Str(server)),
         ("wake_word", Json::Str(wake_word)),
+        ("mode", Json::Str(mode)),
+        ("tts_voice", Json::Str(tts_voice)),
+        ("tts_emotion", Json::Str(tts_emotion)),
         ("state", Json::Str(state)),
         ("last_asr", Json::Str(last_asr)),
         ("last_answer", Json::Str(last_answer)),
         ("error", Json::Str(error)),
     ])
+}
+
+fn update_ai_json_fields(
+    path: &Path,
+    mode: Option<&str>,
+    tts_voice: Option<&str>,
+    tts_emotion: Option<&str>,
+) {
+    let mut map = fs::read_to_string(path)
+        .ok()
+        .and_then(|s| Json::parse(&s).ok())
+        .and_then(|j| match j {
+            Json::Obj(m) => Some(m),
+            _ => None,
+        })
+        .unwrap_or_default();
+    if let Some(m) = mode {
+        map.insert("mode".into(), Json::Str(m.into()));
+    }
+    if let Some(v) = tts_voice {
+        map.insert("tts_voice".into(), Json::Str(v.into()));
+    }
+    if let Some(e) = tts_emotion {
+        map.insert("tts_emotion".into(), Json::Str(e.into()));
+    }
+    if let Some(p) = path.parent() {
+        let _ = fs::create_dir_all(p);
+    }
+    let body = format!("{}
+", Json::Obj(map).to_string_pretty());
+    let _ = atomic_write_bytes(path, body.as_bytes(), 0o644, true);
+}
+
+pub(crate) fn valid_timezone_name(tz: &str) -> bool {
+    !tz.is_empty()
+        && tz.len() <= 64
+        && !tz.starts_with('/')
+        && !tz.ends_with('/')
+        && !tz.contains("..")
+        && tz
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'_' | b'-' | b'+'))
+}
+
+pub(crate) fn timers_json_at(path: &Path, now: i64) -> Vec<Json> {
+    let mut out = Vec::new();
+    let Ok(txt) = fs::read_to_string(path) else {
+        return out;
+    };
+    let Ok(Json::Arr(arr)) = Json::parse(&txt) else {
+        return out;
+    };
+    for item in arr {
+        let id = item.get("id").and_then(|v| v.as_i64()).unwrap_or(0).max(0);
+        let fire_at = item.get("fire_at").and_then(|v| v.as_i64()).unwrap_or(0);
+        let total_secs = item.get("total_secs").and_then(|v| v.as_i64()).unwrap_or(0).max(0);
+        if fire_at > now {
+            let remaining = (fire_at - now).max(0);
+            out.push(obj(vec![
+                ("id", Json::Num(id as f64)),
+                ("fire_at", Json::Num(fire_at as f64)),
+                ("total_secs", Json::Num(total_secs as f64)),
+                ("remaining_secs", Json::Num(remaining as f64)),
+            ]));
+        }
+    }
+    out
+}
+
+pub(crate) fn save_timers_at(path: &Path, timers: &[Json]) {
+    let clean: Vec<Json> = timers
+        .iter()
+        .map(|t| {
+            obj(vec![
+                ("id", Json::Num(t.get("id").and_then(|v| v.as_f64()).unwrap_or(0.0))),
+                ("fire_at", Json::Num(t.get("fire_at").and_then(|v| v.as_f64()).unwrap_or(0.0))),
+                ("total_secs", Json::Num(t.get("total_secs").and_then(|v| v.as_f64()).unwrap_or(0.0))),
+            ])
+        })
+        .collect();
+    if let Some(p) = path.parent() {
+        let _ = fs::create_dir_all(p);
+    }
+    let body = Json::Arr(clean).to_string_pretty();
+    let _ = atomic_write_bytes(path, body.as_bytes(), 0o644, false);
+}
+
+pub(crate) fn alarms_json_at(path: &Path) -> Vec<Json> {
+    let mut out = Vec::new();
+    let Ok(txt) = fs::read_to_string(path) else {
+        return out;
+    };
+    let Ok(Json::Arr(arr)) = Json::parse(&txt) else {
+        return out;
+    };
+    for item in arr {
+        let id = item.get("id").and_then(|v| v.as_i64()).unwrap_or(0).max(0);
+        let hour = item.get("hour").and_then(|v| v.as_i64()).unwrap_or(-1);
+        let minute = item.get("minute").and_then(|v| v.as_i64()).unwrap_or(-1);
+        let enabled = item.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+        if (0..=23).contains(&hour) && (0..=59).contains(&minute) {
+            out.push(obj(vec![
+                ("id", Json::Num(id as f64)),
+                ("hour", Json::Num(hour as f64)),
+                ("minute", Json::Num(minute as f64)),
+                ("enabled", Json::Bool(enabled)),
+            ]));
+        }
+    }
+    out
+}
+
+pub(crate) fn save_alarms_at(path: &Path, alarms: &[Json]) {
+    let clean: Vec<Json> = alarms
+        .iter()
+        .map(|a| {
+            obj(vec![
+                ("id", Json::Num(a.get("id").and_then(|v| v.as_f64()).unwrap_or(0.0))),
+                ("hour", Json::Num(a.get("hour").and_then(|v| v.as_f64()).unwrap_or(0.0))),
+                ("minute", Json::Num(a.get("minute").and_then(|v| v.as_f64()).unwrap_or(0.0))),
+                ("enabled", Json::Bool(a.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true))),
+                ("last_fired_day", Json::Num(0.0)),
+            ])
+        })
+        .collect();
+    if let Some(p) = path.parent() {
+        let _ = fs::create_dir_all(p);
+    }
+    let body = Json::Arr(clean).to_string_pretty();
+    let _ = atomic_write_bytes(path, body.as_bytes(), 0o644, true);
+}
+
+fn spawn_ota_bg(subcmd: &str, extra_args: &[&str]) -> Result<(), String> {
+    let mut cmd = Command::new("/usr/lib/atrios/ota");
+    cmd.arg(subcmd);
+    for a in extra_args {
+        cmd.arg(a);
+    }
+    cmd.stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("Failed to start OTA {subcmd}: {e}"))
 }
 
 fn get_buttons_state() -> (bool, bool) {
@@ -326,6 +481,7 @@ fn build_status_payload() -> Json {
         ),
         ("screen_mode", Json::Str(get_screen_mode())),
         ("ai", get_ai_info()),
+        ("ota", crate::ota::read_ota_status_json()),
         (
             "bluetooth",
             obj(vec![
@@ -356,7 +512,7 @@ fn send_json_line(fd: c_int, j: &Json) -> bool {
     true
 }
 
-fn process_command(cmd_obj: &Json) -> Result<Json, String> {
+pub(crate) fn process_command(cmd_obj: &Json) -> Result<Json, String> {
     let Some(map) = cmd_obj.as_obj() else {
         return Err("Command must be a JSON object".into());
     };
@@ -404,12 +560,25 @@ fn process_command(cmd_obj: &Json) -> Result<Json, String> {
                 ("message", Json::Str("Audio chime triggered".into())),
             ]))
         }
-        "sync_time" => {
+        "sync_time" | "ntp_sync" => {
             let _ = Command::new("/usr/bin/atrios")
                 .args(["time", "sync"])
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .status();
+            Ok(build_status_payload())
+        }
+        "set_timezone" => {
+            let tz = map.get("tz").and_then(|v| v.as_str()).map(str::trim).unwrap_or("");
+            if !valid_timezone_name(tz) {
+                return Err("Invalid timezone".into());
+            }
+            let _ = Command::new("/usr/bin/atrios")
+                .args(["time", "tz", tz])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+            unsafe { tzset() };
             Ok(build_status_payload())
         }
         "reboot" => {
@@ -528,6 +697,24 @@ fn process_command(cmd_obj: &Json) -> Result<Json, String> {
                 let w = if ww.trim().is_empty() { "off" } else { ww.trim() };
                 let _ = Command::new("/usr/bin/atrios").args(["ai", "wake", w]).status();
             }
+            let mode_opt = map
+                .get("mode")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| matches!(*s, "local" | "remote" | "hybrid"));
+            let voice_opt = map
+                .get("tts_voice")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty() && s.len() <= 64);
+            let emo_opt = map
+                .get("tts_emotion")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty() && s.len() <= 32);
+            if mode_opt.is_some() || voice_opt.is_some() || emo_opt.is_some() {
+                update_ai_json_fields(Path::new(AI_CONFIG_FILE), mode_opt, voice_opt, emo_opt);
+            }
             if let Some(en) = map.get("enabled").and_then(|v| v.as_bool()) {
                 let _ = Command::new("/usr/bin/atrios")
                     .args(["ai", if en { "enable" } else { "disable" }])
@@ -541,9 +728,248 @@ fn process_command(cmd_obj: &Json) -> Result<Json, String> {
             Ok(build_status_payload())
         }
         "bt_pair" => {
-            let secs = map.get("seconds").and_then(|v| v.as_i64()).unwrap_or(60).clamp(10, 300);
+            let secs = map.get("seconds").and_then(|v| v.as_i64()).unwrap_or(120).clamp(10, 300);
             let _ = Command::new("/usr/bin/atrios").args(["bt", "pair", &secs.to_string()]).status();
             Ok(build_status_payload())
+        }
+        "bt_speaker" => {
+            let enabled = map.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+            if enabled {
+                let running = Command::new("pgrep")
+                    .args(["-f", "/usr/sbin/bt-speaker-daemon"])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false);
+                if !running && Path::new("/usr/sbin/bt-speaker-daemon").exists() {
+                    let _ = Command::new("/usr/sbin/bt-speaker-daemon")
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .spawn();
+                }
+            } else {
+                let _ = Command::new("pkill")
+                    .args(["-f", "/usr/sbin/bt-speaker-daemon"])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
+                let _ = fs::create_dir_all("/var/run/atrios");
+                let _ = fs::write(BT_ACTIVE_FILE, "0");
+            }
+            Ok(obj(vec![
+                ("type", Json::Str("action_response".into())),
+                ("success", Json::Bool(true)),
+                ("is_speaker_mode", Json::Bool(enabled)),
+                (
+                    "message",
+                    Json::Str(if enabled { "Bluetooth speaker enabled" } else { "Bluetooth speaker disabled" }.into()),
+                ),
+            ]))
+        }
+        "ota_status" => Ok(obj(vec![
+            ("type", Json::Str("ota_status".into())),
+            ("success", Json::Bool(true)),
+            ("ota", crate::ota::read_ota_status_json()),
+        ])),
+        "ota_check" => {
+            if crate::ota::is_ota_busy() {
+                return Ok(obj(vec![
+                    ("type", Json::Str("ota_check_response".into())),
+                    ("success", Json::Bool(true)),
+                    ("message", Json::Str("OTA operation already in progress".into())),
+                    ("ota", crate::ota::read_ota_status_json()),
+                ]));
+            }
+            let ota = crate::ota::mark_ota_starting("checking", "checking", "Checking for firmware updates...");
+            match spawn_ota_bg("check", &[]) {
+                Ok(()) => Ok(obj(vec![
+                    ("type", Json::Str("ota_check_response".into())),
+                    ("success", Json::Bool(true)),
+                    ("message", Json::Str("Update check started".into())),
+                    ("ota", ota),
+                ])),
+                Err(e) => Ok(obj(vec![
+                    ("type", Json::Str("ota_check_response".into())),
+                    ("success", Json::Bool(false)),
+                    ("message", Json::Str(e)),
+                    ("ota", crate::ota::read_ota_status_json()),
+                ])),
+            }
+        }
+        "ota_apply" => {
+            if crate::ota::is_ota_busy() {
+                return Ok(obj(vec![
+                    ("type", Json::Str("ota_apply_response".into())),
+                    ("success", Json::Bool(true)),
+                    ("message", Json::Str("OTA operation already in progress".into())),
+                    ("ota", crate::ota::read_ota_status_json()),
+                ]));
+            }
+            let do_reboot = map.get("reboot").and_then(|v| v.as_bool()).unwrap_or(true);
+            let ota = crate::ota::mark_ota_starting("downloading", "downloading", "Starting firmware update...");
+            let args: &[&str] = if do_reboot { &["--reboot"] } else { &[] };
+            match spawn_ota_bg("update", args) {
+                Ok(()) => Ok(obj(vec![
+                    ("type", Json::Str("ota_apply_response".into())),
+                    ("success", Json::Bool(true)),
+                    ("message", Json::Str("OTA update started".into())),
+                    ("ota", ota),
+                ])),
+                Err(e) => Ok(obj(vec![
+                    ("type", Json::Str("ota_apply_response".into())),
+                    ("success", Json::Bool(false)),
+                    ("message", Json::Str(e)),
+                    ("ota", crate::ota::read_ota_status_json()),
+                ])),
+            }
+        }
+        "ota_rollback" => {
+            if !crate::ota::rollback_available() {
+                return Ok(obj(vec![
+                    ("type", Json::Str("ota_rollback_response".into())),
+                    ("success", Json::Bool(false)),
+                    ("message", Json::Str("No rollback snapshot available".into())),
+                    ("ota", crate::ota::read_ota_status_json()),
+                ]));
+            }
+            if crate::ota::is_ota_busy() {
+                return Ok(obj(vec![
+                    ("type", Json::Str("ota_rollback_response".into())),
+                    ("success", Json::Bool(true)),
+                    ("message", Json::Str("OTA operation already in progress".into())),
+                    ("ota", crate::ota::read_ota_status_json()),
+                ]));
+            }
+            let do_reboot = map.get("reboot").and_then(|v| v.as_bool()).unwrap_or(false);
+            let ota = crate::ota::mark_ota_starting("rolling_back", "rolling_back", "Rolling back firmware...");
+            let args: &[&str] = if do_reboot { &["--reboot"] } else { &[] };
+            match spawn_ota_bg("rollback", args) {
+                Ok(()) => Ok(obj(vec![
+                    ("type", Json::Str("ota_rollback_response".into())),
+                    ("success", Json::Bool(true)),
+                    ("message", Json::Str("OTA rollback started".into())),
+                    ("ota", ota),
+                ])),
+                Err(e) => Ok(obj(vec![
+                    ("type", Json::Str("ota_rollback_response".into())),
+                    ("success", Json::Bool(false)),
+                    ("message", Json::Str(e)),
+                    ("ota", crate::ota::read_ota_status_json()),
+                ])),
+            }
+        }
+        "get_timers" => {
+            let timers = timers_json_at(Path::new(TIMERS_FILE), now_unix_i64());
+            Ok(obj(vec![
+                ("type", Json::Str("timers_response".into())),
+                ("success", Json::Bool(true)),
+                ("timers", Json::Arr(timers)),
+            ]))
+        }
+        "set_timer" => {
+            let Some(raw_secs) = map.get("secs").or_else(|| map.get("seconds")).and_then(|v| v.as_i64()) else {
+                return Err("Missing timer secs".into());
+            };
+            if !(1..=86400).contains(&raw_secs) {
+                return Err("Timer secs must be between 1 and 86400".into());
+            }
+            let now = now_unix_i64();
+            let mut timers = timers_json_at(Path::new(TIMERS_FILE), now);
+            let next_id = timers
+                .iter()
+                .filter_map(|t| t.get("id").and_then(|v| v.as_i64()))
+                .max()
+                .unwrap_or(0)
+                + 1;
+            timers.push(obj(vec![
+                ("id", Json::Num(next_id as f64)),
+                ("fire_at", Json::Num((now + raw_secs) as f64)),
+                ("total_secs", Json::Num(raw_secs as f64)),
+                ("remaining_secs", Json::Num(raw_secs as f64)),
+            ]));
+            save_timers_at(Path::new(TIMERS_FILE), &timers);
+            Ok(obj(vec![
+                ("type", Json::Str("timers_response".into())),
+                ("success", Json::Bool(true)),
+                ("message", Json::Str("Timer set".into())),
+                ("timers", Json::Arr(timers)),
+            ]))
+        }
+        "cancel_timers" => {
+            let now = now_unix_i64();
+            let mut timers = timers_json_at(Path::new(TIMERS_FILE), now);
+            if let Some(id) = map.get("id").and_then(|v| v.as_i64()) {
+                timers.retain(|t| t.get("id").and_then(|v| v.as_i64()) != Some(id));
+            } else {
+                timers.clear();
+            }
+            save_timers_at(Path::new(TIMERS_FILE), &timers);
+            Ok(obj(vec![
+                ("type", Json::Str("timers_response".into())),
+                ("success", Json::Bool(true)),
+                ("message", Json::Str("Timers cancelled".into())),
+                ("timers", Json::Arr(timers)),
+            ]))
+        }
+        "get_alarms" => {
+            let alarms = alarms_json_at(Path::new(ALARMS_FILE));
+            Ok(obj(vec![
+                ("type", Json::Str("alarms_response".into())),
+                ("success", Json::Bool(true)),
+                ("alarms", Json::Arr(alarms)),
+            ]))
+        }
+        "set_alarm" => {
+            let Some(hour) = map.get("hour").and_then(|v| v.as_i64()) else {
+                return Err("Missing alarm hour".into());
+            };
+            let Some(minute) = map.get("minute").and_then(|v| v.as_i64()) else {
+                return Err("Missing alarm minute".into());
+            };
+            if !(0..=23).contains(&hour) || !(0..=59).contains(&minute) {
+                return Err("Invalid alarm hour/minute".into());
+            }
+            let enabled = map.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+            let mut alarms = alarms_json_at(Path::new(ALARMS_FILE));
+            alarms.retain(|a| {
+                !(a.get("hour").and_then(|v| v.as_i64()) == Some(hour)
+                    && a.get("minute").and_then(|v| v.as_i64()) == Some(minute))
+            });
+            let next_id = alarms
+                .iter()
+                .filter_map(|a| a.get("id").and_then(|v| v.as_i64()))
+                .max()
+                .unwrap_or(0)
+                + 1;
+            alarms.push(obj(vec![
+                ("id", Json::Num(next_id as f64)),
+                ("hour", Json::Num(hour as f64)),
+                ("minute", Json::Num(minute as f64)),
+                ("enabled", Json::Bool(enabled)),
+            ]));
+            save_alarms_at(Path::new(ALARMS_FILE), &alarms);
+            Ok(obj(vec![
+                ("type", Json::Str("alarms_response".into())),
+                ("success", Json::Bool(true)),
+                ("message", Json::Str("Alarm set".into())),
+                ("alarms", Json::Arr(alarms)),
+            ]))
+        }
+        "cancel_alarms" => {
+            let mut alarms = alarms_json_at(Path::new(ALARMS_FILE));
+            if let Some(id) = map.get("id").and_then(|v| v.as_i64()) {
+                alarms.retain(|a| a.get("id").and_then(|v| v.as_i64()) != Some(id));
+            } else {
+                alarms.clear();
+            }
+            save_alarms_at(Path::new(ALARMS_FILE), &alarms);
+            Ok(obj(vec![
+                ("type", Json::Str("alarms_response".into())),
+                ("success", Json::Bool(true)),
+                ("message", Json::Str("Alarms cancelled".into())),
+                ("alarms", Json::Arr(alarms)),
+            ]))
         }
         "bt_hide" => {
             let _ = Command::new("/usr/bin/atrios").args(["bt", "hide"]).status();
@@ -598,6 +1024,10 @@ fn handle_client(fd: c_int, mac: String) {
     let mut last_hb = Instant::now();
     let mut last_vol = get_current_volume();
     let mut last_btns = get_buttons_state();
+    let mut last_ota_sig = {
+        let o = crate::ota::read_ota_status();
+        format!("{}:{}:{}", o.state, o.progress, o.updated_ts)
+    };
 
     loop {
         if last_input.elapsed().as_secs() > IDLE_TIMEOUT_SECS {
@@ -661,6 +1091,20 @@ fn handle_client(fd: c_int, mac: String) {
                     ("type", Json::Str("buttons_change".into())),
                     ("action_pressed", Json::Bool(cur_btns.0)),
                     ("mic_muted", Json::Bool(cur_btns.1)),
+                ]),
+            ) {
+                break;
+            }
+        }
+        let cur_ota = crate::ota::read_ota_status();
+        let cur_ota_sig = format!("{}:{}:{}", cur_ota.state, cur_ota.progress, cur_ota.updated_ts);
+        if cur_ota_sig != last_ota_sig {
+            last_ota_sig = cur_ota_sig;
+            if !send_json_line(
+                fd,
+                &obj(vec![
+                    ("type", Json::Str("ota_status".into())),
+                    ("ota", cur_ota.to_json()),
                 ]),
             ) {
                 break;
@@ -743,5 +1187,81 @@ pub fn run(_args: &[String]) -> i32 {
             let mut c = CLIENT_COUNT.lock().unwrap();
             *c = c.saturating_sub(1);
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ble_ota_status_and_device_command_validation() {
+        let resp = process_command(&Json::parse(r#"{"cmd":"ota_status"}"#).unwrap()).unwrap();
+        assert_eq!(resp.get_str("type"), Some("ota_status"));
+        assert_eq!(resp.get("success").and_then(|v| v.as_bool()), Some(true));
+        let ota = resp.get("ota").expect("ota object present");
+        assert!(ota.get_str("state").is_some());
+        assert!(ota.get_str("current_version").is_some());
+        assert!(ota.get("update_available").and_then(|v| v.as_bool()).is_some());
+
+        let st = process_command(&Json::parse(r#"{"cmd":"get_status"}"#).unwrap()).unwrap();
+        assert_eq!(st.get_str("type"), Some("status"));
+        assert!(st.get("ota").is_some());
+        let ai = st.get("ai").expect("ai object present");
+        assert!(ai.get_str("mode").is_some());
+        assert!(ai.get_str("tts_voice").is_some());
+        assert!(ai.get_str("tts_emotion").is_some());
+
+        assert!(valid_timezone_name("Europe/Moscow"));
+        assert!(valid_timezone_name("UTC"));
+        assert!(valid_timezone_name("Etc/GMT+3"));
+        assert!(!valid_timezone_name("../etc/passwd"));
+        assert!(!valid_timezone_name("/Europe/Moscow"));
+        assert!(!valid_timezone_name(""));
+
+        assert!(process_command(&Json::parse(r#"{"cmd":"set_timezone","tz":"../bad"}"#).unwrap()).is_err());
+        assert!(process_command(&Json::parse(r#"{"cmd":"set_timer","secs":0}"#).unwrap()).is_err());
+        assert!(process_command(&Json::parse(r#"{"cmd":"set_alarm","hour":25,"minute":0}"#).unwrap()).is_err());
+    }
+
+    #[test]
+    fn timers_alarms_and_ai_fields_persistence() {
+        let dir = std::env::temp_dir().join(format!("atrios-bt-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let tfile = dir.join("timers.json");
+        let now = 1_700_000_000i64;
+        let tlist = vec![obj(vec![
+            ("id", Json::Num(1.0)),
+            ("fire_at", Json::Num((now + 300) as f64)),
+            ("total_secs", Json::Num(300.0)),
+        ])];
+        save_timers_at(&tfile, &tlist);
+        let loaded_t = timers_json_at(&tfile, now + 10);
+        assert_eq!(loaded_t.len(), 1);
+        assert_eq!(loaded_t[0].get("remaining_secs").and_then(|v| v.as_i64()), Some(290));
+
+        let afile = dir.join("alarms.json");
+        let alist = vec![obj(vec![
+            ("id", Json::Num(1.0)),
+            ("hour", Json::Num(7.0)),
+            ("minute", Json::Num(30.0)),
+            ("enabled", Json::Bool(true)),
+        ])];
+        save_alarms_at(&afile, &alist);
+        let loaded_a = alarms_json_at(&afile);
+        assert_eq!(loaded_a.len(), 1);
+        assert_eq!(loaded_a[0].get("hour").and_then(|v| v.as_i64()), Some(7));
+        assert_eq!(loaded_a[0].get("minute").and_then(|v| v.as_i64()), Some(30));
+
+        let aifile = dir.join("ai.json");
+        update_ai_json_fields(&aifile, Some("hybrid"), Some("serena"), Some("happy"));
+        let parsed = Json::parse(&fs::read_to_string(&aifile).unwrap()).unwrap();
+        assert_eq!(parsed.get_str("mode"), Some("hybrid"));
+        assert_eq!(parsed.get_str("tts_voice"), Some("serena"));
+        assert_eq!(parsed.get_str("tts_emotion"), Some("happy"));
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

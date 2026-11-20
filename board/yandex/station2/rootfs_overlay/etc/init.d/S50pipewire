@@ -1,8 +1,9 @@
 #!/bin/sh
-# /etc/init.d/S50pipewire - Launch PipeWire audio engine and WirePlumber session manager
+# /etc/init.d/S50pipewire - Launch PipeWire audio engine and WirePlumber session manager (non-blocking)
 
 case "$1" in
   start)
+    command -v pipewire >/dev/null 2>&1 || exit 0
     echo "[AtriOS] Starting PipeWire audio engine..."
     mkdir -p /var/run/pipewire
     export XDG_RUNTIME_DIR=/var/run/pipewire
@@ -10,15 +11,15 @@ case "$1" in
     export DBUS_SYSTEM_BUS_ADDRESS="unix:path=/var/run/dbus/system_bus_socket"
     chmod 0700 /var/run/pipewire
 
-    if command -v pipewire >/dev/null 2>&1; then
-      pipewire >/dev/null 2>&1 &
+    pipewire >/dev/null 2>&1 &
+    (
       sleep 1
       if command -v wireplumber >/dev/null 2>&1; then
         wireplumber >/dev/null 2>&1 &
       elif command -v pipewire-media-session >/dev/null 2>&1; then
         pipewire-media-session >/dev/null 2>&1 &
       fi
-    fi
+    ) >/dev/null 2>&1 &
     ;;
   stop)
     killall wireplumber pipewire-media-session pipewire 2>/dev/null || true

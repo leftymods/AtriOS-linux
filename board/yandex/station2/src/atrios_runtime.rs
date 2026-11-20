@@ -25,6 +25,10 @@ mod atriai;
 mod bt_control;
 #[path = "atrios_runtime/ota.rs"]
 mod ota;
+#[path = "atrios_runtime/hardware.rs"]
+mod hardware;
+#[path = "atrios_runtime/supervise.rs"]
+mod supervise;
 #[path = "atrios_runtime/tools.rs"]
 mod tools;
 
@@ -66,6 +70,8 @@ fn main() {
         "rtk-bt-bridge" => tools::run_rtk_bt_bridge(rest),
         "rtk-bt-init" => tools::run_rtk_bt_init(rest),
         "wifi-scan" | "wifi_scan" => tools::run_wifi_scan(rest),
+        "hardware" => hardware::run(rest),
+        "supervise" => supervise::run(rest),
         _ => {
             eprintln!("Unknown applet: {applet}");
             1
@@ -324,5 +330,50 @@ mod tests {
             parse_local_intent("выключи подсветку", ""),
             Some(LocalIntent::RingMode("off".into()))
         );
+    }
+
+    #[test]
+    fn hardware_manifest_parses_custom_speaker_and_defaults() {
+        let def = hardware::HardwareManifest::default();
+        assert_eq!(def.board, "station-max");
+        assert!(def.has_display());
+        assert_eq!((def.display_width, def.display_height, def.ring_leds), (25, 16, 24));
+        assert_eq!((def.amp_tweeter_addr, def.amp_woofer_addr), (0x2a, 0x2b));
+
+        let mini = hardware::HardwareManifest::from_json_str(
+            r#"{
+              "schema": 1,
+              "board": "station-mini",
+              "name": "AtriStation Mini",
+              "vendor": "yandex",
+              "soc": "g12a",
+              "dtb": "meson-g12a-station-mini.dtb",
+              "display": {"type": "none", "width": 0, "height": 0},
+              "led_ring": {"count": 12},
+              "audio": {"amp_i2c_bus": 1, "amp_tweeter_addr": "0x2c", "mic_channels": 4},
+              "features": {"rotary": false, "als": true, "zigbee": false, "bluetooth": true}
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(mini.board, "station-mini");
+        assert!(!mini.has_display());
+        assert!(mini.has_ring());
+        assert_eq!(mini.ring_leds, 12);
+        assert_eq!((mini.amp_i2c_bus, mini.amp_tweeter_addr, mini.mic_channels), (1, 0x2c, 4));
+        assert!(!mini.has_rotary && !mini.has_zigbee && mini.has_als && mini.has_bt);
+    }
+
+    #[test]
+    fn supervise_backoff_and_health_json() {
+        assert_eq!(supervise::next_backoff_secs(1, 30), 1);
+        assert_eq!(supervise::next_backoff_secs(2, 30), 2);
+        assert_eq!(supervise::next_backoff_secs(3, 30), 4);
+        assert_eq!(supervise::next_backoff_secs(6, 30), 30);
+        assert_eq!(supervise::next_backoff_secs(99, 30), 30);
+
+        let entry = supervise::format_health_entry("running", 1234, 2, Some(1), 100, 105);
+        assert_eq!(entry.get_str("state"), Some("running"));
+        assert_eq!(entry.get("pid").and_then(|v| v.as_i64()), Some(1234));
+        assert_eq!(entry.get("restarts").and_then(|v| v.as_i64()), Some(2));
     }
 }

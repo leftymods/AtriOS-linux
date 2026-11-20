@@ -1,24 +1,30 @@
 #!/bin/sh
-# /etc/init.d/S71atrios-bt-control - Bluetooth Speaker & RFCOMM Remote Control Daemons
+# /etc/init.d/S71atrios-bt-control - Bluetooth Speaker & RFCOMM Remote Control Daemons (non-blocking boot)
+
+start_bt_daemons() {
+  if [ ! -d /sys/class/bluetooth/hci0 ]; then
+    echo serial0-0 > /sys/bus/serial/drivers/hci_uart_h5/unbind 2>/dev/null || true
+    sleep 0.5
+    echo serial0-0 > /sys/bus/serial/drivers/hci_uart_h5/bind 2>/dev/null || true
+    sleep 1
+  fi
+
+  if [ -x /usr/sbin/bt-speaker-daemon ] && ! pgrep -f /usr/sbin/bt-speaker-daemon >/dev/null 2>&1; then
+    /usr/sbin/bt-speaker-daemon >/var/log/bt-speaker-daemon.log 2>&1 &
+  fi
+
+  if [ -x /usr/lib/atrios/bt-control ] && ! pgrep -f /usr/lib/atrios/bt-control >/dev/null 2>&1; then
+    /usr/lib/atrios/bt-control >/var/log/atrios-bt-control.log 2>&1 &
+  fi
+}
 
 case "$1" in
   start)
-    # Rebind Bluetooth serdev driver if hci0 failed to load firmware during early boot
-    if [ ! -d /sys/class/bluetooth/hci0 ]; then
-      echo serial0-0 > /sys/bus/serial/drivers/hci_uart_h5/unbind 2>/dev/null || true
-      sleep 0.5
-      echo serial0-0 > /sys/bus/serial/drivers/hci_uart_h5/bind 2>/dev/null || true
-      sleep 1
-    fi
-
-    echo "Starting AtriOS Bluetooth Speaker Daemon (SDP + A2DP Sink + AVRCP)..."
-    if [ -x /usr/sbin/bt-speaker-daemon ] && ! pgrep -f /usr/sbin/bt-speaker-daemon >/dev/null 2>&1; then
-      /usr/sbin/bt-speaker-daemon >/var/log/bt-speaker-daemon.log 2>&1 &
-    fi
-
-    echo "Starting AtriOS Bluetooth Remote Control Daemon (RFCOMM channel 1)..."
-    if [ -x /usr/lib/atrios/bt-control ] && ! pgrep -f /usr/lib/atrios/bt-control >/dev/null 2>&1; then
-      /usr/lib/atrios/bt-control >/var/log/atrios-bt-control.log 2>&1 &
+    echo "Starting AtriOS Bluetooth Daemons (A2DP Sink + RFCOMM Control)..."
+    if [ -d /sys/class/bluetooth/hci0 ]; then
+      start_bt_daemons
+    else
+      (start_bt_daemons) >/dev/null 2>&1 &
     fi
     ;;
   stop)
