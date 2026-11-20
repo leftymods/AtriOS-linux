@@ -1,0 +1,42 @@
+name: Build & Release Android App
+
+on:
+  push:
+    tags:
+      - 'app-v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag (e.g. app-v1.5)
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11'
+      - name: Build Debug APK
+        run: gradle assembleDebug --no-daemon
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          VER="${TAG#app-v}"
+          APK_OUT="AtriOS-Control-v${VER}.apk"
+          cp app/build/outputs/apk/debug/app-debug.apk "$APK_OUT"
+          gh release create "$TAG" "$APK_OUT" \
+            --title "AtriOS Control v${VER}" \
+            --notes "AtriOS Control v${VER}: multi-speaker UI, phone OTA check/install/rollback, timers & alarms, NTP/timezone sync, Bluetooth speaker controls, and Qwen3-TTS voice/emotion settings." \
+            || gh release upload "$TAG" "$APK_OUT" --clobber
