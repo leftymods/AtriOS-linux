@@ -784,6 +784,25 @@ static void close_client(client_t *c) {
  * SDP Handler
  * ========================================================================= */
 
+#define BT_ACTIVE_STATE_FILE "/var/run/atrios/bt_active"
+
+static bool bt_speaker_mode_enabled(void) {
+    FILE *f = fopen(BT_ACTIVE_STATE_FILE, "r");
+    if (!f) return false;
+    char ch = 0;
+    size_t n = fread(&ch, 1, 1, f);
+    fclose(f);
+    return (n == 1 && ch == '1');
+}
+
+static bool sdp_record_visible(const sdp_record_def_t *r) {
+    /* Record 0x00010004 (RFCOMM SPP Control for the Android app) is always visible.
+     * A2DP Sink (0x00010001) & AVRCP (0x00010002/0x00010003) are only exposed when
+     * Bluetooth speaker mode is explicitly enabled ("включи блютуз" or app toggle). */
+    if (r->handle == 0x00010004) return true;
+    return bt_speaker_mode_enabled();
+}
+
 static void handle_sdp_pdu(client_t *c, const uint8_t *pkt, size_t len) {
     if (len < 5) return;
     uint8_t pdu_id = pkt[0];
@@ -807,6 +826,7 @@ static void handle_sdp_pdu(client_t *c, const uint8_t *pkt, size_t len) {
         uint16_t hcnt = 0;
         if (!bad128 && ucnt > 0) {
             for (size_t i = 0; i < g_record_cnt && hcnt < max_rec; i++) {
+                if (!sdp_record_visible(&g_records[i])) continue;
                 bool match = true;
                 for (size_t j = 0; j < ucnt; j++) {
                     if (!rec_has_uuid(&g_records[i], uuids[j])) { match = false; break; }
@@ -844,6 +864,7 @@ static void handle_sdp_pdu(client_t *c, const uint8_t *pkt, size_t len) {
             attr_range_t ranges[16]; size_t rcnt = 0;
             if (parse_attr_ranges(p, plen, &off, ranges, 16, &rcnt) < 0 || off + 1 > plen) return;
             for (size_t i = 0; i < g_record_cnt; i++) {
+                if (!sdp_record_visible(&g_records[i])) continue;
                 if (g_records[i].handle == handle) {
                     build_record_attr_des(&g_records[i], ranges, rcnt, &full);
                     break;
@@ -863,6 +884,7 @@ static void handle_sdp_pdu(client_t *c, const uint8_t *pkt, size_t len) {
             sdp_buf_t list_inner; list_inner.len = 0;
             if (!bad128 && ucnt > 0) {
                 for (size_t i = 0; i < g_record_cnt; i++) {
+                    if (!sdp_record_visible(&g_records[i])) continue;
                     bool match = true;
                     for (size_t j = 0; j < ucnt; j++) {
                         if (!rec_has_uuid(&g_records[i], uuids[j])) { match = false; break; }
@@ -936,6 +958,14 @@ static void handle_avdtp_signal(client_t *c, const uint8_t *pkt, size_t len) {
 
     printf("[bt-speaker] AVDTP CMD from %s: sig=0x%02x len=%zu\n", c->peer_str, sig_id, len);
     fflush(stdout);
+
+    if (!bt_speaker_mode_enabled() &&
+        (sig_id == 0x01 || sig_id == 0x03 || sig_id == 0x06 || sig_id == 0x07)) {
+        rsp[0] = (uint8_t)((tx_label << 4) | 0x03); /* REJECT */
+        rsp[rlen++] = 0x31; /* BAD_STATE (speaker mode disabled) */
+        send(c->fd, rsp, rlen, 0);
+        return;
+    }
 
     switch (sig_id) {
     case 0x01: /* AVDTP_DISCOVER */
@@ -1484,6 +1514,14 @@ static void handle_bt_cmd_socket(int fd_cmd) {
     } else if (strcmp(p, "unduck") == 0) {
         g_duck_target = 1.0f;
         g_duck_until_ms = 0;
+    } else if (strcmp(p, "speaker_off") == 0) {
+        audio_close();
+        for (int i = 0; i < MAX_CLIENTS; i++) {
+            if (g_clients[i].active &&
+                (g_clients[i].kind == CONN_AVDTP_MEDIA || g_clients[i].kind == CONN_AVDTP_SIGNAL)) {
+                close_client(&g_clients[i]);
+            }
+        }
     }
 }
 

@@ -757,6 +757,7 @@ pub(crate) fn process_command(cmd_obj: &Json) -> Result<Json, String> {
                     .status();
                 let _ = fs::create_dir_all("/var/run/atrios");
                 let _ = fs::write(BT_ACTIVE_FILE, "0");
+                crate::atriai::send_bt_cmd("speaker_off");
             }
             Ok(obj(vec![
                 ("type", Json::Str("action_response".into())),

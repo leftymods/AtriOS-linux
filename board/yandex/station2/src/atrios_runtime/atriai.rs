@@ -1857,6 +1857,7 @@ fn execute_device_command(cmd: DeviceCommand) {
             if Path::new(BT_CMD_SOCK).exists() {
                 if let Ok(sock) = UnixDatagram::unbound() {
                     let _ = sock.send_to(b"pause", BT_CMD_SOCK);
+                    let _ = sock.send_to(b"speaker_off", BT_CMD_SOCK);
                 }
             }
             let _ = Command::new("/bin/sh")
