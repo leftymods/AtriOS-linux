@@ -1369,6 +1369,7 @@ pub fn resolve_error_variant(raw: &str) -> &'static str {
         "no_internet" | "internet" | "tls" | "server" => "no_internet",
         "overheat" | "thermal" => "overheat",
         "audio_err" | "audio" => "audio_err",
+        "update" | "ota" => "update",
         "kernel_panic" | "panic" | "storage" => "kernel_panic",
         _ => "default",
     }
@@ -1420,6 +1421,25 @@ pub fn render_error_frame(variant: &str, t: f64, bright: u8) -> Vec<u8> {
             err_bmp(&mut buf, 5, 4, E_SPEAKER, bright);
             if ((t * 3.5) as isize).rem_euclid(2) == 0 {
                 err_bmp(&mut buf, 13, 5, E_X_SMALL, bright);
+            }
+        }
+        "update" => {
+            // Animated downward update/download arrow into tray + blinking X
+            const E_DL_ARROW: &[&str] = &[
+                "..###..",
+                "..###..",
+                "..###..",
+                "#######",
+                ".#####.",
+                "..###..",
+                "...#...",
+            ];
+            let bob = ((t * 3.0) as isize).rem_euclid(2);
+            err_bmp(&mut buf, 3, 2 + bob, E_DL_ARROW, bright);
+            // Download tray bar at bottom
+            err_rect(&mut buf, 2, 11, 9, 2, bright);
+            if ((t * 3.5) as isize).rem_euclid(2) == 0 {
+                err_bmp(&mut buf, 15, 5, E_X_SMALL, bright);
             }
         }
         "kernel_panic" => {

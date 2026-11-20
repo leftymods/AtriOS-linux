@@ -28,6 +28,7 @@ pub fn run(_args: &[String]) -> i32 {
                 1 => "wifi",
                 2 | 3 => "no_internet",
                 4 => "audio_err",
+                5 => "update",
                 7 => "kernel_panic",
                 _ => err.kind.as_str(),
             };
