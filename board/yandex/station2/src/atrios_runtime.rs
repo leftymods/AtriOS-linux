@@ -268,6 +268,9 @@ mod tests {
         assert_eq!(rotaryd::volume_to_raw(0, 255), 0);
         assert_eq!(rotaryd::volume_to_raw(100, 255), 255);
         assert!(rotaryd::woofer_volume_to_raw(10, 255) >= rotaryd::volume_to_raw(10, 255));
+        assert_eq!(rotaryd::woofer_volume_to_raw(40, 255), rotaryd::volume_to_raw(40, 255));
+        assert!(rotaryd::woofer_volume_to_raw(100, 255) <= rotaryd::volume_to_raw(40, 255) + 4);
+        assert!(rotaryd::woofer_volume_to_raw(100, 255) < rotaryd::volume_to_raw(100, 255));
     }
 
     #[test]

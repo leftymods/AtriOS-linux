@@ -58,12 +58,23 @@ pub fn volume_to_raw(pct: i32, zero_db_raw: i32) -> i32 {
 }
 
 pub fn woofer_volume_to_raw(pct: i32, zero_db_raw: i32) -> i32 {
+    let pct = pct.clamp(0, 100);
+    if pct <= 0 {
+        return 0;
+    }
     let raw = volume_to_raw(pct, zero_db_raw);
-    if pct <= 0 || pct >= 30 {
+    if pct < 30 {
+        let boost = (16.0 * (1.0 - (pct as f64) / 30.0)).round() as i32;
+        return (raw + boost).min(zero_db_raw);
+    }
+    if pct <= 40 {
         return raw;
     }
-    let boost = (16.0 * (1.0 - (pct as f64) / 30.0)).round() as i32;
-    (raw + boost).min(zero_db_raw)
+    // Dynamic bass limiting above 40%: keep tweeters scaling full range while softly capping
+    // woofer excursion to +2.0 dB (+4 raw steps) from 40% to 100% so bass stays tight & clean.
+    let base_40 = volume_to_raw(40, zero_db_raw);
+    let extra = ((((pct - 40) as f64) / 60.0).powf(0.75) * 4.0).round() as i32;
+    (base_40 + extra).clamp(1, zero_db_raw)
 }
 
 fn read_state_volume() -> Option<i32> {
@@ -916,6 +927,13 @@ fn cmd_wifi_power_ioctl() -> i32 {
     if rc == 0 { 0 } else { 1 }
 }
 
+fn cmd_woofer_raw(args: &[String]) -> i32 {
+    let pct = args.first().and_then(|s| s.parse::<i32>().ok()).unwrap_or(0);
+    let zero_db = args.get(1).and_then(|s| s.parse::<i32>().ok()).unwrap_or(255);
+    println!("{}", woofer_volume_to_raw(pct, zero_db));
+    0
+}
+
 fn cmd_volume_raw(args: &[String]) -> i32 {
     let pct = args
         .first()
@@ -1057,6 +1075,7 @@ pub fn run(args: &[String]) -> i32 {
         Some("ifup") => cmd_ifup(args.get(1).map(String::as_str).unwrap_or("wlan0")),
         Some("wifi-power-ioctl") => cmd_wifi_power_ioctl(),
         Some("volume-raw") => cmd_volume_raw(&args[1..]),
+        Some("woofer-raw") => cmd_woofer_raw(&args[1..]),
         Some("input-monitor") => cmd_input_monitor(),
         Some("sys-reboot") => unsafe {
             sync();

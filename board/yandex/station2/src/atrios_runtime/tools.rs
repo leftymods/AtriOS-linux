@@ -667,11 +667,12 @@ fn bt_vol_to_raw(pct: i32, max_val: i32) -> i32 {
 
 fn bt_apply_hw_volume(pct: i32) {
     const STATE_FILE: &str = "/var/lib/atrios/volume";
-    let r255 = bt_vol_to_raw(pct, 255);
-    let rhp = bt_vol_to_raw(pct, 191);
+    let r255 = crate::rotaryd::volume_to_raw(pct, 255);
+    let rwfr = crate::rotaryd::woofer_volume_to_raw(pct, 255);
+    let rhp = crate::rotaryd::volume_to_raw(pct, 191);
     let sw = if pct <= 0 { 0 } else { 1 };
     let batch = format!(
-        "cset name='Woofer Master Playback Volume' {r255}\n\
+        "cset name='Woofer Master Playback Volume' {rwfr}\n\
          cset name='Tweeters Master Playback Volume' {r255}\n\
          cset name='Headphone DAC Playback Volume' {rhp}\n\
          cset name='Woofer Master Playback Switch' {sw}\n\
