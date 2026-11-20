@@ -233,6 +233,61 @@ data class AiStatus(
     }
 }
 
+data class YMusicStatus(
+    val loggedIn: Boolean = false,
+    val login: String = "",
+    val displayName: String = "",
+    val uid: Long = 0L,
+    val state: String = "idle",
+    val mode: String = "none",
+    val trackId: String = "",
+    val title: String = "",
+    val artist: String = "",
+    val album: String = "",
+    val durationMs: Long = 0L,
+    val liked: Boolean = false,
+    val error: String? = null,
+    val updatedTs: Long = 0L
+) {
+    val isActive: Boolean
+        get() = state in setOf("loading", "playing", "paused")
+
+    companion object {
+        const val OAUTH_URL =
+            "https://oauth.yandex.ru/authorize?response_type=token&client_id=23cabbbdc6cd418abb4b39c32c41195d"
+
+        fun extractAccessToken(rawInput: String): String {
+            val trimmed = rawInput.trim()
+            if (trimmed.isEmpty()) return ""
+            val match = Regex("(?:^|[#?&])access_token=([^&\\s]+)").find(trimmed)
+            if (match != null) {
+                return match.groupValues[1].trim()
+            }
+            return trimmed
+        }
+
+        fun fromJson(obj: JSONObject?): YMusicStatus {
+            if (obj == null) return YMusicStatus()
+            return YMusicStatus(
+                loggedIn = obj.optBoolean("logged_in", false),
+                login = obj.optString("login", ""),
+                displayName = obj.optString("display_name", ""),
+                uid = obj.optLong("uid", 0L),
+                state = obj.optString("state", "idle").ifBlank { "idle" },
+                mode = obj.optString("mode", "none").ifBlank { "none" },
+                trackId = obj.optString("track_id", ""),
+                title = obj.optString("title", ""),
+                artist = obj.optString("artist", ""),
+                album = obj.optString("album", ""),
+                durationMs = obj.optLong("duration_ms", 0L),
+                liked = obj.optBoolean("liked", false),
+                error = if (obj.isNull("error")) null else obj.optString("error").ifBlank { null },
+                updatedTs = obj.optLong("updated_ts", 0L)
+            )
+        }
+    }
+}
+
 data class SpeakerStatus(
     val model: String = "AtriOS Speaker",
     val codename: String = "",
@@ -266,5 +321,6 @@ data class SpeakerStatus(
     val pairedDevices: List<String> = emptyList(),
     val ai: AiStatus = AiStatus(),
     val ota: OtaStatus = OtaStatus(),
+    val ymusic: YMusicStatus = YMusicStatus(),
     val capabilities: DeviceCapabilities = DeviceCapabilities()
 )

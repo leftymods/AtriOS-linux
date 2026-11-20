@@ -41,6 +41,7 @@ import com.leftymods.atrios.ui.TelemetryCard
 import com.leftymods.atrios.ui.TimeAndTimezoneCard
 import com.leftymods.atrios.ui.TimersAndAlarmsCard
 import com.leftymods.atrios.ui.WifiCard
+import com.leftymods.atrios.ui.YMusicCard
 import com.leftymods.atrios.ui.theme.AtriOSTheme
 import kotlinx.coroutines.launch
 
@@ -131,6 +132,9 @@ fun AtriOSApp() {
             onOtaUpdate = { ota ->
                 status = status.copy(ota = ota)
             },
+            onYMusicUpdate = { ym ->
+                status = status.copy(ymusic = ym)
+            },
             onTimersUpdate = { list ->
                 timers = list
             },
@@ -202,6 +206,7 @@ fun AtriOSApp() {
                                 selectedTab = tab
                                 when (tab) {
                                     AppTab.ASSISTANT -> {
+                                        client.ymusicStatus()
                                         client.getTimers()
                                         client.getAlarms()
                                     }
@@ -290,6 +295,16 @@ fun AtriOSApp() {
                     }
 
                     AppTab.ASSISTANT -> {
+                        item {
+                            YMusicCard(
+                                ymusic = status.ymusic,
+                                onRefresh = { client.ymusicStatus() },
+                                onLogin = { token -> client.ymusicLogin(token) },
+                                onLogout = { client.ymusicLogout() },
+                                onPlay = { mode, query -> client.ymusicPlay(mode, query) },
+                                onControl = { action -> client.ymusicControl(action) }
+                            )
+                        }
                         item {
                             TimersAndAlarmsCard(
                                 timers = timers,

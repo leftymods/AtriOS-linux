@@ -9,6 +9,7 @@ import com.leftymods.atrios.model.DeviceCapabilities
 import com.leftymods.atrios.model.OtaStatus
 import com.leftymods.atrios.model.SpeakerStatus
 import com.leftymods.atrios.model.TimerItem
+import com.leftymods.atrios.model.YMusicStatus
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -29,6 +30,7 @@ class BtControlClient(
     private val onVolumePush: (Int, Boolean) -> Unit,
     private val onButtonsPush: (Boolean, Boolean) -> Unit = { _, _ -> },
     private val onOtaUpdate: (OtaStatus) -> Unit = {},
+    private val onYMusicUpdate: (YMusicStatus) -> Unit = {},
     private val onTimersUpdate: (List<TimerItem>) -> Unit = {},
     private val onAlarmsUpdate: (List<AlarmItem>) -> Unit = {},
     private val onBtSpeakerPush: (Boolean) -> Unit = {},
@@ -62,9 +64,10 @@ class BtControlClient(
                     onConnectionState(true, "Подключено: ${device.name ?: device.address}", device)
                 }
 
-                // Initial sync: status, OTA, timers, alarms
+                // Initial sync: status, OTA, Yandex Music, timers, alarms
                 writeJson(JSONObject().put("cmd", "get_status"))
                 writeJson(JSONObject().put("cmd", "ota_status"))
+                writeJson(JSONObject().put("cmd", "ymusic_status"))
                 writeJson(JSONObject().put("cmd", "get_timers"))
                 writeJson(JSONObject().put("cmd", "get_alarms"))
 
@@ -142,6 +145,25 @@ class BtControlClient(
 
     fun otaRollback(reboot: Boolean = false) = sendCommand(
         JSONObject().put("cmd", "ota_rollback").put("reboot", reboot)
+    )
+
+    // Yandex Music (#30 contract)
+    fun ymusicStatus() = sendCommand(JSONObject().put("cmd", "ymusic_status"))
+
+    fun ymusicLogin(token: String) = sendCommand(
+        JSONObject().put("cmd", "ymusic_login").put("token", token.trim())
+    )
+
+    fun ymusicLogout() = sendCommand(JSONObject().put("cmd", "ymusic_logout"))
+
+    fun ymusicPlay(mode: String, query: String? = null) {
+        val obj = JSONObject().put("cmd", "ymusic_play").put("mode", mode)
+        if (!query.isNullOrBlank()) obj.put("query", query.trim())
+        sendCommand(obj)
+    }
+
+    fun ymusicControl(action: String) = sendCommand(
+        JSONObject().put("cmd", "ymusic_control").put("action", action)
     )
 
     // Timers (#10 contract)
@@ -263,6 +285,7 @@ class BtControlClient(
                 )
                 val ota = OtaStatus.fromJson(json.optJSONObject("ota"))
                 val ai = AiStatus.fromJson(json.optJSONObject("ai"))
+                val ymusic = YMusicStatus.fromJson(json.optJSONObject("ymusic"))
                 val status = SpeakerStatus(
                     model = model,
                     codename = codename,
@@ -296,6 +319,7 @@ class BtControlClient(
                     pairedDevices = paired,
                     ai = ai,
                     ota = ota,
+                    ymusic = ymusic,
                     capabilities = caps
                 )
                 withContext(Dispatchers.Main) { onStatus(status) }
@@ -317,6 +341,18 @@ class BtControlClient(
                 withContext(Dispatchers.Main) {
                     if (otaObj != null) onOtaUpdate(OtaStatus.fromJson(otaObj))
                     if (msg.isNotBlank() && json.optString("type") != "ota_status") {
+                        onMessage(msg, !ok)
+                    }
+                }
+            }
+            "ymusic_status", "ymusic_login_response", "ymusic_logout_response",
+            "ymusic_play_response", "ymusic_control_response" -> {
+                val ymObj = json.optJSONObject("ymusic")
+                val msg = json.optString("message", "")
+                val ok = json.optBoolean("success", true)
+                withContext(Dispatchers.Main) {
+                    if (ymObj != null) onYMusicUpdate(YMusicStatus.fromJson(ymObj))
+                    if (msg.isNotBlank() && json.optString("type") != "ymusic_status") {
                         onMessage(msg, !ok)
                     }
                 }
