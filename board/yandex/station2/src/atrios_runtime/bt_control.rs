@@ -482,6 +482,7 @@ fn build_status_payload() -> Json {
         ("screen_mode", Json::Str(get_screen_mode())),
         ("ai", get_ai_info()),
         ("ota", crate::ota::read_ota_status_json()),
+        ("ymusic", crate::ymusic::read_status_json()),
         (
             "bluetooth",
             obj(vec![
@@ -767,6 +768,72 @@ pub(crate) fn process_command(cmd_obj: &Json) -> Result<Json, String> {
                 ),
             ]))
         }
+        "ymusic_status" => Ok(obj(vec![
+            ("type", Json::Str("ymusic_status".into())),
+            ("success", Json::Bool(true)),
+            ("ymusic", crate::ymusic::read_status_json()),
+        ])),
+        "ymusic_login" => {
+            let token = map.get("token").and_then(|v| v.as_str()).unwrap_or("");
+            match crate::ymusic::login_with_token(token) {
+                Ok(st) => Ok(obj(vec![
+                    ("type", Json::Str("ymusic_login_response".into())),
+                    ("success", Json::Bool(true)),
+                    ("message", Json::Str(format!("Signed in as {}", st.display_name))),
+                    ("ymusic", st.to_json()),
+                ])),
+                Err(e) => Ok(obj(vec![
+                    ("type", Json::Str("ymusic_login_response".into())),
+                    ("success", Json::Bool(false)),
+                    ("message", Json::Str(e)),
+                    ("ymusic", crate::ymusic::read_status_json()),
+                ])),
+            }
+        }
+        "ymusic_logout" => {
+            let st = crate::ymusic::logout();
+            Ok(obj(vec![
+                ("type", Json::Str("ymusic_logout_response".into())),
+                ("success", Json::Bool(true)),
+                ("message", Json::Str("Logged out".into())),
+                ("ymusic", st.to_json()),
+            ]))
+        }
+        "ymusic_play" => {
+            let mode = map.get("mode").and_then(|v| v.as_str()).unwrap_or("wave");
+            let query = map.get("query").and_then(|v| v.as_str());
+            match crate::ymusic::trigger_play(mode, query) {
+                Ok(st) => Ok(obj(vec![
+                    ("type", Json::Str("ymusic_play_response".into())),
+                    ("success", Json::Bool(true)),
+                    ("message", Json::Str(format!("Starting Yandex Music ({mode})"))),
+                    ("ymusic", st.to_json()),
+                ])),
+                Err(e) => Ok(obj(vec![
+                    ("type", Json::Str("ymusic_play_response".into())),
+                    ("success", Json::Bool(false)),
+                    ("message", Json::Str(e)),
+                    ("ymusic", crate::ymusic::read_status_json()),
+                ])),
+            }
+        }
+        "ymusic_control" => {
+            let action = map.get("action").and_then(|v| v.as_str()).unwrap_or("");
+            match crate::ymusic::trigger_control(action) {
+                Ok(st) => Ok(obj(vec![
+                    ("type", Json::Str("ymusic_control_response".into())),
+                    ("success", Json::Bool(true)),
+                    ("message", Json::Str(format!("Yandex Music: {action}"))),
+                    ("ymusic", st.to_json()),
+                ])),
+                Err(e) => Ok(obj(vec![
+                    ("type", Json::Str("ymusic_control_response".into())),
+                    ("success", Json::Bool(false)),
+                    ("message", Json::Str(e)),
+                    ("ymusic", crate::ymusic::read_status_json()),
+                ])),
+            }
+        }
         "ota_status" => Ok(obj(vec![
             ("type", Json::Str("ota_status".into())),
             ("success", Json::Bool(true)),
@@ -1028,6 +1095,10 @@ fn handle_client(fd: c_int, mac: String) {
         let o = crate::ota::read_ota_status();
         format!("{}:{}:{}", o.state, o.progress, o.updated_ts)
     };
+    let mut last_ym_sig = {
+        let y = crate::ymusic::read_status();
+        format!("{}:{}:{}:{}", y.state, y.track_id, y.liked, y.updated_ts)
+    };
 
     loop {
         if last_input.elapsed().as_secs() > IDLE_TIMEOUT_SECS {
@@ -1105,6 +1176,20 @@ fn handle_client(fd: c_int, mac: String) {
                 &obj(vec![
                     ("type", Json::Str("ota_status".into())),
                     ("ota", cur_ota.to_json()),
+                ]),
+            ) {
+                break;
+            }
+        }
+        let cur_ym = crate::ymusic::read_status();
+        let cur_ym_sig = format!("{}:{}:{}:{}", cur_ym.state, cur_ym.track_id, cur_ym.liked, cur_ym.updated_ts);
+        if cur_ym_sig != last_ym_sig {
+            last_ym_sig = cur_ym_sig;
+            if !send_json_line(
+                fd,
+                &obj(vec![
+                    ("type", Json::Str("ymusic_status".into())),
+                    ("ymusic", cur_ym.to_json()),
                 ]),
             ) {
                 break;
@@ -1207,6 +1292,13 @@ mod tests {
         let st = process_command(&Json::parse(r#"{"cmd":"get_status"}"#).unwrap()).unwrap();
         assert_eq!(st.get_str("type"), Some("status"));
         assert!(st.get("ota").is_some());
+        assert!(st.get("ymusic").is_some());
+        let ym_resp = process_command(&Json::parse(r#"{"cmd":"ymusic_status"}"#).unwrap()).unwrap();
+        assert_eq!(ym_resp.get_str("type"), Some("ymusic_status"));
+        assert_eq!(ym_resp.get("success").and_then(|v| v.as_bool()), Some(true));
+        let ym = ym_resp.get("ymusic").expect("ymusic object present");
+        assert!(ym.get_str("state").is_some());
+        assert!(ym.get("logged_in").and_then(|v| v.as_bool()).is_some());
         let ai = st.get("ai").expect("ai object present");
         assert!(ai.get_str("mode").is_some());
         assert!(ai.get_str("tts_voice").is_some());

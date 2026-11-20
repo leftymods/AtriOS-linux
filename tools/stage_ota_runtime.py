@@ -22,7 +22,7 @@ RUNTIME_FILES = (
         'atrios-runtime', 'atri-aec', 'atriai', 'bt-agent', 'bt-control',
         'bt-volume-sync', 'hardware', 'light', 'micprobe', 'ntp', 'ota',
         'rotaryd', 'rtk-bt-bridge', 'rtk-bt-init', 'screend', 'supervise',
-        'wifi-scan', 'wireless', 'console.sh')),
+        'wifi-scan', 'wireless', 'ymusic', 'console.sh')),
     'etc/atrios/ota-public.pem', 'etc/atrios/updates.json',
     'etc/atrios/hardware.json', 'etc/os-release',
     'etc/atrios-console', 'etc/fish/config.fish',

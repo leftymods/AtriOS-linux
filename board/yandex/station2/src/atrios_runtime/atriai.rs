@@ -1787,7 +1787,9 @@ fn execute_device_command(cmd: DeviceCommand) {
                 DeviceCommand::Play => ("play", "play"),
                 _ => unreachable!(),
             };
-            if Path::new(BT_CMD_SOCK).exists() {
+            if crate::ymusic::is_active() {
+                let _ = crate::ymusic::trigger_control(sock_cmd);
+            } else if Path::new(BT_CMD_SOCK).exists() {
                 if let Ok(sock) = UnixDatagram::unbound() {
                     let _ = sock.send_to(sock_cmd.as_bytes(), BT_CMD_SOCK);
                 }
@@ -2063,6 +2065,34 @@ fn send_phrase_to_server(
                 set_vad_visual("vad", false, "default");
                 return Ok((text, String::new(), true));
             }
+            keep_listening = false;
+            return Ok((text, String::new(), false));
+        }
+        // If user said "поставь <song>" and constrained grammar hit [unk], re-transcribe unconstrained for song title
+        let ym_text = if use_local_stt && had_unk && (clean_query.starts_with("поставь") || clean_query.starts_with("включи песню") || clean_query.starts_with("включи трек")) {
+            crate::local_stt::transcribe_pcm16(pcm).unwrap_or_else(|_| text.clone())
+        } else {
+            text.clone()
+        };
+        if let Some(ym_cmd) = crate::ymusic::parse_ymusic_voice_command(&ym_text, wake_word) {
+            println!("[ymusic] voice command: {ym_cmd:?}");
+            crate::ymusic::execute_voice_command(ym_cmd);
+            play_command_chime("play");
+            set_error("voice", None, "", 15);
+            if !has_trailing_stop && force_active {
+                keep_listening = true;
+                set_vad_visual("vad", false, "default");
+                return Ok((ym_text, String::new(), true));
+            }
+            keep_listening = false;
+            return Ok((ym_text, String::new(), false));
+        }
+        if crate::ymusic::is_active()
+            && (clean_query.contains("выключи музыку") || clean_query.contains("останови музыку"))
+        {
+            let _ = crate::ymusic::trigger_control("stop");
+            play_command_chime("pause");
+            set_error("voice", None, "", 15);
             keep_listening = false;
             return Ok((text, String::new(), false));
         }

@@ -25,6 +25,8 @@ mod atriai;
 mod bt_control;
 #[path = "atrios_runtime/ota.rs"]
 mod ota;
+#[path = "atrios_runtime/ymusic.rs"]
+mod ymusic;
 #[path = "atrios_runtime/hardware.rs"]
 mod hardware;
 #[path = "atrios_runtime/supervise.rs"]
@@ -63,6 +65,7 @@ fn main() {
         "atriai" => atriai::run(rest),
         "bt-control" => bt_control::run(rest),
         "ota" => ota::run(rest),
+        "ymusic" => ymusic::run(rest),
         "ntp" => tools::run_ntp(rest),
         "micprobe" => tools::run_micprobe(rest),
         "bt-agent" => tools::run_bt_agent(rest),

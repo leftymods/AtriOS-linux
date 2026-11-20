@@ -22,6 +22,7 @@
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/resource.h>
 #include <sys/un.h>
 #include <fcntl.h>
 
@@ -202,6 +203,25 @@ static void bt_apply_scan_mode(uint8_t scan) {
         hci_cmd_sync(dd, 0x0c1a, &scan, 1);
     }
     close(dd);
+}
+
+static bool g_scan_suppressed = false;
+static uint8_t g_jitter_buf[65536];
+static size_t g_jitter_len = 0;
+static bool g_jitter_priming = true;
+
+static void bt_suppress_scan_for_a2dp(void) {
+    if (!g_scan_suppressed) {
+        bt_apply_scan_mode(0x00); /* HCI_SCAN_DISABLED: prevent 2.4GHz scan stutters */
+        g_scan_suppressed = true;
+    }
+}
+
+static void bt_restore_scan_after_a2dp(void) {
+    if (g_scan_suppressed) {
+        g_scan_suppressed = false;
+        bt_apply_scan_mode(bt_desired_scan_mode());
+    }
 }
 
 static int ensure_hci0_configured(bool verbose) {
@@ -979,6 +999,11 @@ static void handle_avdtp_signal(client_t *c, const uint8_t *pkt, size_t len) {
     case 0x09: /* AVDTP_SUSPEND */
     case 0x0A: /* AVDTP_ABORT */
     case 0x0D: /* AVDTP_DELAYREPORT */
+        if (sig_id == 0x07) {
+            bt_suppress_scan_for_a2dp();
+            g_jitter_len = 0;
+            g_jitter_priming = true;
+        }
         if (sig_id == 0x08 || sig_id == 0x0A) {
             c->avdtp_open_sent = false;
         }
@@ -1059,6 +1084,9 @@ static bool audio_load_libs(void) {
 }
 
 static void audio_close(void) {
+    g_jitter_len = 0;
+    g_jitter_priming = true;
+    bt_restore_scan_after_a2dp();
     if (g_pcm && p_snd_pcm_drop && p_snd_pcm_close) {
         p_snd_pcm_drop(g_pcm);
         p_snd_pcm_close(g_pcm);
@@ -1089,11 +1117,14 @@ static bool audio_ensure_pcm(unsigned int rate, unsigned int channels) {
         if (err >= 0) {
             err = p_snd_pcm_set_params(g_pcm, SND_PCM_FORMAT_S16_LE,
                                        SND_PCM_ACCESS_RW_INTERLEAVED,
-                                       channels, rate, 1, 250000);
+                                       channels, rate, 1, 350000);
             if (err >= 0) {
                 g_pcm_rate = rate;
                 g_pcm_channels = channels;
-                printf("[bt-speaker] ALSA opened '%s' (%u Hz, %u ch)\n",
+                g_jitter_len = 0;
+                g_jitter_priming = true;
+                bt_suppress_scan_for_a2dp();
+                printf("[bt-speaker] ALSA opened '%s' (%u Hz, %u ch, latency=350ms, prebuf=120ms)\n",
                        devs[i], rate, channels);
                 fflush(stdout);
                 return true;
@@ -1238,18 +1269,65 @@ static void handle_avdtp_media(client_t *c, const uint8_t *pkt, size_t len) {
                 }
             }
 
+            size_t frame_bytes = (size_t)ch * 2;
+            size_t chunk_bytes = (size_t)total_frames * frame_bytes;
+            size_t prebuf_target = ((size_t)rate * frame_bytes * 120) / 1000;
+            if (prebuf_target > sizeof(g_jitter_buf)) prebuf_target = sizeof(g_jitter_buf);
+
+            if (g_jitter_priming) {
+                size_t copy_n = chunk_bytes;
+                if (g_jitter_len + copy_n > sizeof(g_jitter_buf)) {
+                    copy_n = sizeof(g_jitter_buf) - g_jitter_len;
+                }
+                if (copy_n > 0) {
+                    memcpy(g_jitter_buf + g_jitter_len, play_buf, copy_n);
+                    g_jitter_len += copy_n;
+                }
+                if (g_jitter_len < prebuf_target) {
+                    continue;
+                }
+                g_jitter_priming = false;
+                const uint8_t *jb = g_jitter_buf;
+                snd_pcm_uframes_t jframes = (snd_pcm_uframes_t)(g_jitter_len / frame_bytes);
+                aec_tee(jb, jframes, ch);
+                size_t joff = 0;
+                while (jframes > 0) {
+                    snd_pcm_sframes_t n = p_snd_pcm_writei(g_pcm, jb + joff, jframes);
+                    if (n < 0) {
+                        if (n == -EPIPE) { g_jitter_priming = true; g_jitter_len = 0; }
+                        n = p_snd_pcm_recover(g_pcm, (int)n, 1);
+                        if (n < 0) break;
+                        continue;
+                    }
+                    jframes -= (snd_pcm_uframes_t)n;
+                    joff += (size_t)n * frame_bytes;
+                }
+                g_jitter_len = 0;
+                if (copy_n < chunk_bytes && !g_jitter_priming) {
+                    play_buf += copy_n;
+                    total_frames = (snd_pcm_uframes_t)((chunk_bytes - copy_n) / frame_bytes);
+                } else {
+                    continue;
+                }
+            }
+
             aec_tee(play_buf, total_frames, ch);
 
             size_t byte_off = 0;
             while (total_frames > 0) {
                 snd_pcm_sframes_t n = p_snd_pcm_writei(g_pcm, play_buf + byte_off, total_frames);
                 if (n < 0) {
+                    bool was_underrun = (n == -EPIPE);
                     n = p_snd_pcm_recover(g_pcm, (int)n, 1);
                     if (n < 0) break;
+                    if (was_underrun) {
+                        g_jitter_priming = true;
+                        g_jitter_len = 0;
+                    }
                     continue;
                 }
                 total_frames -= (snd_pcm_uframes_t)n;
-                byte_off += (size_t)n * ch * 2;
+                byte_off += (size_t)n * frame_bytes;
             }
         }
     }
@@ -1629,6 +1707,7 @@ static void handle_hci_event(int fd) {
  * ========================================================================= */
 
 int main(void) {
+    setpriority(PRIO_PROCESS, 0, -10);
     signal(SIGINT, handle_sig);
     signal(SIGTERM, handle_sig);
     signal(SIGPIPE, SIG_IGN);
@@ -1730,6 +1809,8 @@ int main(void) {
                         if (sig && sig->avdtp_open_sent) {
                             kind = CONN_AVDTP_MEDIA;
                             sig->avdtp_open_sent = false;
+                            int rcvbuf = 262144;
+                            setsockopt(cfd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
                         } else {
                             kind = CONN_AVDTP_SIGNAL;
                         }

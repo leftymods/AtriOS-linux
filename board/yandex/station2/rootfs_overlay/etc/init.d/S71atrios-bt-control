@@ -2,6 +2,7 @@
 # /etc/init.d/S71atrios-bt-control - Bluetooth Speaker & RFCOMM Remote Control Daemons (non-blocking boot)
 
 start_bt_daemons() {
+  iw dev wlan0 set power_save off 2>/dev/null || true
   if [ ! -d /sys/class/bluetooth/hci0 ]; then
     echo serial0-0 > /sys/bus/serial/drivers/hci_uart_h5/unbind 2>/dev/null || true
     sleep 0.5
