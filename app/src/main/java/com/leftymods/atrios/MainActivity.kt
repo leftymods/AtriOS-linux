@@ -21,13 +21,28 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import com.leftymods.atrios.data.SpeakerStorage
+import com.leftymods.atrios.model.AlarmItem
+import com.leftymods.atrios.model.SavedSpeaker
+import com.leftymods.atrios.model.SpeakerStatus
+import com.leftymods.atrios.model.TimerItem
+import com.leftymods.atrios.ui.AiAssistantCard
+import com.leftymods.atrios.ui.AudioCard
+import com.leftymods.atrios.ui.BluetoothCard
+import com.leftymods.atrios.ui.DevicePickerSection
+import com.leftymods.atrios.ui.LedAndScreenCard
+import com.leftymods.atrios.ui.OtaUpdateCard
+import com.leftymods.atrios.ui.TelemetryCard
+import com.leftymods.atrios.ui.TimeAndTimezoneCard
+import com.leftymods.atrios.ui.TimersAndAlarmsCard
+import com.leftymods.atrios.ui.WifiCard
 import com.leftymods.atrios.ui.theme.AtriOSTheme
 import kotlinx.coroutines.launch
-import org.json.JSONObject
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -40,26 +55,29 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private enum class AppTab(val label: String) {
-    HOME("Главная"),
-    MEDIA("Экран и звук"),
-    NETWORK("Сеть и BT"),
-    DEVICE("Устройство")
+private enum class AppTab(val label: String, val icon: ImageVector) {
+    OVERVIEW("Обзор", Icons.Rounded.Dashboard),
+    ASSISTANT("Ассистент", Icons.Rounded.AutoAwesome),
+    NETWORK("Сеть и BT", Icons.Rounded.Bluetooth),
+    SYSTEM("Система", Icons.Rounded.SystemUpdate)
 }
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+@OptIn(ExperimentalMaterial3Api::class)
 @SuppressLint("MissingPermission")
 @Composable
 fun AtriOSApp() {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val snackbarHostState = remember { SnackbarHostState() }
+    val storage = remember { SpeakerStorage(context) }
     val btManager = remember { context.getSystemService(BluetoothManager::class.java) }
     val adapter: BluetoothAdapter? = btManager?.adapter
 
     var hasPerms by remember {
         mutableStateOf(
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
+                ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT) ==
+                    PackageManager.PERMISSION_GRANTED
             } else true
         )
     }
@@ -68,23 +86,20 @@ fun AtriOSApp() {
     ) { res -> hasPerms = res.values.all { it } }
 
     var connected by remember { mutableStateOf(false) }
+    var activeDevice by remember { mutableStateOf<BluetoothDevice?>(null) }
     var connText by remember { mutableStateOf("Выберите колонку для подключения") }
     var status by remember { mutableStateOf(SpeakerStatus()) }
     var sliderVol by remember { mutableFloatStateOf(60f) }
-    var tickerText by remember { mutableStateOf("") }
-    var wifiSsid by remember { mutableStateOf("") }
-    var wifiPass by remember { mutableStateOf("") }
-    var aiServerInput by remember { mutableStateOf("") }
+    var timers by remember { mutableStateOf<List<TimerItem>>(emptyList()) }
+    var alarms by remember { mutableStateOf<List<AlarmItem>>(emptyList()) }
+    var savedSpeakers by remember { mutableStateOf(storage.loadSpeakers()) }
+    var selectedTab by remember { mutableStateOf(AppTab.OVERVIEW) }
     var showRebootDialog by remember { mutableStateOf(false) }
-    var currentTab by remember { mutableStateOf(AppTab.HOME) }
-
-    val appVersion = remember { AppUpdater.currentVersionName(context) }
-    var availableUpdate by remember { mutableStateOf<AppReleaseInfo?>(null) }
-    var updateProgress by remember { mutableStateOf<Float?>(null) }
-    var updateStatusText by remember { mutableStateOf<String?>(null) }
+    var availableAppUpdate by remember { mutableStateOf<AppReleaseInfo?>(null) }
+    var appUpdateProgress by remember { mutableStateOf<Float?>(null) }
 
     LaunchedEffect(Unit) {
-        availableUpdate = AppUpdater.checkForUpdate(context)
+        availableAppUpdate = AppUpdater.checkForUpdate(context)
     }
 
     val client = remember {
@@ -93,31 +108,71 @@ fun AtriOSApp() {
             onStatus = { s ->
                 status = s
                 sliderVol = s.volume.toFloat()
-                if (aiServerInput.isBlank()) aiServerInput = s.aiServer
+                activeDevice?.let { dev ->
+                    savedSpeakers = storage.upsertSpeaker(
+                        SavedSpeaker(
+                            mac = dev.address,
+                            name = dev.name ?: s.model,
+                            model = s.model,
+                            codename = s.codename,
+                            fwVersion = s.fwVersion.ifBlank { s.ota.currentVersion },
+                            lastSeenTs = System.currentTimeMillis()
+                        )
+                    )
+                }
             },
-            onVolumePush = { v -> sliderVol = v.toFloat() },
-            onButtonsPush = { action, mic ->
-                status = status.copy(actionPressed = action, micMuted = mic)
+            onVolumePush = { v, m ->
+                sliderVol = v.toFloat()
+                status = status.copy(volume = v, mute = m)
             },
-            onConnectionState = { ok, msg ->
+            onButtonsPush = { ap, mm ->
+                status = status.copy(actionPressed = ap, micMuted = mm)
+            },
+            onOtaUpdate = { ota ->
+                status = status.copy(ota = ota)
+            },
+            onTimersUpdate = { list ->
+                timers = list
+            },
+            onAlarmsUpdate = { list ->
+                alarms = list
+            },
+            onBtSpeakerPush = { enabled ->
+                status = status.copy(btSpeakerMode = enabled)
+            },
+            onMessage = { msg, _ ->
+                scope.launch {
+                    snackbarHostState.showSnackbar(msg, duration = SnackbarDuration.Short)
+                }
+            },
+            onConnectionState = { ok, msg, dev ->
                 connected = ok
                 connText = msg
+                activeDevice = dev
+                if (!ok) {
+                    timers = emptyList()
+                    alarms = emptyList()
+                }
             }
         )
     }
 
-    DisposableEffect(Unit) { onDispose { client.disconnect() } }
+    DisposableEffect(Unit) { onDispose { client.disconnect(silent = true) } }
 
-    val bondedDevices: List<BluetoothDevice> = remember(hasPerms, adapter) {
+    val bondedDevices: List<BluetoothDevice> = remember(hasPerms, adapter, connected) {
         if (hasPerms && adapter != null) adapter.bondedDevices.toList() else emptyList()
     }
 
     Scaffold(
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             TopAppBar(
                 title = {
                     Column {
-                        Text(status.model, fontWeight = FontWeight.SemiBold)
+                        Text(
+                            if (connected) status.model else "AtriOS Control",
+                            fontWeight = FontWeight.SemiBold
+                        )
                         Text(
                             connText,
                             style = MaterialTheme.typography.labelMedium,
@@ -126,19 +181,12 @@ fun AtriOSApp() {
                     }
                 },
                 actions = {
-                    IconButton(onClick = {
-                        scope.launch {
-                            updateStatusText = "Проверка обновлений..."
-                            val upd = AppUpdater.checkForUpdate(context)
-                            availableUpdate = upd
-                            updateStatusText = if (upd == null) "Установлена последняя версия (v$appVersion)" else null
-                        }
-                    }) {
-                        Icon(Icons.Rounded.SystemUpdate, contentDescription = "Проверить обновления")
-                    }
                     if (connected) {
+                        IconButton(onClick = { client.requestStatus() }) {
+                            Icon(Icons.Rounded.Refresh, contentDescription = "Обновить статус")
+                        }
                         IconButton(onClick = { client.disconnect() }) {
-                            Icon(Icons.Rounded.BluetoothDisabled, contentDescription = "Отключить")
+                            Icon(Icons.Rounded.BluetoothDisabled, contentDescription = "Сменить колонку")
                         }
                     }
                 }
@@ -147,102 +195,53 @@ fun AtriOSApp() {
         bottomBar = {
             if (connected) {
                 NavigationBar {
-                    NavigationBarItem(
-                        selected = currentTab == AppTab.HOME,
-                        onClick = { currentTab = AppTab.HOME },
-                        icon = { Icon(Icons.Rounded.Home, contentDescription = null) },
-                        label = { Text(AppTab.HOME.label) }
-                    )
-                    NavigationBarItem(
-                        selected = currentTab == AppTab.MEDIA,
-                        onClick = { currentTab = AppTab.MEDIA },
-                        icon = { Icon(Icons.Rounded.Tune, contentDescription = null) },
-                        label = { Text(AppTab.MEDIA.label) }
-                    )
-                    NavigationBarItem(
-                        selected = currentTab == AppTab.NETWORK,
-                        onClick = { currentTab = AppTab.NETWORK },
-                        icon = { Icon(Icons.Rounded.Wifi, contentDescription = null) },
-                        label = { Text(AppTab.NETWORK.label) }
-                    )
-                    NavigationBarItem(
-                        selected = currentTab == AppTab.DEVICE,
-                        onClick = { currentTab = AppTab.DEVICE },
-                        icon = { Icon(Icons.Rounded.Memory, contentDescription = null) },
-                        label = { Text(AppTab.DEVICE.label) }
-                    )
+                    AppTab.entries.forEach { tab ->
+                        NavigationBarItem(
+                            selected = selectedTab == tab,
+                            onClick = {
+                                selectedTab = tab
+                                when (tab) {
+                                    AppTab.ASSISTANT -> {
+                                        client.getTimers()
+                                        client.getAlarms()
+                                    }
+                                    AppTab.SYSTEM -> client.otaStatus()
+                                    else -> Unit
+                                }
+                            },
+                            icon = { Icon(tab.icon, contentDescription = tab.label) },
+                            label = { Text(tab.label) }
+                        )
+                    }
                 }
             }
         }
     ) { pad ->
         LazyColumn(
-            modifier = Modifier.fillMaxSize().padding(pad).padding(horizontal = 16.dp),
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(pad)
+                .padding(horizontal = 16.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
             contentPadding = PaddingValues(vertical = 12.dp)
         ) {
-            availableUpdate?.let { upd ->
-                item {
-                    Card(
-                        shape = RoundedCornerShape(24.dp),
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer)
-                    ) {
-                        Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Text("Доступно обновление v${upd.version}", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                            if (upd.notes.isNotBlank()) {
-                                Text(upd.notes.take(240), style = MaterialTheme.typography.bodySmall)
-                            }
-                            updateProgress?.let { prog ->
-                                LinearProgressIndicator(progress = { prog }, modifier = Modifier.fillMaxWidth())
-                                Text("Загрузка: ${(prog * 100).toInt()}%", style = MaterialTheme.typography.labelSmall)
-                            }
-                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                Button(
-                                    enabled = updateProgress == null,
-                                    onClick = {
-                                        scope.launch {
-                                            updateProgress = 0f
-                                            val res = AppUpdater.downloadAndInstall(context, upd) { p -> updateProgress = p }
-                                            updateProgress = null
-                                            res.onFailure { e -> updateStatusText = "Ошибка обновления: ${e.message}" }
-                                        }
-                                    }
-                                ) { Text(if (updateProgress != null) "Загрузка..." else "Обновить") }
-                                TextButton(enabled = updateProgress == null, onClick = { availableUpdate = null }) {
-                                    Text("Позже")
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            updateStatusText?.let { msg ->
-                item {
-                    ElevatedCard(shape = RoundedCornerShape(16.dp)) {
-                        Row(
-                            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(msg, style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
-                            TextButton(onClick = { updateStatusText = null }) { Text("OK") }
-                        }
-                    }
-                }
-            }
-
             if (!hasPerms) {
                 item {
                     ElevatedCard(shape = RoundedCornerShape(24.dp)) {
-                        Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Column(
+                            Modifier.padding(20.dp),
+                            verticalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
                             Text("Разрешение Bluetooth", style = MaterialTheme.typography.titleMedium)
-                            Text("Для управления колонкой по RFCOMM SPP нужно разрешение Bluetooth.")
+                            Text("Для управления колонками AtriOS по Bluetooth RFCOMM SPP требуется разрешение Bluetooth.")
                             Button(onClick = {
                                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                                    permLauncher.launch(arrayOf(
-                                        Manifest.permission.BLUETOOTH_CONNECT,
-                                        Manifest.permission.BLUETOOTH_SCAN
-                                    ))
+                                    permLauncher.launch(
+                                        arrayOf(
+                                            Manifest.permission.BLUETOOTH_CONNECT,
+                                            Manifest.permission.BLUETOOTH_SCAN
+                                        )
+                                    )
                                 }
                             }) { Text("Разрешить") }
                         }
@@ -252,323 +251,214 @@ fun AtriOSApp() {
 
             if (!connected && hasPerms) {
                 item {
-                    ElevatedCard(shape = RoundedCornerShape(24.dp)) {
-                        Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                            Text("Сопряжённые устройства", style = MaterialTheme.typography.titleMedium)
-                            if (bondedDevices.isEmpty()) {
-                                Text("Нет сопряжённых колонок. Сначала выполните сопряжение в настройках Bluetooth телефона.")
-                            } else {
-                                bondedDevices.forEach { dev ->
-                                    FilledTonalButton(
-                                        onClick = { client.connect(dev) },
-                                        modifier = Modifier.fillMaxWidth()
-                                    ) {
-                                        Icon(Icons.Rounded.Speaker, contentDescription = null)
-                                        Spacer(Modifier.width(8.dp))
-                                        Text("${dev.name ?: "AtriStation"} (${dev.address})")
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    DevicePickerSection(
+                        savedSpeakers = savedSpeakers,
+                        bondedDevices = bondedDevices,
+                        onConnect = { dev -> client.connect(dev) },
+                        onForgetSaved = { mac -> savedSpeakers = storage.removeSpeaker(mac) }
+                    )
                 }
             }
 
             if (connected) {
-                when (currentTab) {
-                    AppTab.HOME -> {
+                when (selectedTab) {
+                    AppTab.OVERVIEW -> {
+                        item { TelemetryCard(status = status) }
                         item {
-                            Card(
-                                shape = RoundedCornerShape(24.dp),
-                                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
-                            ) {
-                                Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    Text("${status.os} · ${status.kernel}", style = MaterialTheme.typography.labelLarge)
-                                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                                        Text("CPU: ${status.cpuTemp} °C", fontWeight = FontWeight.Medium)
-                                        Text("RAM: ${status.memUsedMb}/${status.memTotalMb} МБ", fontWeight = FontWeight.Medium)
-                                    }
-                                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                                        Text("Свет: ${status.lux?.let { "$it lux" } ?: "—"}")
-                                        Text(if (status.wifiConnected) "${status.wifiSsid} (${status.wifiIp})" else "Wi-Fi откл.")
-                                    }
-                                }
-                            }
+                            AudioCard(
+                                volume = sliderVol,
+                                mute = status.mute,
+                                speakersDesc = status.speakersDesc,
+                                onVolumeChange = { sliderVol = it },
+                                onVolumeCommit = { client.setVolume(it) },
+                                onToggleMute = { client.setMute(!status.mute) },
+                                onAudioTest = { client.audioTest() }
+                            )
                         }
                         item {
-                            ElevatedCard(shape = RoundedCornerShape(24.dp)) {
-                                Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                                    Text("Верхние кнопки", style = MaterialTheme.typography.titleMedium)
-                                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                                        Text("Кнопка 1 (Действие / Play-Pause)")
-                                        AssistChip(onClick = {}, label = { Text(if (status.actionPressed) "Нажата" else "Отпущена") })
-                                    }
-                                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                                        Text("Кнопка 2 (Микрофон)")
-                                        AssistChip(onClick = {}, label = { Text(if (status.micMuted) "Выключен (Mute)" else "Включён") })
-                                    }
+                            LedAndScreenCard(
+                                capabilities = status.capabilities,
+                                currentScreenMode = status.screenMode,
+                                currentRingMode = status.ringMode,
+                                onSetScreen = { mode, st, txt -> client.setScreen(mode, st, txt) },
+                                onSetRing = { mode ->
+                                    status = status.copy(ringMode = mode)
+                                    client.setRing(mode)
                                 }
-                            }
-                        }
-                        item {
-                            ElevatedCard(shape = RoundedCornerShape(24.dp)) {
-                                Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                                        Text("AtriAI Ассистент", style = MaterialTheme.typography.titleMedium)
-                                        AssistChip(onClick = {}, label = {
-                                            Text(if (status.aiEnabled) status.aiState else "Выкл")
-                                        })
-                                    }
-                                    Text("Сервер: ${status.aiServer}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                    if (status.aiLastAsr.isNotBlank()) {
-                                        Text("Запрос: ${status.aiLastAsr}", style = MaterialTheme.typography.bodySmall)
-                                    }
-                                    if (status.aiLastAnswer.isNotBlank()) {
-                                        Text("Ответ: ${status.aiLastAnswer}", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Medium)
-                                    }
-                                    if (status.aiError.isNotBlank()) {
-                                        Text("Ошибка: ${status.aiError}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
-                                    }
-                                }
-                            }
+                            )
                         }
                     }
 
-                    AppTab.MEDIA -> {
+                    AppTab.ASSISTANT -> {
                         item {
-                            ElevatedCard(shape = RoundedCornerShape(24.dp)) {
-                                Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                                        Text("Громкость", style = MaterialTheme.typography.titleMedium)
-                                        Text("${sliderVol.toInt()}%", fontWeight = FontWeight.Bold)
-                                    }
-                                    Slider(
-                                        value = sliderVol,
-                                        onValueChange = { sliderVol = it },
-                                        onValueChangeFinished = {
-                                            client.sendCommand(JSONObject().put("cmd", "set_volume").put("volume", sliderVol.toInt()))
-                                        },
-                                        valueRange = 0f..100f
+                            TimersAndAlarmsCard(
+                                timers = timers,
+                                alarms = alarms,
+                                onRefresh = {
+                                    client.getTimers()
+                                    client.getAlarms()
+                                },
+                                onAddTimer = { secs -> client.setTimer(secs) },
+                                onCancelTimer = { id -> client.cancelTimers(id) },
+                                onAddAlarm = { h, m -> client.setAlarm(h, m) },
+                                onCancelAlarm = { id -> client.cancelAlarms(id) }
+                            )
+                        }
+                        item {
+                            AiAssistantCard(
+                                ai = status.ai,
+                                onApplyAi = { enabled, mode, server, wake, voice, emotion ->
+                                    client.setAi(
+                                        enabled = enabled,
+                                        mode = mode,
+                                        server = server,
+                                        wakeWord = wake,
+                                        ttsVoice = voice,
+                                        ttsEmotion = emotion
                                     )
-                                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                        listOf(20, 50, 80).forEach { pct ->
-                                            AssistChip(onClick = {
-                                                sliderVol = pct.toFloat()
-                                                client.sendCommand(JSONObject().put("cmd", "set_volume").put("volume", pct))
-                                            }, label = { Text("$pct%") })
-                                        }
-                                        FilledTonalButton(onClick = {
-                                            client.sendCommand(JSONObject().put("cmd", "set_mute").put("mute", !status.mute))
-                                        }) { Text(if (status.mute) "Вкл. звук" else "Без звука") }
-                                        FilledTonalButton(onClick = {
-                                            client.sendCommand(JSONObject().put("cmd", "audio_test"))
-                                        }) { Text("Тест звука") }
-                                    }
                                 }
-                            }
-                        }
-                        item {
-                            ElevatedCard(shape = RoundedCornerShape(24.dp)) {
-                                Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                                    Text("LED-экран (25×16)", style = MaterialTheme.typography.titleMedium)
-                                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                        FilterChip(selected = status.screenMode == "clock", onClick = {
-                                            client.sendCommand(JSONObject().put("cmd", "set_screen").put("mode", "clock"))
-                                        }, label = { Text("Часы") })
-                                        FilterChip(selected = status.screenMode == "kisser", onClick = {
-                                            client.sendCommand(JSONObject().put("cmd", "set_screen").put("mode", "kisser"))
-                                        }, label = { Text("Kisser") })
-                                        FilterChip(selected = status.screenMode == "eyes", onClick = {
-                                            client.sendCommand(JSONObject().put("cmd", "set_screen").put("mode", "eyes").put("state", "happy"))
-                                        }, label = { Text("Глаза") })
-                                        FilterChip(selected = status.screenMode == "off", onClick = {
-                                            client.sendCommand(JSONObject().put("cmd", "set_screen").put("mode", "off"))
-                                        }, label = { Text("Выкл") })
-                                    }
-                                    Text("Эмоции глаз", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                        listOf("happy" to "Радость", "love" to "Любовь", "wink" to "Подмиг", "angry" to "Злость", "sleep" to "Сон", "dizzy" to "Шок").forEach { (state, label) ->
-                                            AssistChip(onClick = {
-                                                client.sendCommand(JSONObject().put("cmd", "set_screen").put("mode", "eyes").put("state", state))
-                                            }, label = { Text(label) })
-                                        }
-                                    }
-                                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                        OutlinedTextField(
-                                            value = tickerText,
-                                            onValueChange = { tickerText = it },
-                                            label = { Text("Бегущая строка") },
-                                            modifier = Modifier.weight(1f),
-                                            singleLine = true
-                                        )
-                                        Button(onClick = {
-                                            if (tickerText.isNotBlank()) {
-                                                client.sendCommand(JSONObject().put("cmd", "set_screen").put("mode", "ticker").put("text", tickerText))
-                                            }
-                                        }) { Text("OK") }
-                                    }
-                                }
-                            }
-                        }
-                        item {
-                            ElevatedCard(shape = RoundedCornerShape(24.dp)) {
-                                Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                                    Text("LED-кольцо (24 RGB)", style = MaterialTheme.typography.titleMedium)
-                                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                        listOf(
-                                            "rainbow" to "Радуга",
-                                            "volume" to "Громкость",
-                                            "red" to "Красный",
-                                            "blue" to "Синий",
-                                            "green" to "Зелёный",
-                                            "off" to "Выкл"
-                                        ).forEach { (mode, label) ->
-                                            AssistChip(onClick = {
-                                                client.sendCommand(JSONObject().put("cmd", "set_ring").put("mode", mode))
-                                            }, label = { Text(label) })
-                                        }
-                                    }
-                                }
-                            }
+                            )
                         }
                     }
 
                     AppTab.NETWORK -> {
                         item {
-                            ElevatedCard(shape = RoundedCornerShape(24.dp)) {
-                                Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                                        Text("Bluetooth и приватность", style = MaterialTheme.typography.titleMedium)
-                                        AssistChip(onClick = {}, label = {
-                                            Text(
-                                                when {
-                                                    status.btHidden -> "Скрыта (PSCAN)"
-                                                    status.btPairRemainingSec > 0 -> "Видима (${status.btPairRemainingSec} с)"
-                                                    else -> "Видима"
-                                                }
-                                            )
-                                        })
-                                    }
-                                    Text(
-                                        if (status.btHidden)
-                                            "Идентификатор колонки скрыт от поиска, чужие устройства не могут подключиться."
-                                        else
-                                            "Колонка видима для сопряжения.",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                    status.pairedDevices.forEach { mac ->
-                                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                                            Text(mac)
-                                            TextButton(onClick = {
-                                                client.sendCommand(JSONObject().put("cmd", "bt_unpair").put("mac", mac))
-                                            }) { Text("Удалить") }
-                                        }
-                                    }
-                                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                        Button(onClick = {
-                                            client.sendCommand(JSONObject().put("cmd", "bt_pair").put("seconds", 60))
-                                        }) { Text("Сопряжение 60 с") }
-                                        FilledTonalButton(onClick = {
-                                            client.sendCommand(JSONObject().put("cmd", "bt_hide"))
-                                        }) { Text("Скрыть") }
-                                    }
-                                }
-                            }
+                            BluetoothCard(
+                                status = status,
+                                onToggleSpeakerMode = { enabled -> client.setBtSpeakerMode(enabled) },
+                                onPair = { secs -> client.btPair(secs) },
+                                onHide = { client.btHide() },
+                                onUnpair = { mac -> client.btUnpair(mac) }
+                            )
                         }
                         item {
-                            ElevatedCard(shape = RoundedCornerShape(24.dp)) {
-                                Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                                    Text("Wi-Fi", style = MaterialTheme.typography.titleMedium)
-                                    Text(
-                                        if (status.wifiConnected) "Подключено: ${status.wifiSsid} (${status.wifiIp})" else "Wi-Fi не подключён",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                    OutlinedTextField(value = wifiSsid, onValueChange = { wifiSsid = it }, label = { Text("SSID") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                                    OutlinedTextField(value = wifiPass, onValueChange = { wifiPass = it }, label = { Text("Пароль") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                        Button(onClick = {
-                                            if (wifiSsid.isNotBlank()) {
-                                                client.sendCommand(JSONObject().put("cmd", "wifi_connect").put("ssid", wifiSsid).put("psk", wifiPass))
-                                            }
-                                        }) { Text("Подключить Wi-Fi") }
-                                        FilledTonalButton(onClick = {
-                                            client.sendCommand(JSONObject().put("cmd", "sync_time"))
-                                        }) { Text("Синхр. время (NTP)") }
-                                    }
-                                }
-                            }
+                            TimeAndTimezoneCard(
+                                localTime = status.localTime,
+                                timezone = status.timezone,
+                                onSyncNtp = { client.ntpSync() },
+                                onSetTimezone = { tz -> client.setTimezone(tz) }
+                            )
+                        }
+                        item {
+                            WifiCard(
+                                wifiConnected = status.wifiConnected,
+                                wifiSsid = status.wifiSsid,
+                                wifiIp = status.wifiIp,
+                                onConnectWifi = { ssid, psk -> client.wifiConnect(ssid, psk) }
+                            )
                         }
                     }
 
-                    AppTab.DEVICE -> {
+                    AppTab.SYSTEM -> {
                         item {
-                            ElevatedCard(shape = RoundedCornerShape(24.dp)) {
-                                Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    Text("Об устройстве", style = MaterialTheme.typography.titleMedium)
-                                    InfoRow("Модель", "${status.model} (${status.codename})")
-                                    InfoRow("Ревизия", status.rev)
-                                    InfoRow("Прошивка", status.fwVersion)
-                                    InfoRow("ОС", status.os)
-                                    InfoRow("Ядро", "${status.kernel} (${status.arch})")
-                                    InfoRow("Платформа", status.soc)
-                                    if (status.speakers.isNotBlank()) InfoRow("Акустика", status.speakers)
-                                    if (status.localTime.isNotBlank()) InfoRow("Время", "${status.localTime} (${status.timezone})")
-                                    InfoRow("Аптайм", formatUptime(status.uptimeSec))
-                                    InfoRow("Bluetooth A2DP", if (status.isSpeakerMode) "Активен" else "Ожидание")
-                                    InfoRow("Приложение", "v$appVersion")
-                                }
-                            }
+                            OtaUpdateCard(
+                                fwVersion = status.fwVersion,
+                                codename = status.codename,
+                                ota = status.ota,
+                                onCheckUpdates = { client.otaCheck() },
+                                onRefreshStatus = { client.otaStatus() },
+                                onApplyUpdate = { reboot -> client.otaApply(reboot) },
+                                onRollback = { reboot -> client.otaRollback(reboot) },
+                                onRebootNow = { showRebootDialog = true }
+                            )
                         }
                         item {
                             ElevatedCard(shape = RoundedCornerShape(24.dp)) {
-                                Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                                        Text("AtriAI Runtime", style = MaterialTheme.typography.titleMedium)
-                                        Switch(
-                                            checked = status.aiEnabled,
-                                            onCheckedChange = { en ->
-                                                client.sendCommand(
-                                                    JSONObject().put("cmd", "set_ai")
-                                                        .put("enabled", en)
-                                                        .put("server", aiServerInput.ifBlank { status.aiServer })
-                                                )
-                                            }
+                                Column(
+                                    modifier = Modifier.fillMaxWidth().padding(20.dp),
+                                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Text("Об устройстве", style = MaterialTheme.typography.titleMedium)
+                                    Text("Модель: ${status.model}", style = MaterialTheme.typography.bodyMedium)
+                                    if (status.codename.isNotBlank()) {
+                                        Text(
+                                            "Кодовое имя: ${status.codename} ${status.rev}".trim(),
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
                                         )
                                     }
-                                    OutlinedTextField(
-                                        value = aiServerInput,
-                                        onValueChange = { aiServerInput = it },
-                                        label = { Text("WebSocket сервер AtriAI") },
-                                        singleLine = true,
-                                        modifier = Modifier.fillMaxWidth()
-                                    )
-                                    Button(onClick = {
-                                        client.sendCommand(
-                                            JSONObject().put("cmd", "set_ai")
-                                                .put("server", aiServerInput.ifBlank { status.aiServer })
-                                                .put("enabled", status.aiEnabled)
+                                    if (status.soc.isNotBlank()) {
+                                        Text(
+                                            "SoC: ${status.soc}",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
                                         )
-                                    }) { Text("Сохранить сервер AtriAI") }
+                                    }
+                                    val capsText = buildList {
+                                        if (status.capabilities.hasLedMatrix) add("LED-матрица")
+                                        if (status.capabilities.hasRgbRing) add("RGB-кольцо")
+                                        if (status.capabilities.hasLuxSensor) add("Датчик света")
+                                        if (status.capabilities.hasBluetoothSpeaker) add("BT-колонка")
+                                        if (status.capabilities.hasLocalAi) add("Локальный ИИ")
+                                    }.joinToString(", ")
+                                    Text(
+                                        "Возможности: $capsText",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    Spacer(Modifier.height(4.dp))
+                                    OutlinedButton(onClick = { showRebootDialog = true }) {
+                                        Icon(Icons.Rounded.RestartAlt, contentDescription = null)
+                                        Spacer(Modifier.width(6.dp))
+                                        Text("Перезагрузить колонку")
+                                    }
                                 }
                             }
                         }
                         item {
                             ElevatedCard(shape = RoundedCornerShape(24.dp)) {
-                                Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                                    Text("Система", style = MaterialTheme.typography.titleMedium)
-                                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Column(
+                                    modifier = Modifier.fillMaxWidth().padding(20.dp),
+                                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    Text(
+                                        "Приложение AtriOS Control v${AppUpdater.currentVersionName(context)}",
+                                        style = MaterialTheme.typography.titleMedium
+                                    )
+                                    val rel = availableAppUpdate
+                                    if (rel != null) {
+                                        Text(
+                                            "Доступна новая версия приложения: v${rel.version}",
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            color = MaterialTheme.colorScheme.primary
+                                        )
+                                        val prog = appUpdateProgress
+                                        if (prog != null) {
+                                            LinearProgressIndicator(
+                                                progress = { prog },
+                                                modifier = Modifier.fillMaxWidth()
+                                            )
+                                        } else {
+                                            Button(onClick = {
+                                                scope.launch {
+                                                    appUpdateProgress = 0f
+                                                    val res = AppUpdater.downloadAndInstall(context, rel) { p ->
+                                                        appUpdateProgress = p
+                                                    }
+                                                    appUpdateProgress = null
+                                                    res.onFailure { e ->
+                                                        snackbarHostState.showSnackbar("Ошибка загрузки APK: ${e.message}")
+                                                    }
+                                                }
+                                            }) {
+                                                Icon(Icons.Rounded.Download, contentDescription = null)
+                                                Spacer(Modifier.width(6.dp))
+                                                Text("Обновить приложение (v${rel.version})")
+                                            }
+                                        }
+                                    } else {
                                         FilledTonalButton(onClick = {
                                             scope.launch {
-                                                updateStatusText = "Проверка обновлений..."
-                                                val upd = AppUpdater.checkForUpdate(context)
-                                                availableUpdate = upd
-                                                updateStatusText = if (upd == null) "Установлена последняя версия (v$appVersion)" else null
+                                                val found = AppUpdater.checkForUpdate(context)
+                                                availableAppUpdate = found
+                                                if (found == null) {
+                                                    snackbarHostState.showSnackbar("Установлена последняя версия приложения")
+                                                }
                                             }
-                                        }) { Text("Проверить обновления") }
-                                        OutlinedButton(onClick = { showRebootDialog = true }) {
-                                            Text("Перезагрузить колонку")
+                                        }) {
+                                            Icon(Icons.Rounded.Refresh, contentDescription = null)
+                                            Spacer(Modifier.width(6.dp))
+                                            Text("Проверить обновления приложения")
                                         }
                                     }
                                 }
@@ -584,11 +474,11 @@ fun AtriOSApp() {
         AlertDialog(
             onDismissRequest = { showRebootDialog = false },
             title = { Text("Перезагрузить колонку?") },
-            text = { Text("Соединение по Bluetooth будет временно прервано на время загрузки.") },
+            text = { Text("Соединение по Bluetooth будет временно прервано на время перезагрузки.") },
             confirmButton = {
-                TextButton(onClick = {
+                Button(onClick = {
                     showRebootDialog = false
-                    client.sendCommand(JSONObject().put("cmd", "reboot"))
+                    client.reboot()
                 }) { Text("Перезагрузить") }
             },
             dismissButton = {
@@ -596,20 +486,4 @@ fun AtriOSApp() {
             }
         )
     }
-}
-
-@Composable
-private fun InfoRow(label: String, value: String) {
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-        Text(label, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Spacer(Modifier.width(12.dp))
-        Text(value, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Medium)
-    }
-}
-
-private fun formatUptime(sec: Int): String {
-    val h = sec / 3600
-    val m = (sec % 3600) / 60
-    val s = sec % 60
-    return if (h > 0) "${h}ч ${m}м ${s}с" else "${m}м ${s}с"
 }
