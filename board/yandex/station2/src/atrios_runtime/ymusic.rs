@@ -837,6 +837,129 @@ pub fn search_tracks_json(query: &str) -> Result<Vec<Json>, String> {
     Ok(search_catalog_json(query)?.0)
 }
 
+pub fn fetch_orbs_json() -> Result<Vec<Json>, String> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static ORB_CACHE: OnceLock<Mutex<(i64, Vec<Json>)>> = OnceLock::new();
+    let cache = ORB_CACHE.get_or_init(|| Mutex::new((0, Vec::new())));
+    let now = now_unix_i64();
+    if let Ok(g) = cache.lock() {
+        if !g.1.is_empty() && now - g.0 < 300 {
+            return Ok(g.1.clone());
+        }
+    }
+
+    let auth = load_auth().ok_or("Not logged in to Yandex Music")?;
+    let mut orbs: Vec<Json> = Vec::new();
+    let palette = [
+        "#6D4AFF", "#E65C00", "#FF1F8E", "#00C896", "#3D7EFF", "#FF6D00", "#B24BF3"
+    ];
+    let mut color_idx = 0usize;
+
+    // 1. Extract top favorite artists from user's Liked tracks (with real cover art!)
+    if let Ok(liked) = fetch_likes(&auth) {
+        let mut counts: HashMap<String, (usize, String)> = HashMap::new();
+        for tr in liked.iter().take(60) {
+            let main_artist = tr.artist.split(',').next().unwrap_or("").trim();
+            if main_artist.is_empty() {
+                continue;
+            }
+            let entry = counts
+                .entry(main_artist.to_string())
+                .or_insert_with(|| (0, tr.cover_url.clone()));
+            entry.0 += 1;
+            if entry.1.is_empty() && !tr.cover_url.is_empty() {
+                entry.1 = tr.cover_url.clone();
+            }
+        }
+        let mut ranked: Vec<(String, usize, String)> = counts
+            .into_iter()
+            .map(|(name, (cnt, cov))| (name, cnt, cov))
+            .collect();
+        ranked.sort_by(|a, b| b.1.cmp(&a.1));
+        for (artist, _cnt, cov) in ranked.into_iter().take(4) {
+            let col = palette[color_idx % palette.len()];
+            color_idx += 1;
+            orbs.push(obj(vec![
+                ("id", Json::Str(format!("artist:{artist}"))),
+                ("title", Json::Str(artist.clone())),
+                ("subtitle", Json::Str("Артист".into())),
+                ("mode", Json::Str("search".into())),
+                ("query", Json::Str(artist)),
+                ("cover_url", Json::Str(cov)),
+                ("color", Json::Str(col.into())),
+            ]));
+        }
+    }
+
+    // 2. Add personalized Yandex Music dashboard stations (/rotor/stations/dashboard)
+    if let Ok(resp) = api_get_json(&auth.token, "/rotor/stations/dashboard") {
+        if let Some(arr) = resp
+            .get("result")
+            .and_then(|r| r.get("stations"))
+            .and_then(|v| v.as_arr())
+        {
+            for item in arr.iter().take(5) {
+                let st = item.get("station");
+                let st_type = st.and_then(|s| s.get("id")).and_then(|i| i.get_str("type")).unwrap_or("");
+                let st_tag = st.and_then(|s| s.get("id")).and_then(|i| i.get_str("tag")).unwrap_or("");
+                let name = st.and_then(|s| s.get_str("name")).unwrap_or("").trim();
+                if st_type.is_empty() || st_tag.is_empty() || name.is_empty() || st_tag == "onyourwave" {
+                    continue;
+                }
+                let station_id = format!("{st_type}:{st_tag}");
+                let bg_color = st
+                    .and_then(|s| s.get("icon"))
+                    .and_then(|i| i.get_str("backgroundColor"))
+                    .filter(|c| c.starts_with('#'))
+                    .unwrap_or(palette[color_idx % palette.len()]);
+                color_idx += 1;
+                let cov = format_cover_url(
+                    st.and_then(|s| s.get("fullImageUrl").or_else(|| s.get("icon").and_then(|i| i.get("imageUrl"))))
+                        .and_then(|v| v.as_str())
+                );
+                orbs.push(obj(vec![
+                    ("id", Json::Str(format!("station:{station_id}"))),
+                    ("title", Json::Str(name.into())),
+                    ("subtitle", Json::Str("Волна".into())),
+                    ("mode", Json::Str("station".into())),
+                    ("query", Json::Str(station_id)),
+                    ("cover_url", Json::Str(cov)),
+                    ("color", Json::Str(bg_color.into())),
+                ]));
+            }
+        }
+    }
+
+    // Always append quick mood orbs if fewer than 6
+    let fallbacks = [
+        ("mood:party", "Вечериниться", "Настроение", "station", "mood:party", "#00C896"),
+        ("activity:workout", "Бегаю и не устаю", "Занятие", "station", "activity:workout", "#4C7CFF"),
+        ("likes", "Мне нравится", "Коллекция", "likes", "", "#FF1F8E"),
+        ("chart", "Тренды", "Чарт", "chart", "", "#FF4D00"),
+    ];
+    for (id, title, sub, mode, query, col) in fallbacks {
+        if orbs.len() >= 8 {
+            break;
+        }
+        orbs.push(obj(vec![
+            ("id", Json::Str(id.into())),
+            ("title", Json::Str(title.into())),
+            ("subtitle", Json::Str(sub.into())),
+            ("mode", Json::Str(mode.into())),
+            ("query", Json::Str(query.into())),
+            ("cover_url", Json::Str(String::new())),
+            ("color", Json::Str(col.into())),
+        ]));
+    }
+
+    if let Ok(mut g) = cache.lock() {
+        *g = (now, orbs.clone());
+    }
+    Ok(orbs)
+}
+
+
 fn resolve_track_stream_url(auth: &YMusicAuth, track_id: &str) -> Result<String, String> {
     let ep = format!("/tracks/{}/download-info", url_encode(track_id));
     let resp = api_get_json(&auth.token, &ep)?;
@@ -959,7 +1082,7 @@ impl ActivePipeline {
                 .map_err(|e| format!("mpg123 spawn failed: {e}"))?;
             let dec_out = dec.stdout.take().ok_or("Missing mpg123 stdout")?;
             let sink = Command::new("aplay")
-                .args(["-q", "-B", "80000", "-F", "20000", "-t", "raw", "-f", "S16_LE", "-r", "44100", "-c", "2"])
+                .args(["-q", "-B", "100000", "-F", "25000", "-t", "raw", "-f", "S16_LE", "-r", "44100", "-c", "2"])
                 .stdin(Stdio::from(dec_out))
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
@@ -1004,7 +1127,7 @@ impl ActivePipeline {
             let dec_in = dec.stdin.take().ok_or("Missing atri-mp3dec stdin")?;
             let dec_out = dec.stdout.take().ok_or("Missing atri-mp3dec stdout")?;
             let sink = Command::new("aplay")
-                .args(["-q", "-B", "80000", "-F", "20000", "-t", "raw", "-f", "S16_LE", "-r", "44100", "-c", "2"])
+                .args(["-q", "-B", "100000", "-F", "25000", "-t", "raw", "-f", "S16_LE", "-r", "44100", "-c", "2"])
                 .stdin(Stdio::from(dec_out))
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
@@ -1063,21 +1186,33 @@ impl ActivePipeline {
         if self.paused {
             self.set_paused(false);
         }
+        // Gracefully stop ALSA sink FIRST (SIGTERM=15) so PCM closes cleanly without DC pop/click
+        if let Some(mut s) = self.sink.take() {
+            unsafe {
+                kill(s.id() as i32, 15);
+            }
+            let deadline = std::time::Instant::now() + Duration::from_millis(80);
+            while std::time::Instant::now() < deadline {
+                if matches!(s.try_wait(), Ok(Some(_))) {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            unsafe {
+                kill(s.id() as i32, SIGKILL_NUM);
+            }
+            let _ = s.wait();
+        }
+        unsafe {
+            kill(self.decoder.id() as i32, SIGKILL_NUM);
+        }
+        let _ = self.decoder.wait();
         let _ = Command::new("pkill")
             .args(["-9", "-x", "atri-mp3dec"])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
-        unsafe {
-            kill(self.decoder.id() as i32, SIGKILL_NUM);
-            if let Some(ref s) = self.sink {
-                kill(s.id() as i32, SIGKILL_NUM);
-            }
-        }
-        let _ = self.decoder.wait();
-        if let Some(mut s) = self.sink {
-            let _ = s.wait();
-        }
+        thread::sleep(Duration::from_millis(25));
     }
 }
 

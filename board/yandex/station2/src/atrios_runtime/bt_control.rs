@@ -840,6 +840,21 @@ pub(crate) fn process_command(cmd_obj: &Json) -> Result<Json, String> {
                 ("ymusic", st.to_json()),
             ]))
         }
+        "ymusic_orbs" => {
+            match crate::ymusic::fetch_orbs_json() {
+                Ok(orbs) => Ok(obj(vec![
+                    ("type", Json::Str("ymusic_orbs_response".into())),
+                    ("success", Json::Bool(true)),
+                    ("orbs", Json::Arr(orbs)),
+                ])),
+                Err(e) => Ok(obj(vec![
+                    ("type", Json::Str("ymusic_orbs_response".into())),
+                    ("success", Json::Bool(false)),
+                    ("message", Json::Str(e)),
+                    ("orbs", Json::Arr(Vec::new())),
+                ])),
+            }
+        }
         "ymusic_search" => {
             let q = map.get("query").and_then(|v| v.as_str()).unwrap_or("").trim();
             if q.is_empty() {
@@ -1283,19 +1298,21 @@ fn device_relay_id() -> String {
 fn spawn_wifi_relay_worker() {
     thread::spawn(|| {
         let did = device_relay_id();
-        println!("[wifi-relay] worker started (device_id={did})");
+        println!("[wifi-relay] fast worker started (device_id={did})");
+        let mut last_full_status = std::time::Instant::now() - Duration::from_secs(60);
+        let mut cached_status = build_status_payload();
         loop {
             let cfg = crate::atriai::load_config();
             let base = cfg.server.trim().trim_end_matches('/').to_string();
             let token = cfg.token.trim().to_string();
-            let ca = if cfg.ca_file.is_empty() {
-                None
-            } else {
-                Some(cfg.ca_file.as_str())
-            };
+            let ca_owned = if cfg.ca_file.is_empty() { None } else { Some(cfg.ca_file.clone()) };
             if !base.starts_with("https://") || token.is_empty() {
-                thread::sleep(Duration::from_secs(10));
+                thread::sleep(Duration::from_secs(5));
                 continue;
+            }
+            if last_full_status.elapsed() >= Duration::from_secs(10) {
+                cached_status = build_status_payload();
+                last_full_status = std::time::Instant::now();
             }
             let ident = crate::hardware::device_identity();
             let auth = format!("Bearer {token}");
@@ -1310,38 +1327,51 @@ fn spawn_wifi_relay_worker() {
                 ("device_id", Json::Str(ident.device_id.clone())),
                 ("device_key", Json::Str(ident.device_key.clone())),
                 ("hw_hash", Json::Str(ident.hw_hash.clone())),
-                ("status", build_status_payload()),
+                ("status", cached_status.clone()),
             ]);
-            match crate::https::request_json(&poll_url, Some(&payload), &hdrs, ca, 30, 512 * 1024, None) {
+            match crate::https::request_json(&poll_url, Some(&payload), &hdrs, ca_owned.as_deref(), 25, 512 * 1024, None) {
                 Ok(resp) => {
-                    if let Some(cmd_id) = resp.get_str("cmd_id").filter(|s| !s.is_empty()) {
-                        if let Some(cmd_payload) = resp.get("payload") {
-                            let reply = match process_command(cmd_payload) {
-                                Ok(r) => r,
-                                Err(e) => obj(vec![
-                                    ("type", Json::Str("error".into())),
-                                    ("error", Json::Str(e)),
-                                ]),
-                            };
-                            let reply_url = format!("{base}/relay/v1/device/{}/reply", ident.device_id);
-                            let reply_body = obj(vec![
-                                ("cmd_id", Json::Str(cmd_id.to_string())),
-                                ("reply", reply),
-                            ]);
-                            let _ = crate::https::request_json(
-                                &reply_url,
-                                Some(&reply_body),
-                                &hdrs,
-                                ca,
-                                10,
-                                65536,
-                                None,
-                            );
+                    if let Some(cmd_id) = resp.get_str("cmd_id").filter(|s| !s.is_empty()).map(|s| s.to_string()) {
+                        if let Some(cmd_payload) = resp.get("payload").cloned() {
+                            // Execute & reply asynchronously so the poll loop re-enters /poll immediately (<20ms)!
+                            let base_c = base.clone();
+                            let auth_c = auth.clone();
+                            let ident_c = ident.clone();
+                            let ca_c = ca_owned.clone();
+                            thread::spawn(move || {
+                                let reply = match process_command(&cmd_payload) {
+                                    Ok(r) => r,
+                                    Err(e) => obj(vec![
+                                        ("type", Json::Str("error".into())),
+                                        ("error", Json::Str(e)),
+                                    ]),
+                                };
+                                let reply_url = format!("{base_c}/relay/v1/device/{}/reply", ident_c.device_id);
+                                let reply_body = obj(vec![
+                                    ("cmd_id", Json::Str(cmd_id)),
+                                    ("reply", reply),
+                                ]);
+                                let hdrs_c = [
+                                    ("Authorization", auth_c.as_str()),
+                                    ("X-Atri-Device-Id", ident_c.device_id.as_str()),
+                                    ("X-Atri-Device-Key", ident_c.device_key.as_str()),
+                                    ("X-Atri-Hw-Hash", ident_c.hw_hash.as_str()),
+                                ];
+                                let _ = crate::https::request_json(
+                                    &reply_url,
+                                    Some(&reply_body),
+                                    &hdrs_c,
+                                    ca_c.as_deref(),
+                                    10,
+                                    256 * 1024,
+                                    None,
+                                );
+                            });
                         }
                     }
                 }
                 Err(_) => {
-                    thread::sleep(Duration::from_secs(5));
+                    thread::sleep(Duration::from_millis(500));
                 }
             }
         }
