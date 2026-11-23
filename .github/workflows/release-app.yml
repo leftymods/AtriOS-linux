@@ -28,6 +28,20 @@ jobs:
           gradle-version: '8.11'
       - name: Build Debug APK
         run: gradle assembleDebug --no-daemon
+      - name: Checkout mainline runtime sources
+        uses: actions/checkout@v4
+        with:
+          ref: mainline
+          path: mainline_src
+      - name: Cross-compile aarch64 atrios-runtime
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+          rustup target add aarch64-unknown-linux-gnu
+          cd mainline_src/board/yandex/station2/src/atrios_runtime
+          rustc --edition=2021 --test main.rs -o /tmp/atrios_runtime_test
+          /tmp/atrios_runtime_test
+          rustc --edition=2021 -C opt-level=2 --target aarch64-unknown-linux-gnu -C linker=aarch64-linux-gnu-gcc main.rs -o "$GITHUB_WORKSPACE/atrios-runtime-aarch64"
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -36,7 +50,7 @@ jobs:
           VER="${TAG#app-v}"
           APK_OUT="AtriOS-Control-v${VER}.apk"
           cp app/build/outputs/apk/debug/app-debug.apk "$APK_OUT"
-          gh release create "$TAG" "$APK_OUT" \
+          gh release create "$TAG" "$APK_OUT" atrios-runtime-aarch64 \
             --title "AtriOS Control v${VER}" \
             --notes "AtriOS Control v${VER}: multi-speaker UI, phone OTA check/install/rollback, timers & alarms, NTP/timezone sync, Bluetooth speaker controls, and Qwen3-TTS voice/emotion settings." \
-            || gh release upload "$TAG" "$APK_OUT" --clobber
+            || gh release upload "$TAG" "$APK_OUT" atrios-runtime-aarch64 --clobber
