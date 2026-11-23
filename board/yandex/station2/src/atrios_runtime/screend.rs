@@ -62,6 +62,7 @@ pub fn run(_args: &[String]) -> i32 {
     let mut last_rendered = String::new();
     let mut last_bt: Option<bool> = None;
     let mut last_tz: Option<std::path::PathBuf> = None;
+    let mut prev_timer: Option<(u64, u64)> = None;
     let t0 = Instant::now();
 
     loop {
@@ -92,6 +93,7 @@ pub fn run(_args: &[String]) -> i32 {
         }
         let bt = is_bt_active();
         if let Some((rem, total)) = active_displayed_timer() {
+            prev_timer = Some((rem, total));
             let colon_on = (t0.elapsed().as_millis() / 500) % 2 == 0;
             let key = format!("T:{rem}:{total}:{colon_on}:{bt}");
             if key != last_rendered {
@@ -102,6 +104,18 @@ pub fn run(_args: &[String]) -> i32 {
             }
             thread::sleep(Duration::from_millis(250));
             continue;
+        }
+        // Smooth slide-down + fade-out hide transition when timer auto-hides after 5s
+        if let Some((rem, total)) = prev_timer.take() {
+            for step in 1..=8 {
+                let p = step as f64 / 8.0;
+                let y_off = 2 + (12.0 * p * p).round() as isize;
+                let br = ((1.0 - p) * 200.0).round().clamp(0.0, 200.0) as u8;
+                let buf = render_timer_frame(rem, total, true, bt, br, y_off, None);
+                screen_send_frame_raw(&buf);
+                thread::sleep(Duration::from_millis(40));
+            }
+            last_rendered.clear();
         }
 
         let now = format_local("%H:%M", None);

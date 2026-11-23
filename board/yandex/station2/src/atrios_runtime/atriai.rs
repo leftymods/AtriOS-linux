@@ -2256,8 +2256,20 @@ fn send_phrase_to_server(
             return Ok((text, String::new(), false));
         }
         if let Some(intent) = crate::local_ai::parse_local_intent(&text, wake_word) {
+            let is_timer_ui = matches!(
+                intent,
+                crate::local_ai::LocalIntent::SetTimer { .. }
+                    | crate::local_ai::LocalIntent::ShowTimer { .. }
+                    | crate::local_ai::LocalIntent::QueryTimers
+                    | crate::local_ai::LocalIntent::CancelTimers { .. }
+            );
             crate::local_ai::execute_local_intent(intent);
             set_error("voice", None, "", 15);
+            if is_timer_ui {
+                // Keep LED matrix on timer display (no 3-dots vad/thinking takeover)
+                keep_listening = false;
+                return Ok((text, String::new(), false));
+            }
             if !has_trailing_stop && force_active {
                 keep_listening = true;
                 set_vad_visual("vad", false, "default");

@@ -161,6 +161,37 @@ pub fn plan_voice_clips(text: &str) -> Option<Vec<&'static str>> {
         return Some(vec![k]);
     }
 
+    // 1b. Multi-timer phrasing: "у вас установлен таймер на <dur> осталось <dur> [а также на <dur> осталось <dur> ...]"
+    if let Some(rest_multi) = norm.strip_prefix("у вас установлен таймер на ") {
+        let mut clips: Vec<&'static str> = vec!["lead_you_have_timer"];
+        let segments: Vec<&str> = rest_multi.split(" а также на ").collect();
+        let mut ok_all = true;
+        for (idx, seg) in segments.iter().enumerate() {
+            if idx > 0 {
+                clips.push("conn_also");
+            }
+            if let Some((tot_s, rem_s)) = seg.split_once(" осталось ") {
+                let tot_toks: Vec<&str> = tot_s.split_whitespace().collect();
+                let rem_toks: Vec<&str> = rem_s.split_whitespace().collect();
+                if !parse_time_or_duration_tokens(&tot_toks, &mut clips) {
+                    ok_all = false;
+                    break;
+                }
+                clips.push("conn_rem");
+                if !parse_time_or_duration_tokens(&rem_toks, &mut clips) {
+                    ok_all = false;
+                    break;
+                }
+            } else {
+                ok_all = false;
+                break;
+            }
+        }
+        if ok_all && clips.len() > 1 {
+            return Some(clips);
+        }
+    }
+
     // 2. Dynamic time / timer / alarm phrases
     let mut clips: Vec<&'static str> = Vec::new();
     let rest_str = if let Some(r) = norm.strip_prefix("сейчас ") {

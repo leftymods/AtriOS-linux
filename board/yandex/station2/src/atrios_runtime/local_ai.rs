@@ -13,7 +13,7 @@ use crate::sys::{atomic_write_bytes, format_local, kill, now_unix_i64};
 
 const TIMERS_FILE: &str = "/var/run/atrios/timers.json";
 const TIMER_DISPLAY_FILE: &str = "/var/run/atrios/timer_display.json";
-const TIMER_DISPLAY_DEFAULT_SECS: i64 = 10;
+const TIMER_DISPLAY_DEFAULT_SECS: i64 = 5;
 const ALARMS_FILE: &str = "/var/lib/atrios/alarms.json";
 
 static ALERT_RINGING: AtomicBool = AtomicBool::new(false);
@@ -792,16 +792,13 @@ pub fn execute_local_intent(intent: LocalIntent) {
                 picked.id, picked.total_secs, rem
             );
             show_timer_popup_async("timer_set", Some(rem.to_string()));
-            let spoken = if pin {
-                format!("Оставила таймер на экране. Осталось {}.", format_duration_ru(rem))
-            } else {
-                format!("До конца таймера осталось {}.", format_duration_ru(rem))
-            };
+            let spoken = format!(
+                "У вас установлен таймер на {}, осталось {}.",
+                format_duration_ru(picked.total_secs),
+                format_duration_ru(rem)
+            );
             if !speak_via_remote_tts(&spoken, "neutral", true) {
-                let fallback = format!("До конца таймера осталось {}.", format_duration_ru(rem));
-                if !speak_via_remote_tts(&fallback, "neutral", true) {
-                    play_command_chime("tick");
-                }
+                play_command_chime("tick");
             }
         }
         LocalIntent::HideTimerDisplay => {
@@ -909,35 +906,27 @@ pub fn execute_local_intent(intent: LocalIntent) {
             let first_rem = (first.fire_at - now).max(1) as u64;
             set_timer_display(first.id, false);
             show_timer_popup_async("timer_set", Some(first_rem.to_string()));
-            if active.len() == 1 {
-                let spoken = format!("До конца таймера осталось {}.", format_duration_ru(first_rem));
-                println!("[local-ai] query timers (1) -> {spoken}");
-                if !speak_via_remote_tts(&spoken, "neutral", true) {
-                    play_command_chime("tick");
-                }
-            } else {
-                let mut parts = vec![format!(
-                    "Сейчас {} {}.",
-                    active.len(),
-                    ru_plural(active.len() as u64, "таймер", "таймера", "таймеров")
-                )];
-                for t in &active {
-                    let r = (t.fire_at - now).max(1) as u64;
+            let mut parts: Vec<String> = Vec::new();
+            for (idx, t) in active.iter().enumerate() {
+                let r = (t.fire_at - now).max(1) as u64;
+                if idx == 0 {
                     parts.push(format!(
-                        "На {} — осталось {}.",
+                        "У вас установлен таймер на {}, осталось {}",
+                        format_duration_ru(t.total_secs),
+                        format_duration_ru(r)
+                    ));
+                } else {
+                    parts.push(format!(
+                        "а также на {}, осталось {}",
                         format_duration_ru(t.total_secs),
                         format_duration_ru(r)
                     ));
                 }
-                let spoken = parts.join(" ");
-                println!("[local-ai] query timers ({}) -> {spoken}", active.len());
-                if !speak_via_remote_tts(&spoken, "neutral", true) {
-                    for t in &active {
-                        let r = (t.fire_at - now).max(1) as u64;
-                        let s_one = format!("До конца таймера осталось {}.", format_duration_ru(r));
-                        let _ = speak_via_remote_tts(&s_one, "neutral", true);
-                    }
-                }
+            }
+            let spoken = format!("{}.", parts.join(", "));
+            println!("[local-ai] query timers ({}) -> {spoken}", active.len());
+            if !speak_via_remote_tts(&spoken, "neutral", true) {
+                play_command_chime("tick");
             }
         }
         LocalIntent::SetAlarm { hour, minute } => {
