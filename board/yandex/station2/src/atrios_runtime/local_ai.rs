@@ -42,7 +42,7 @@ pub enum LocalIntent {
     SetTimer { secs: u64 },
     ShowTimer { target_secs: Option<u64>, index: Option<usize>, pin: bool },
     HideTimerDisplay,
-    CancelTimers { target_secs: Option<u64>, index: Option<usize> },
+    CancelTimers { target_secs: Option<u64>, index: Option<usize>, all: bool },
     QueryTimers,
     SetAlarm { hour: u8, minute: u8 },
     CancelAlarms,
@@ -530,10 +530,12 @@ pub fn parse_local_intent(text: &str, wake_word: &str) -> Option<LocalIntent> {
         let tail = timer_pos.map(|p| &words[p + 1..]).unwrap_or(&words[..]);
         let dur = parse_russian_duration_secs(tail).or_else(|| parse_russian_duration_secs(&words));
         if has_cancel {
-            let cancel_all = words.iter().any(|&w| matches!(w, "все" | "всё"));
+            let explicit_all = words.iter().any(|&w| matches!(w, "все" | "всё" | "таймеры" | "таймеров"));
+            let cancel_all = explicit_all && dur.is_none() && ordinal_idx.is_none();
             return Some(LocalIntent::CancelTimers {
                 target_secs: if cancel_all { None } else { dur },
                 index: if cancel_all { None } else { ordinal_idx },
+                all: cancel_all,
             });
         }
         if (has_show || has_pin) && !has_set_verb {
@@ -804,8 +806,8 @@ pub fn execute_local_intent(intent: LocalIntent) {
                 play_command_chime("tick");
             }
         }
-        LocalIntent::CancelTimers { target_secs, index } => {
-            if target_secs.is_none() && index.is_none() {
+        LocalIntent::CancelTimers { target_secs, index, all } => {
+            if all {
                 {
                     let mut s = store().lock().unwrap();
                     s.timers.clear();
@@ -838,7 +840,17 @@ pub fn execute_local_intent(intent: LocalIntent) {
                     } else if let Some(ord) = index {
                         active_indices.get(ord).copied()
                     } else {
-                        None
+                        // Singular "удали таймер": remove currently displayed timer if active, else soonest
+                        let cur_disp_id = fs::read_to_string(TIMER_DISPLAY_FILE)
+                            .ok()
+                            .and_then(|raw| Json::parse(&raw).ok())
+                            .and_then(|j| j.get("timer_id").and_then(|v| v.as_i64()))
+                            .unwrap_or(0) as u64;
+                        active_indices
+                            .iter()
+                            .copied()
+                            .find(|&i| s.timers[i].id == cur_disp_id)
+                            .or_else(|| active_indices.first().copied())
                     };
                     let rem_item = pos.map(|i| s.timers.remove(i));
                     if rem_item.is_some() {
