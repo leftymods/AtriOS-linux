@@ -113,6 +113,29 @@ pub(crate) fn build_stream_url(host: &str, codec: &str, path: &str, ts: &str, s:
     format!("https://{host}/get-{c}/{sign}/{ts}/{trimmed}")
 }
 
+fn format_cover_url(uri: Option<&str>) -> String {
+    let Some(u) = uri else { return String::new(); };
+    let u = u.trim();
+    if u.is_empty() {
+        return String::new();
+    }
+    let replaced = u.replace("%%", "200x200");
+    if replaced.starts_with("http://") || replaced.starts_with("https://") {
+        replaced
+    } else {
+        format!("https://{}", replaced.trim_start_matches('/'))
+    }
+}
+
+fn format_avatar_url(avatar_id: Option<&str>) -> String {
+    let Some(id) = avatar_id else { return String::new(); };
+    let id = id.trim();
+    if id.is_empty() {
+        return String::new();
+    }
+    format!("https://avatars.yandex.net/get-yapic/{id}/islands-200")
+}
+
 fn url_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len() * 2);
     for &b in s.as_bytes() {
@@ -161,6 +184,7 @@ pub struct YMusicAuth {
     pub uid: i64,
     pub login: String,
     pub display_name: String,
+    pub avatar_url: String,
 }
 
 #[derive(Clone, Debug)]
@@ -169,8 +193,19 @@ pub struct TrackInfo {
     pub title: String,
     pub artist: String,
     pub album: String,
+    pub cover_url: String,
     pub duration_ms: i64,
     pub liked: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct AlbumInfo {
+    pub id: String,
+    pub title: String,
+    pub artist: String,
+    pub year: i64,
+    pub track_count: i64,
+    pub cover_url: String,
 }
 
 #[derive(Clone, Debug)]
@@ -178,6 +213,7 @@ pub struct YMusicStatus {
     pub logged_in: bool,
     pub login: String,
     pub display_name: String,
+    pub avatar_url: String,
     pub uid: i64,
     pub state: String,
     pub mode: String,
@@ -185,6 +221,7 @@ pub struct YMusicStatus {
     pub title: String,
     pub artist: String,
     pub album: String,
+    pub cover_url: String,
     pub duration_ms: i64,
     pub liked: bool,
     pub error: Option<String>,
@@ -198,6 +235,7 @@ impl YMusicStatus {
             logged_in: auth.is_some(),
             login: auth.as_ref().map(|a| a.login.clone()).unwrap_or_default(),
             display_name: auth.as_ref().map(|a| a.display_name.clone()).unwrap_or_default(),
+            avatar_url: auth.as_ref().map(|a| a.avatar_url.clone()).unwrap_or_default(),
             uid: auth.as_ref().map(|a| a.uid).unwrap_or(0),
             state: "idle".into(),
             mode: "none".into(),
@@ -205,6 +243,7 @@ impl YMusicStatus {
             title: String::new(),
             artist: String::new(),
             album: String::new(),
+            cover_url: String::new(),
             duration_ms: 0,
             liked: false,
             error: None,
@@ -236,6 +275,9 @@ impl YMusicStatus {
         if let Some(s) = j.get_str("album") {
             st.album = s.into();
         }
+        if let Some(s) = j.get_str("cover_url") {
+            st.cover_url = s.into();
+        }
         if let Some(n) = j.get("duration_ms").and_then(|v| v.as_i64()) {
             st.duration_ms = n.max(0);
         }
@@ -255,11 +297,13 @@ impl YMusicStatus {
             st.logged_in = true;
             st.login = auth.login;
             st.display_name = auth.display_name;
+            st.avatar_url = auth.avatar_url;
             st.uid = auth.uid;
         } else {
             st.logged_in = false;
             st.login.clear();
             st.display_name.clear();
+            st.avatar_url.clear();
             st.uid = 0;
         }
         st
@@ -270,6 +314,7 @@ impl YMusicStatus {
             ("logged_in", Json::Bool(self.logged_in)),
             ("login", Json::Str(self.login.clone())),
             ("display_name", Json::Str(self.display_name.clone())),
+            ("avatar_url", Json::Str(self.avatar_url.clone())),
             ("uid", Json::Num(self.uid as f64)),
             ("state", Json::Str(self.state.clone())),
             ("mode", Json::Str(self.mode.clone())),
@@ -277,6 +322,7 @@ impl YMusicStatus {
             ("title", Json::Str(self.title.clone())),
             ("artist", Json::Str(self.artist.clone())),
             ("album", Json::Str(self.album.clone())),
+            ("cover_url", Json::Str(self.cover_url.clone())),
             ("duration_ms", Json::Num(self.duration_ms as f64)),
             ("liked", Json::Bool(self.liked)),
             (
@@ -300,6 +346,7 @@ pub fn load_auth_at(path: &Path) -> Option<YMusicAuth> {
         uid: j.get("uid").and_then(|v| v.as_i64()).unwrap_or(0),
         login: j.get_str("login").unwrap_or("").to_string(),
         display_name: j.get_str("display_name").unwrap_or("").to_string(),
+        avatar_url: j.get_str("avatar_url").unwrap_or("").to_string(),
     })
 }
 
@@ -316,6 +363,7 @@ pub fn save_auth_at(path: &Path, auth: &YMusicAuth) -> Result<(), String> {
         ("uid", Json::Num(auth.uid as f64)),
         ("login", Json::Str(auth.login.clone())),
         ("display_name", Json::Str(auth.display_name.clone())),
+        ("avatar_url", Json::Str(auth.avatar_url.clone())),
     ]);
     let body = format!("{}\n", j.to_string_pretty());
     atomic_write_bytes(path, body.as_bytes(), 0o600, true).map_err(|e| e.to_string())
@@ -424,11 +472,17 @@ pub fn login_with_token(raw_token: &str) -> Result<YMusicStatus, String> {
         .or_else(|| acc.get_str("fullName"))
         .unwrap_or(&login)
         .to_string();
+    let avatar_url = format_avatar_url(
+        resp.get("result")
+            .and_then(|r| r.get("defaultAvatarId").or_else(|| acc.get("defaultAvatarId")))
+            .and_then(|v| v.as_str())
+    );
     let auth = YMusicAuth {
         token: token.to_string(),
         uid,
         login: login.clone(),
         display_name: display_name.clone(),
+        avatar_url: avatar_url.clone(),
     };
     save_auth_at(Path::new(YMUSIC_CONFIG_FILE), &auth)?;
     let mut st = read_status();
@@ -436,6 +490,7 @@ pub fn login_with_token(raw_token: &str) -> Result<YMusicStatus, String> {
     st.uid = uid;
     st.login = login;
     st.display_name = display_name;
+    st.avatar_url = avatar_url;
     st.error = None;
     write_status(&mut st);
     Ok(st)
@@ -469,15 +524,13 @@ fn parse_track_json(t: &Json, liked_default: bool) -> Option<TrackInfo> {
                 .join(", ")
         })
         .unwrap_or_default();
-    let album = t
-        .get("albums")
-        .and_then(|a| a.as_arr())
-        .and_then(|arr| arr.first())
-        .and_then(|al| al.get_str("title"))
-        .unwrap_or("")
-        .to_string();
+    let first_album = t.get("albums").and_then(|a| a.as_arr()).and_then(|arr| arr.first());
+    let album = first_album.and_then(|al| al.get_str("title")).unwrap_or("").to_string();
+    let cover_url = format_cover_url(
+        t.get_str("coverUri").or_else(|| first_album.and_then(|al| al.get_str("coverUri")))
+    );
     let duration_ms = t.get("durationMs").and_then(|v| v.as_i64()).unwrap_or(0);
-    Some(TrackInfo { id, title, artist, album, duration_ms, liked: liked_default })
+    Some(TrackInfo { id, title, artist, album, cover_url, duration_ms, liked: liked_default })
 }
 
 /// MarshalX rotor_station_tracks: works for user:onyourwave, genre:*, mood:*, activity:*
@@ -671,22 +724,117 @@ fn fetch_single_track(auth: &YMusicAuth, track_id: &str) -> Result<Vec<TrackInfo
     Ok(tracks)
 }
 
-pub fn search_tracks_json(query: &str) -> Result<Vec<Json>, String> {
+fn parse_album_json(al: &Json) -> Option<AlbumInfo> {
+    let id = match al.get("id") {
+        Some(Json::Str(s)) if !s.is_empty() => s.clone(),
+        Some(Json::Num(n)) => format!("{}", *n as i64),
+        _ => return None,
+    };
+    let title = al.get_str("title").unwrap_or("Unknown Album").to_string();
+    let artist = al
+        .get("artists")
+        .and_then(|a| a.as_arr())
+        .map(|arr| arr.iter().filter_map(|x| x.get_str("name")).collect::<Vec<_>>().join(", "))
+        .unwrap_or_default();
+    let year = al.get("year").and_then(|v| v.as_i64()).unwrap_or(0);
+    let track_count = al.get("trackCount").and_then(|v| v.as_i64()).unwrap_or(0);
+    let cover_url = format_cover_url(al.get_str("coverUri"));
+    Some(AlbumInfo { id, title, artist, year, track_count, cover_url })
+}
+
+fn fetch_album_tracks(auth: &YMusicAuth, album_id: &str) -> Result<Vec<TrackInfo>, String> {
+    let aid = album_id.trim();
+    if aid.is_empty() {
+        return Err("Empty album_id".into());
+    }
+    let ep = format!("/albums/{}/with-tracks", url_encode(aid));
+    let resp = api_get_json(&auth.token, &ep)?;
+    let res = resp.get("result").ok_or("Album not found")?;
+    let album_cover = format_cover_url(res.get_str("coverUri"));
+    let album_title = res.get_str("title").unwrap_or("").to_string();
+    let mut tracks = Vec::new();
+    if let Some(vols) = res.get("volumes").and_then(|v| v.as_arr()) {
+        for vol in vols {
+            if let Some(arr) = vol.as_arr() {
+                for item in arr {
+                    if let Some(mut tr) = parse_track_json(item, false) {
+                        if tr.cover_url.is_empty() {
+                            tr.cover_url = album_cover.clone();
+                        }
+                        if tr.album.is_empty() {
+                            tr.album = album_title.clone();
+                        }
+                        tracks.push(tr);
+                    }
+                }
+            }
+        }
+    }
+    if tracks.is_empty() {
+        return Err("Album has no playable tracks".into());
+    }
+    Ok(tracks)
+}
+
+pub fn search_catalog_json(query: &str) -> Result<(Vec<Json>, Vec<Json>), String> {
     let auth = load_auth().ok_or("Not logged in to Yandex Music")?;
-    let tracks = fetch_search(&auth, query)?;
-    Ok(tracks
-        .into_iter()
-        .take(12)
-        .map(|t| {
-            obj(vec![
-                ("id", Json::Str(t.id)),
-                ("title", Json::Str(t.title)),
-                ("artist", Json::Str(t.artist)),
-                ("album", Json::Str(t.album)),
-                ("duration_ms", Json::Num(t.duration_ms as f64)),
-            ])
+    let q = query.trim();
+    if q.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let ep = format!("/search?type=all&page=0&nocorrect=false&text={}", url_encode(q));
+    let resp = api_get_json(&auth.token, &ep)?;
+    let res = resp.get("result").ok_or("Empty search result")?;
+
+    let tracks: Vec<Json> = res
+        .get("tracks")
+        .and_then(|t| t.get("results"))
+        .and_then(|v| v.as_arr())
+        .map(|arr| {
+            arr.iter()
+                .take(12)
+                .filter_map(|t| parse_track_json(t, false))
+                .map(|t| {
+                    obj(vec![
+                        ("id", Json::Str(t.id)),
+                        ("title", Json::Str(t.title)),
+                        ("artist", Json::Str(t.artist)),
+                        ("album", Json::Str(t.album)),
+                        ("cover_url", Json::Str(t.cover_url)),
+                        ("duration_ms", Json::Num(t.duration_ms as f64)),
+                    ])
+                })
+                .collect()
         })
-        .collect())
+        .unwrap_or_default();
+
+    let albums: Vec<Json> = res
+        .get("albums")
+        .and_then(|a| a.get("results"))
+        .and_then(|v| v.as_arr())
+        .map(|arr| {
+            arr.iter()
+                .take(8)
+                .filter_map(parse_album_json)
+                .map(|a| {
+                    obj(vec![
+                        ("id", Json::Str(a.id)),
+                        ("title", Json::Str(a.title)),
+                        ("artist", Json::Str(a.artist)),
+                        ("year", Json::Num(a.year as f64)),
+                        ("track_count", Json::Num(a.track_count as f64)),
+                        ("cover_url", Json::Str(a.cover_url)),
+                    ])
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Ok((tracks, albums))
+}
+
+pub fn search_tracks_json(query: &str) -> Result<Vec<Json>, String> {
+    Ok(search_catalog_json(query)?.0)
 }
 
 fn resolve_track_stream_url(auth: &YMusicAuth, track_id: &str) -> Result<String, String> {
@@ -697,18 +845,25 @@ fn resolve_track_stream_url(auth: &YMusicAuth, track_id: &str) -> Result<String,
         .and_then(|r| r.as_arr())
         .ok_or("Track has no download-info")?;
 
-    // Prefer MP3 with highest bitrate, fallback to any codec
-    let mut best: Option<(&Json, bool, i64)> = None;
+    // Prefer 192 kbps MP3 for fastest playback startup on speaker, fallback to any MP3 / codec
+    let mut best: Option<(&Json, i32)> = None;
     for info in infos {
         let codec = info.get_str("codec").unwrap_or("");
         let is_mp3 = codec.eq_ignore_ascii_case("mp3");
         let bitrate = info.get("bitrateInKbps").and_then(|v| v.as_i64()).unwrap_or(0);
-        let better = match best {
-            None => true,
-            Some((_, prev_mp3, prev_br)) => (is_mp3 && !prev_mp3) || (is_mp3 == prev_mp3 && bitrate > prev_br),
+        let score = if is_mp3 {
+            match bitrate {
+                192 => 100,
+                128 => 90,
+                320 => 80,
+                b if b > 0 => 70,
+                _ => 60,
+            }
+        } else {
+            10
         };
-        if better {
-            best = Some((info, is_mp3, bitrate));
+        if best.map(|(_, ps)| score > ps).unwrap_or(true) {
+            best = Some((info, score));
         }
     }
     let chosen = best.ok_or("No playable audio stream for track")?.0;
@@ -804,7 +959,7 @@ impl ActivePipeline {
                 .map_err(|e| format!("mpg123 spawn failed: {e}"))?;
             let dec_out = dec.stdout.take().ok_or("Missing mpg123 stdout")?;
             let sink = Command::new("aplay")
-                .args(["-q", "-B", "150000", "-t", "raw", "-f", "S16_LE", "-r", "44100", "-c", "2"])
+                .args(["-q", "-B", "80000", "-F", "20000", "-t", "raw", "-f", "S16_LE", "-r", "44100", "-c", "2"])
                 .stdin(Stdio::from(dec_out))
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
@@ -849,7 +1004,7 @@ impl ActivePipeline {
             let dec_in = dec.stdin.take().ok_or("Missing atri-mp3dec stdin")?;
             let dec_out = dec.stdout.take().ok_or("Missing atri-mp3dec stdout")?;
             let sink = Command::new("aplay")
-                .args(["-q", "-B", "150000", "-t", "raw", "-f", "S16_LE", "-r", "44100", "-c", "2"])
+                .args(["-q", "-B", "80000", "-F", "20000", "-t", "raw", "-f", "S16_LE", "-r", "44100", "-c", "2"])
                 .stdin(Stdio::from(dec_out))
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
@@ -933,6 +1088,7 @@ struct PlayerState {
     queue: Vec<TrackInfo>,
     index: usize,
     pipeline: Option<ActivePipeline>,
+    prefetch: std::sync::Arc<std::sync::Mutex<Option<(String, String)>>>,
     status: YMusicStatus,
 }
 
@@ -944,6 +1100,7 @@ impl PlayerState {
             queue: Vec::new(),
             index: 0,
             pipeline: None,
+            prefetch: std::sync::Arc::new(std::sync::Mutex::new(None)),
             status: YMusicStatus::default_idle(),
         }
     }
@@ -977,24 +1134,48 @@ impl PlayerState {
         self.status.uid = auth.uid;
         self.status.login = auth.login.clone();
         self.status.display_name = auth.display_name.clone();
+        self.status.avatar_url = auth.avatar_url.clone();
         self.status.mode = self.mode.clone();
         self.status.state = "loading".into();
         self.status.track_id = track.id.clone();
         self.status.title = track.title.clone();
         self.status.artist = track.artist.clone();
         self.status.album = track.album.clone();
+        self.status.cover_url = track.cover_url.clone();
         self.status.duration_ms = track.duration_ms;
         self.status.liked = track.liked;
         self.status.error = None;
         write_status(&mut self.status);
 
-        match resolve_track_stream_url(&auth, &track.id).and_then(|url| ActivePipeline::spawn(&url)) {
+        let cached_url = self.prefetch.lock().ok().and_then(|mut g| {
+            if g.as_ref().map(|(id, _)| id == &track.id).unwrap_or(false) {
+                g.take().map(|(_, u)| u)
+            } else {
+                None
+            }
+        });
+        let stream_res = match cached_url {
+            Some(u) => Ok(u),
+            None => resolve_track_stream_url(&auth, &track.id),
+        };
+        match stream_res.and_then(|url| ActivePipeline::spawn(&url)) {
             Ok(pipe) => {
                 self.pipeline = Some(pipe);
                 self.status.state = "playing".into();
                 self.status.error = None;
                 write_status(&mut self.status);
                 println!("[ymusic] Playing: {} — {}", track.artist, track.title);
+                if let Some(nxt) = self.queue.get(self.index + 1).cloned() {
+                    let pf = self.prefetch.clone();
+                    let auth_c = auth.clone();
+                    thread::spawn(move || {
+                        if let Ok(u) = resolve_track_stream_url(&auth_c, &nxt.id) {
+                            if let Ok(mut g) = pf.lock() {
+                                *g = Some((nxt.id, u));
+                            }
+                        }
+                    });
+                }
                 if self.mode == "wave" {
                     send_rotor_feedback(&auth, &self.batch_id, "trackStarted", Some(&track.id));
                 }
@@ -1044,6 +1225,7 @@ impl PlayerState {
             "playlist" => fetch_user_playlist(&auth, query.unwrap_or("")),
             "search" => fetch_search(&auth, query.unwrap_or("")),
             "track" => fetch_single_track(&auth, query.unwrap_or("")),
+            "album" => fetch_album_tracks(&auth, query.unwrap_or("")),
             _ => Err(format!("Unsupported mode: {mode}")),
         };
         match res {
@@ -1109,6 +1291,16 @@ impl PlayerState {
             self.load_mode("wave", None);
         } else if cmd == "play:likes" {
             self.load_mode("likes", None);
+        } else if cmd == "play:chart" {
+            self.load_mode("chart", None);
+        } else if let Some(st) = cmd.strip_prefix("play:station:") {
+            self.load_mode("station", Some(st));
+        } else if let Some(pl) = cmd.strip_prefix("play:playlist:") {
+            self.load_mode("playlist", Some(pl));
+        } else if let Some(tid) = cmd.strip_prefix("play:track:") {
+            self.load_mode("track", Some(tid));
+        } else if let Some(aid) = cmd.strip_prefix("play:album:") {
+            self.load_mode("album", Some(aid));
         } else if let Some(q) = cmd.strip_prefix("play:search:") {
             self.load_mode("search", Some(q));
         } else if cmd == "pause" {
@@ -1272,6 +1464,13 @@ pub fn trigger_play(mode: &str, query: Option<&str>) -> Result<YMusicStatus, Str
                 return Err("Missing track_id".into());
             }
             format!("play:track:{tid}")
+        }
+        "album" => {
+            let aid = query.unwrap_or("").trim();
+            if aid.is_empty() {
+                return Err("Missing album_id".into());
+            }
+            format!("play:album:{aid}")
         }
         "search" => {
             let q = query.unwrap_or("").trim();

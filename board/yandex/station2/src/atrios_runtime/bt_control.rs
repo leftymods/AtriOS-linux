@@ -613,9 +613,13 @@ pub(crate) fn process_command(cmd_obj: &Json) -> Result<Json, String> {
             let generation = {
                 let _g = SCREEN_LOCK.lock().unwrap();
                 let gen = SCREEN_GEN.fetch_add(1, Ordering::SeqCst) + 1;
-                for pat in ["/usr/lib/atrios/light screen", "/usr/bin/atrios screen"] {
+                for pat in [
+                    "/usr/lib/atrios/light screen",
+                    "/usr/bin/atrios screen",
+                    "/usr/lib/atrios/atrios-runtime screen",
+                ] {
                     let _ = Command::new("pkill")
-                        .args(["-f", pat])
+                        .args(["-9", "-f", pat])
                         .stdout(Stdio::null())
                         .stderr(Stdio::null())
                         .status();
@@ -624,6 +628,27 @@ pub(crate) fn process_command(cmd_obj: &Json) -> Result<Json, String> {
                     let _ = fs::remove_file("/var/run/atrios/timer_display.json");
                 }
                 set_screen_mode(mode);
+                if mode == "clock" {
+                    // Immediately push a live clock frame so animation never stays frozen on /dev/fb0
+                    let now_hm = crate::sys::format_local("%H:%M", None);
+                    let buf = crate::light::render_clock_frame(&now_hm, crate::light::is_bt_active(), 200);
+                    crate::light::screen_send_frame_raw(&buf);
+                    // Ensure screend daemon is running to keep updating the clock every minute
+                    let screend_alive = Command::new("pgrep")
+                        .args(["-f", "/usr/lib/atrios/screend"])
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .status()
+                        .map(|s| s.success())
+                        .unwrap_or(false);
+                    if !screend_alive {
+                        let _ = Command::new("/usr/lib/atrios/screend")
+                            .stdin(Stdio::null())
+                            .stdout(Stdio::null())
+                            .stderr(Stdio::null())
+                            .spawn();
+                    }
+                }
                 if mode == "ticker" {
                     let text: String = map
                         .get("text")
@@ -821,20 +846,23 @@ pub(crate) fn process_command(cmd_obj: &Json) -> Result<Json, String> {
                     ("type", Json::Str("ymusic_search_response".into())),
                     ("success", Json::Bool(true)),
                     ("tracks", Json::Arr(Vec::new())),
+                    ("albums", Json::Arr(Vec::new())),
                 ]))
             } else {
-                match crate::ymusic::search_tracks_json(q) {
-                    Ok(tracks) => Ok(obj(vec![
+                match crate::ymusic::search_catalog_json(q) {
+                    Ok((tracks, albums)) => Ok(obj(vec![
                         ("type", Json::Str("ymusic_search_response".into())),
                         ("success", Json::Bool(true)),
                         ("query", Json::Str(q.into())),
                         ("tracks", Json::Arr(tracks)),
+                        ("albums", Json::Arr(albums)),
                     ])),
                     Err(e) => Ok(obj(vec![
                         ("type", Json::Str("ymusic_search_response".into())),
                         ("success", Json::Bool(false)),
                         ("message", Json::Str(e)),
                         ("tracks", Json::Arr(Vec::new())),
+                        ("albums", Json::Arr(Vec::new())),
                     ])),
                 }
             }
