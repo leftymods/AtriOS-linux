@@ -167,7 +167,7 @@ fun YMusicCard(
                     }
                 }
 
-                if (ymusic.isActive || ymusic.title.isNotBlank()) {
+                run { // Always keep Now-Playing player visible when logged in
                     Surface(
                         shape = RoundedCornerShape(16.dp),
                         color = MaterialTheme.colorScheme.secondaryContainer
@@ -188,7 +188,7 @@ fun YMusicCard(
                                 color = MaterialTheme.colorScheme.onSecondaryContainer
                             )
                             Text(
-                                ymusic.title.ifBlank { "Загрузка трека…" },
+                                ymusic.title.ifBlank { if (ymusic.state == "loading") "Загрузка трека…" else "Выберите волну или трек" },
                                 style = MaterialTheme.typography.titleSmall,
                                 fontWeight = FontWeight.SemiBold,
                                 color = MaterialTheme.colorScheme.onSecondaryContainer
@@ -282,6 +282,17 @@ fun YMusicCard(
                         Icon(Icons.Rounded.Favorite, contentDescription = null)
                         Spacer(Modifier.width(6.dp))
                         Text("Любимые")
+                    }
+                    FilledTonalButton(onClick = { onPlay("chart", null) }) {
+                        Icon(Icons.Rounded.TrendingUp, contentDescription = null)
+                        Spacer(Modifier.width(6.dp))
+                        Text("Чарт")
+                    }
+                    OutlinedButton(onClick = { onPlay("station", "genre:rock") }) {
+                        Text("Рок")
+                    }
+                    OutlinedButton(onClick = { onPlay("station", "mood:calm") }) {
+                        Text("Спокойная")
                     }
                 }
 

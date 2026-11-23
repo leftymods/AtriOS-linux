@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Outer glowing AtriOS LED ring -->
+    <path
+        android:pathData="M54,22 A32,32 0 1,1 53.99,22 Z"
+        android:strokeWidth="4.5"
+        android:fillColor="#00000000">
+        <aapt:attr name="android:strokeColor">
+            <gradient
+                android:type="linear"
+                android:startX="22"
+                android:startY="22"
+                android:endX="86"
+                android:endY="86">
+                <item android:offset="0.0" android:color="#FF38E8FF" />
+                <item android:offset="0.5" android:color="#FF6C63FF" />
+                <item android:offset="1.0" android:color="#FFFF4FD8" />
+            </gradient>
+        </aapt:attr>
+    </path>
+    <!-- Stylized "A" emblem -->
+    <path
+        android:pathData="M54,34 L69,71 L62.5,71 L58.8,61.5 L49.2,61.5 L45.5,71 L39,71 Z M54,44.5 L51.1,56 L56.9,56 Z"
+        android:fillColor="#FFFFFFFF" />
+    <!-- Soundwave accent bar -->
+    <path
+        android:pathData="M45,76 L63,76"
+        android:strokeWidth="3"
+        android:strokeLineCap="round"
+        android:strokeColor="#FF38E8FF" />
+</vector>
