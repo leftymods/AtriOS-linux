@@ -222,6 +222,12 @@ pub struct YMusicStatus {
     pub artist: String,
     pub album: String,
     pub cover_url: String,
+    pub next_title: String,
+    pub next_artist: String,
+    pub next_cover_url: String,
+    pub prev_title: String,
+    pub prev_artist: String,
+    pub prev_cover_url: String,
     pub duration_ms: i64,
     pub liked: bool,
     pub error: Option<String>,
@@ -244,6 +250,12 @@ impl YMusicStatus {
             artist: String::new(),
             album: String::new(),
             cover_url: String::new(),
+            next_title: String::new(),
+            next_artist: String::new(),
+            next_cover_url: String::new(),
+            prev_title: String::new(),
+            prev_artist: String::new(),
+            prev_cover_url: String::new(),
             duration_ms: 0,
             liked: false,
             error: None,
@@ -278,6 +290,12 @@ impl YMusicStatus {
         if let Some(s) = j.get_str("cover_url") {
             st.cover_url = s.into();
         }
+        if let Some(s) = j.get_str("next_title") { st.next_title = s.into(); }
+        if let Some(s) = j.get_str("next_artist") { st.next_artist = s.into(); }
+        if let Some(s) = j.get_str("next_cover_url") { st.next_cover_url = s.into(); }
+        if let Some(s) = j.get_str("prev_title") { st.prev_title = s.into(); }
+        if let Some(s) = j.get_str("prev_artist") { st.prev_artist = s.into(); }
+        if let Some(s) = j.get_str("prev_cover_url") { st.prev_cover_url = s.into(); }
         if let Some(n) = j.get("duration_ms").and_then(|v| v.as_i64()) {
             st.duration_ms = n.max(0);
         }
@@ -323,6 +341,12 @@ impl YMusicStatus {
             ("artist", Json::Str(self.artist.clone())),
             ("album", Json::Str(self.album.clone())),
             ("cover_url", Json::Str(self.cover_url.clone())),
+            ("next_title", Json::Str(self.next_title.clone())),
+            ("next_artist", Json::Str(self.next_artist.clone())),
+            ("next_cover_url", Json::Str(self.next_cover_url.clone())),
+            ("prev_title", Json::Str(self.prev_title.clone())),
+            ("prev_artist", Json::Str(self.prev_artist.clone())),
+            ("prev_cover_url", Json::Str(self.prev_cover_url.clone())),
             ("duration_ms", Json::Num(self.duration_ms as f64)),
             ("liked", Json::Bool(self.liked)),
             (
@@ -1333,6 +1357,32 @@ impl PlayerState {
         write_status(&mut self.status);
     }
 
+    fn sync_neighbors_to_status(&mut self) {
+        if let Some(nxt) = self.queue.get(self.index + 1).or_else(|| self.queue.first()) {
+            self.status.next_title = nxt.title.clone();
+            self.status.next_artist = nxt.artist.clone();
+            self.status.next_cover_url = nxt.cover_url.clone();
+        } else {
+            self.status.next_title.clear();
+            self.status.next_artist.clear();
+            self.status.next_cover_url.clear();
+        }
+        let prev_opt = if self.index > 0 {
+            self.queue.get(self.index - 1)
+        } else {
+            self.queue.last()
+        };
+        if let Some(prv) = prev_opt {
+            self.status.prev_title = prv.title.clone();
+            self.status.prev_artist = prv.artist.clone();
+            self.status.prev_cover_url = prv.cover_url.clone();
+        } else {
+            self.status.prev_title.clear();
+            self.status.prev_artist.clear();
+            self.status.prev_cover_url.clear();
+        }
+    }
+
     fn start_current_track(&mut self) {
         self.pending_play_at = None;
         if let Some(p) = self.pipeline.take() {
@@ -1362,6 +1412,7 @@ impl PlayerState {
         self.status.artist = track.artist.clone();
         self.status.album = track.album.clone();
         self.status.cover_url = track.cover_url.clone();
+        self.sync_neighbors_to_status();
         self.status.duration_ms = track.duration_ms;
         self.status.liked = track.liked;
         self.status.error = None;
@@ -1484,6 +1535,7 @@ impl PlayerState {
         self.status.artist = track.artist;
         self.status.album = track.album;
         self.status.cover_url = track.cover_url;
+        self.sync_neighbors_to_status();
         self.status.duration_ms = track.duration_ms;
         self.status.liked = track.liked;
         self.status.error = None;
