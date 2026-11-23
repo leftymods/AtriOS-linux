@@ -1642,57 +1642,68 @@ fn play_pcm_48k(pcm: &[u8]) {
     drain_capture_fd_now();
 }
 
-pub fn speak_via_remote_tts(text: &str, emotion: &str, keep_visual: bool) -> bool {
-    let cfg = load_config();
-    if require_https(&cfg.server).is_err() {
-        return false;
-    }
-    let now_unix = now_unix_i64();
-    if now_unix < REMOTE_DOWN_UNTIL.load(Ordering::Relaxed) {
-        return false;
-    }
-    let base = cfg.server.trim_end_matches('/').to_string();
-    let tok = cfg.token.clone();
-    let ca = cfg.ca_file.clone();
-    let auth = format!("Bearer {tok}");
-    let mut h = vec![("Content-Type", "application/json"), ("Accept", "audio/wav")];
-    if !tok.is_empty() {
-        h.push(("Authorization", auth.as_str()));
-    }
-    let ca_opt = if ca.is_empty() { None } else { Some(ca.as_str()) };
-    let payload = obj(vec![
-        ("text", Json::Str(text.to_string())),
-        ("emotion", Json::Str(emotion.to_string())),
-    ])
-    .to_string_compact();
-    let audio = match request_bytes(
-        &format!("{base}/tts"),
-        Some(payload.as_bytes()),
-        &h,
-        ca_opt,
-        8,
-        4 * 1024 * 1024,
-        None,
-    ) {
-        Ok(b) if parse_wav(&b).is_ok() => b,
-        Ok(_) => return false,
-        Err(e) => {
-            REMOTE_DOWN_UNTIL.store(now_unix_i64() + 45, Ordering::Relaxed);
-            println!("[local-ai] GPU TTS unreachable ({e}); offline fallback 45s");
-            return false;
-        }
-    };
+fn play_spoken_wav(audio: &[u8], text: &str, emotion: &str, keep_visual: bool, base: &str, token: &str, ca: &str) {
     send_bt_cmd("duck");
     if !keep_visual {
         set_vad_visual("speaking", false, emotion);
     }
-    println!("[local-ai] GPU TTS speaking ({} bytes): {text:?}", audio.len());
-    let _ = play_audio_bytes(&audio, text, &base, &cfg.token, &cfg.ca_file);
+    let _ = play_audio_bytes(audio, text, base, token, ca);
     send_bt_cmd("unduck");
     if !keep_visual {
         set_vad_visual("idle", false, "default");
     }
-    true
+}
+
+pub fn speak_via_remote_tts(text: &str, emotion: &str, keep_visual: bool) -> bool {
+    let cfg = load_config();
+    let base = cfg.server.trim_end_matches('/').to_string();
+    let has_remote = require_https(&cfg.server).is_ok();
+    let now_unix = now_unix_i64();
+    let remote_ok = has_remote && now_unix >= REMOTE_DOWN_UNTIL.load(Ordering::Relaxed);
+
+    if remote_ok {
+        let tok = cfg.token.clone();
+        let ca = cfg.ca_file.clone();
+        let auth = format!("Bearer {tok}");
+        let mut h = vec![("Content-Type", "application/json"), ("Accept", "audio/wav")];
+        if !tok.is_empty() {
+            h.push(("Authorization", auth.as_str()));
+        }
+        let ca_opt = if ca.is_empty() { None } else { Some(ca.as_str()) };
+        let payload = obj(vec![
+            ("text", Json::Str(text.to_string())),
+            ("emotion", Json::Str(emotion.to_string())),
+        ])
+        .to_string_compact();
+        match request_bytes(
+            &format!("{base}/tts"),
+            Some(payload.as_bytes()),
+            &h,
+            ca_opt,
+            8,
+            4 * 1024 * 1024,
+            None,
+        ) {
+            Ok(b) if parse_wav(&b).is_ok() => {
+                println!("[local-ai] GPU TTS speaking ({} bytes): {text:?}", b.len());
+                play_spoken_wav(&b, text, emotion, keep_visual, &base, &cfg.token, &cfg.ca_file);
+                return true;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                REMOTE_DOWN_UNTIL.store(now_unix_i64() + 45, Ordering::Relaxed);
+                println!("[local-ai] GPU TTS unreachable ({e}); offline fallback 45s");
+            }
+        }
+    }
+
+    // Offline AtriVoice phrase bank / local TTS fallback (zero Python, instant)
+    if let Some(wav) = crate::local_tts::synthesize_offline_wav(text) {
+        println!("[local-tts] offline AtriVoice speaking ({} bytes): {text:?}", wav.len());
+        play_spoken_wav(&wav, text, emotion, keep_visual, &base, &cfg.token, &cfg.ca_file);
+        return true;
+    }
+    false
 }
 
 pub fn send_bt_cmd(cmd: &str) {
@@ -1820,8 +1831,10 @@ fn execute_device_command(cmd: DeviceCommand) {
                 .stderr(Stdio::null())
                 .spawn();
             println!("[atriai] bluetooth: speaker ON + pairing window open (120s) + bt_on animation");
-            play_command_chime("bt_on");
-            thread::sleep(Duration::from_millis(2000));
+            if !speak_via_remote_tts("Блютуз включён.", "neutral", true) {
+                play_command_chime("bt_on");
+            }
+            thread::sleep(Duration::from_millis(1200));
             drain_capture_fd_now();
         }
         DeviceCommand::BluetoothOff => {
@@ -1840,7 +1853,9 @@ fn execute_device_command(cmd: DeviceCommand) {
                 .stderr(Stdio::null())
                 .spawn();
             println!("[atriai] bluetooth: speaker OFF (hidden)");
-            play_command_chime("bt_off");
+            if !speak_via_remote_tts("Блютуз выключен.", "neutral", false) {
+                play_command_chime("bt_off");
+            }
         }
     }
 }
@@ -2105,7 +2120,9 @@ fn send_phrase_to_server(
         let remote_backed_off = now_unix < REMOTE_DOWN_UNTIL.load(Ordering::Relaxed);
         if !has_remote || remote_backed_off {
             println!("[local-ai] unhandled phrase in offline mode (backed_off={remote_backed_off}): {clean_query:?}");
-            play_command_chime("offline");
+            if !speak_via_remote_tts("Извини, сервер сейчас недоступен, я работаю в офлайн-режиме.", "neutral", false) {
+                play_command_chime("offline");
+            }
             keep_listening = false;
             return Ok((text, String::new(), false));
         }
