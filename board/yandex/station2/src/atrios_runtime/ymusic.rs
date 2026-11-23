@@ -1231,6 +1231,7 @@ struct PlayerState {
     index: usize,
     pipeline: Option<ActivePipeline>,
     prefetch: std::sync::Arc<std::sync::Mutex<Option<(String, String)>>>,
+    pending_play_at: Option<std::time::Instant>,
     status: YMusicStatus,
 }
 
@@ -1243,11 +1244,13 @@ impl PlayerState {
             index: 0,
             pipeline: None,
             prefetch: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            pending_play_at: None,
             status: YMusicStatus::default_idle(),
         }
     }
 
     fn stop_playback(&mut self) {
+        self.pending_play_at = None;
         if let Some(p) = self.pipeline.take() {
             p.stop();
         }
@@ -1257,6 +1260,7 @@ impl PlayerState {
     }
 
     fn start_current_track(&mut self) {
+        self.pending_play_at = None;
         if let Some(p) = self.pipeline.take() {
             p.stop();
         }
@@ -1413,7 +1417,7 @@ impl PlayerState {
     }
 
     fn next_track(&mut self, skipped: bool) {
-        let should_play = !skipped || self.pipeline.as_ref().map(|p| !p.paused).unwrap_or(false);
+        let should_play = !skipped || self.pending_play_at.is_some() || self.pipeline.as_ref().map(|p| !p.paused).unwrap_or(false);
         if let Some(auth) = load_auth() {
             if self.mode == "wave" {
                 if let Some(cur) = self.queue.get(self.index) {
@@ -1429,14 +1433,36 @@ impl PlayerState {
                     self.batch_id = bid;
                     self.queue = more;
                     self.index = 0;
-                    if should_play { self.start_current_track(); } else { self.preview_current_track(); }
+                    if should_play {
+                if skipped {
+                    self.preview_current_track();
+                    self.status.state = "loading".into();
+                    write_status(&mut self.status);
+                    self.pending_play_at = Some(std::time::Instant::now() + Duration::from_millis(320));
+                } else {
+                    self.start_current_track();
+                }
+            } else {
+                self.preview_current_track();
+            }
                     return;
                 }
             }
         }
         if self.index + 1 < self.queue.len() {
             self.index += 1;
-            if should_play { self.start_current_track(); } else { self.preview_current_track(); }
+            if should_play {
+                if skipped {
+                    self.preview_current_track();
+                    self.status.state = "loading".into();
+                    write_status(&mut self.status);
+                    self.pending_play_at = Some(std::time::Instant::now() + Duration::from_millis(320));
+                } else {
+                    self.start_current_track();
+                }
+            } else {
+                self.preview_current_track();
+            }
             return;
         }
         if self.mode == "wave" || self.mode == "none" {
@@ -1447,20 +1473,42 @@ impl PlayerState {
                     self.batch_id = bid;
                     self.queue = more;
                     self.index = 0;
-                    if should_play { self.start_current_track(); } else { self.preview_current_track(); }
+                    if should_play {
+                if skipped {
+                    self.preview_current_track();
+                    self.status.state = "loading".into();
+                    write_status(&mut self.status);
+                    self.pending_play_at = Some(std::time::Instant::now() + Duration::from_millis(320));
+                } else {
+                    self.start_current_track();
+                }
+            } else {
+                self.preview_current_track();
+            }
                     return;
                 }
             }
         } else if !self.queue.is_empty() {
             self.index = 0;
-            if should_play { self.start_current_track(); } else { self.preview_current_track(); }
+            if should_play {
+                if skipped {
+                    self.preview_current_track();
+                    self.status.state = "loading".into();
+                    write_status(&mut self.status);
+                    self.pending_play_at = Some(std::time::Instant::now() + Duration::from_millis(320));
+                } else {
+                    self.start_current_track();
+                }
+            } else {
+                self.preview_current_track();
+            }
             return;
         }
         self.stop_playback();
     }
 
     fn prev_track(&mut self) {
-        let should_play = self.pipeline.as_ref().map(|p| !p.paused).unwrap_or(false);
+        let should_play = self.pending_play_at.is_some() || self.pipeline.as_ref().map(|p| !p.paused).unwrap_or(false);
         if self.queue.is_empty() {
             if let Some(auth) = load_auth() {
                 if let Ok((bid, more)) = fetch_my_wave(&auth, None) {
@@ -1468,17 +1516,38 @@ impl PlayerState {
                     self.batch_id = bid;
                     self.queue = more;
                     self.index = 0;
-                    if should_play { self.start_current_track(); } else { self.preview_current_track(); }
+                    if should_play {
+                self.preview_current_track();
+                self.status.state = "loading".into();
+                write_status(&mut self.status);
+                self.pending_play_at = Some(std::time::Instant::now() + Duration::from_millis(320));
+            } else {
+                self.preview_current_track();
+            }
                     return;
                 }
             }
         }
         if self.index > 0 {
             self.index -= 1;
-            if should_play { self.start_current_track(); } else { self.preview_current_track(); }
+            if should_play {
+                self.preview_current_track();
+                self.status.state = "loading".into();
+                write_status(&mut self.status);
+                self.pending_play_at = Some(std::time::Instant::now() + Duration::from_millis(320));
+            } else {
+                self.preview_current_track();
+            }
         } else if !self.queue.is_empty() {
             self.index = self.queue.len() - 1;
-            if should_play { self.start_current_track(); } else { self.preview_current_track(); }
+            if should_play {
+                self.preview_current_track();
+                self.status.state = "loading".into();
+                write_status(&mut self.status);
+                self.pending_play_at = Some(std::time::Instant::now() + Duration::from_millis(320));
+            } else {
+                self.preview_current_track();
+            }
         }
     }
 
@@ -1599,6 +1668,12 @@ fn run_daemon() -> i32 {
             if n > 0 {
                 let line = String::from_utf8_lossy(&buf[..n]).to_string();
                 player.handle_command(&line);
+            }
+        }
+        if let Some(due) = player.pending_play_at {
+            if std::time::Instant::now() >= due {
+                player.pending_play_at = None;
+                player.start_current_track();
             }
         }
         let finished = player.pipeline.as_mut().map(|p| p.is_finished()).unwrap_or(false);
