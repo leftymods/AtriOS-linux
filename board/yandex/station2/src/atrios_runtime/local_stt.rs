@@ -26,7 +26,7 @@ const MODEL_PATHS: &[&str] = &[
 // Fast finite-state grammar for local commands & wake proxies (~5-8x faster than unconstrained decoding,
 // shares the single loaded VoskModel in RAM with zero extra memory).
 const CMD_GRAMMAR: &str = r#"[
-  "арти", "атриум", "адрес", "астры", "натрий", "армия", "актриса", "атрибут", "а три",
+  "арти", "атриум", "астры", "натрий", "а три",
   "привет", "слушай", "эй",
   "блютуз", "блютус", "колонка", "колонку", "колонки", "сопряжение", "поиск", "подключи", "отключи", "видимость",
   "включи", "включить", "вруби", "запусти", "активируй", "открой",

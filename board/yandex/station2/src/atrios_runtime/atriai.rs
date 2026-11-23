@@ -184,16 +184,13 @@ fn normalize_text(text: &str) -> Vec<String> {
 }
 
 const ATRI_ALIASES: &[&str] = &[
+    "атри", "atri", "atria",
     "арти", "атриум", "натрий", "астры",
-    "atri", "atria", "атри", "атря", "атрия", "атре", "атрий", "атрии", "отри", "этри", "этрий",
-    "адри", "антри", "артри", "актри", "а три", "о три", "эй три", "матри", "мотри", "утри",
-    "атриа", "атрей", "атрик", "отрыв", "и три", "ну три", "на три", "а тры",
-    "адре", "адра", "адря", "адрии", "адрия", "адрей", "отре", "одре", "одри",
-    "этре", "эдре", "эдри", "утре", "удре", "атру", "атро", "антре", "артре", "актре",
-    "матре", "мотре", "натри", "натре", "ватри", "ватре", "патри", "патре",
-    "катри", "катре", "татри", "татре", "датри", "датре", "сатри", "хатри", "латри",
-    "ати", "ади", "ари", "а дри", "а дре", "а тре", "о дре", "о тре", "о дри",
-    "э три", "у три", "да три", "за три", "по три", "в три", "не три", "но три", "ты три",
+    "атря", "атрия", "атре", "атрий", "атрии",
+    "отри", "этри", "этрий",
+    "адри", "антри", "артри", "актри",
+    "а три", "эй три", "а тры", "а дри", "а тре",
+    "атриа", "атрей", "атрик", "одри", "эдри", "атру", "атро",
 ];
 const ATRI_EXCLUSIONS: &[&str] = &[
     "смотри", "посмотри", "присмотри", "осмотри", "пересмотри", "досмотри",
@@ -224,20 +221,12 @@ fn is_fuzzy_atri_token(w: &str) -> bool {
     if ATRI_EXCLUSIONS.contains(&w) {
         return false;
     }
-    if matches!(w, "ри" | "три" | "дри" | "дре" | "тре" | "ат" | "ать") {
-        return true;
-    }
     let chars: Vec<char> = w.chars().collect();
-    if chars.len() >= 5
-        && (w.ends_with("атри") || w.ends_with("атре") || w.ends_with("адри") || w.ends_with("адре"))
-    {
-        return true;
-    }
-    if (4..=6).contains(&chars.len()) {
+    if (4..=5).contains(&chars.len()) {
         let first = chars[0];
         let last = *chars.last().unwrap();
-        if matches!(first, 'а' | 'о' | 'э' | 'у' | 'и' | 'я')
-            && matches!(last, 'и' | 'е' | 'а' | 'я' | 'у' | 'ы' | 'ю')
+        if matches!(first, 'а' | 'э')
+            && matches!(last, 'и' | 'е' | 'я' | 'й')
         {
             let rest: String = chars[1..].iter().collect();
             if rest.starts_with("тр") || rest.starts_with("др") {
@@ -248,15 +237,8 @@ fn is_fuzzy_atri_token(w: &str) -> bool {
     false
 }
 
-fn is_fuzzy_atri_inline(w: &str) -> bool {
-    w.chars().count() >= 4 && is_fuzzy_atri_token(w)
-}
-
 fn is_fuzzy_atri_pair(w1: &str, w2: &str) -> bool {
-    matches!(
-        w1,
-        "а" | "о" | "э" | "у" | "да" | "за" | "по" | "в" | "не" | "но" | "ты" | "ну" | "и" | "эй"
-    ) && matches!(w2, "три" | "тре" | "тры" | "дри" | "дре" | "ри" | "ти" | "ди")
+    matches!(w1, "а" | "э" | "эй") && matches!(w2, "три" | "тре" | "тры" | "дри")
 }
 
 pub fn is_cancel_token(w: &str) -> bool {
@@ -376,40 +358,29 @@ pub fn matches_wake_word(text: &str, wake_word: &str) -> bool {
     if words.is_empty() {
         return false;
     }
+    let mut idx = 0usize;
+    while idx < words.len() && FILLERS.contains(&words[idx].as_str()) {
+        idx += 1;
+    }
+    if idx >= words.len() {
+        return false;
+    }
+    let lead = words[idx..].join(" ");
     let norm = words.join(" ");
     for c in &cands {
-        if norm == *c {
+        if lead == *c || lead.starts_with(&format!("{c} ")) {
             return true;
         }
-        if !c.contains(' ') && words.iter().any(|w| w == c) {
+        // Allow trailing wake word on short commands only (e.g. "громче атри")
+        if words.len() <= 5 && norm.ends_with(&format!(" {c}")) {
             return true;
-        }
-        if c.contains(' ') {
-            if let Some(pos) = norm.find(c.as_str()) {
-                let left_ok = pos == 0 || norm.as_bytes()[pos - 1] == b' ';
-                let end = pos + c.len();
-                let right_ok = end == norm.len() || norm.as_bytes()[end] == b' ';
-                if left_ok && right_ok {
-                    return true;
-                }
-            }
         }
     }
     if cands.iter().any(|c| c == "atri" || c == "атри") {
-        let mut idx = 0;
-        while idx < words.len() && FILLERS.contains(&words[idx].as_str()) {
-            idx += 1;
-        }
-        if idx < words.len()
-            && (is_fuzzy_atri_token(&words[idx])
-                || (words.len() > idx + 1 && matches!(words[idx].as_str(), "адрес" | "армия" | "актриса" | "атрибут")))
-        {
+        if is_fuzzy_atri_token(&words[idx]) {
             return true;
         }
         if idx + 1 < words.len() && is_fuzzy_atri_pair(&words[idx], &words[idx + 1]) {
-            return true;
-        }
-        if words.iter().any(|w| is_fuzzy_atri_inline(w)) {
             return true;
         }
     }
@@ -454,7 +425,7 @@ pub fn strip_wake_word(text: &str, wake_word: &str) -> String {
                 s = toks[2..].join(" ");
                 progressed = true;
             } else if let Some(first) = toks.first() {
-                if is_fuzzy_atri_token(first) || (toks.len() >= 2 && matches!(first.as_str(), "адрес" | "армия" | "актриса" | "атрибут")) {
+                if is_fuzzy_atri_token(first) {
                     s = toks[1..].join(" ");
                     progressed = true;
                 }
@@ -475,7 +446,7 @@ pub fn strip_wake_word(text: &str, wake_word: &str) -> String {
     if !stripped_suffix && has_atri {
         let mut end_toks: Vec<&str> = s.split_whitespace().collect();
         if let Some(&last) = end_toks.last() {
-            if is_fuzzy_atri_inline(last) {
+            if is_fuzzy_atri_token(last) {
                 end_toks.pop();
                 s = end_toks.join(" ");
             }
@@ -2038,8 +2009,29 @@ fn send_phrase_to_server(
             set_error("voice", None, "", 15);
             return Ok((text, String::new(), false));
         }
+        // Two-stage offline wake verification: constrained grammar (cmd_rec) can hallucinate
+        // wake proxies ("а три", "арти") on casual out-of-vocabulary speech. Verify with the
+        // unconstrained Russian Vosk model before lighting up the LED ring or acting.
+        let mut verified_wake_only = is_wake_word_only(&text, wake_word);
+        if use_local_stt && !wake_word.is_empty() {
+            if let Ok(full_text) = crate::local_stt::transcribe_pcm16(pcm) {
+                if !matches_wake_word(&full_text, wake_word) {
+                    println!(
+                        "[wake] rejected false-positive offline match (fast={text:?}, unk={had_unk}, full={full_text:?})"
+                    );
+                    set_error("voice", None, "", 15);
+                    return Ok((String::new(), String::new(), false));
+                }
+                if verified_wake_only {
+                    let pcm_ms = (pcm.len() * 1000) / (SR * 2);
+                    if had_unk || pcm_ms > 2400 || !is_wake_word_only(&full_text, wake_word) {
+                        verified_wake_only = false;
+                    }
+                }
+            }
+        }
         user_addressed = true;
-        if is_wake_word_only(&text, wake_word) {
+        if verified_wake_only {
             WAKE_TRIGGERED.store(true, Ordering::SeqCst);
             keep_listening = true;
             println!("[wake] activated ({text:?}) -> ActiveCommand (7s)");
