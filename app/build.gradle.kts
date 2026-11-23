@@ -12,8 +12,17 @@ android {
         applicationId = "com.leftymods.atrios"
         minSdk = 26
         targetSdk = 34
-        versionCode = 9
-        versionName = "1.8"
+        versionCode = 10
+        versionName = "1.9"
+    }
+
+    signingConfigs {
+        getByName("debug") {
+            storeFile = file("atrios-signing.jks")
+            storePassword = "atrios2026"
+            keyAlias = "atrios"
+            keyPassword = "atrios2026"
+        }
     }
 
     buildTypes {
