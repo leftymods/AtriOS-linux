@@ -42,7 +42,7 @@ pub enum LocalIntent {
     SetTimer { secs: u64 },
     ShowTimer { target_secs: Option<u64>, index: Option<usize>, pin: bool },
     HideTimerDisplay,
-    CancelTimers,
+    CancelTimers { target_secs: Option<u64>, index: Option<usize> },
     QueryTimers,
     SetAlarm { hour: u8, minute: u8 },
     CancelAlarms,
@@ -526,12 +526,16 @@ pub fn parse_local_intent(text: &str, wake_word: &str) -> Option<LocalIntent> {
         if has_cancel && has_screen_word {
             return Some(LocalIntent::HideTimerDisplay);
         }
-        if has_cancel {
-            return Some(LocalIntent::CancelTimers);
-        }
         // Only parse duration from words after the timer keyword so stray wake words ("три") never leak in
         let tail = timer_pos.map(|p| &words[p + 1..]).unwrap_or(&words[..]);
         let dur = parse_russian_duration_secs(tail).or_else(|| parse_russian_duration_secs(&words));
+        if has_cancel {
+            let cancel_all = words.iter().any(|&w| matches!(w, "все" | "всё"));
+            return Some(LocalIntent::CancelTimers {
+                target_secs: if cancel_all { None } else { dur },
+                index: if cancel_all { None } else { ordinal_idx },
+            });
+        }
         if (has_show || has_pin) && !has_set_verb {
             return Some(LocalIntent::ShowTimer {
                 target_secs: dur,
@@ -800,18 +804,71 @@ pub fn execute_local_intent(intent: LocalIntent) {
                 play_command_chime("tick");
             }
         }
-        LocalIntent::CancelTimers => {
-            {
-                let mut s = store().lock().unwrap();
-                s.timers.clear();
-                save_timers_disk(&s.timers);
-            }
-            clear_timer_display();
-            stop_ringing();
-            println!("[local-ai] all timers cancelled");
-            show_timer_popup_async("timer_off", None);
-            if !speak_via_remote_tts("Хорошо, все таймеры отменены.", "neutral", false) {
-                play_command_chime("cancel");
+        LocalIntent::CancelTimers { target_secs, index } => {
+            if target_secs.is_none() && index.is_none() {
+                {
+                    let mut s = store().lock().unwrap();
+                    s.timers.clear();
+                    save_timers_disk(&s.timers);
+                }
+                clear_timer_display();
+                stop_ringing();
+                println!("[local-ai] all timers cancelled");
+                show_timer_popup_async("timer_off", None);
+                if !speak_via_remote_tts("Хорошо, все таймеры отменены.", "neutral", false) {
+                    play_command_chime("cancel");
+                }
+            } else {
+                let now = now_unix_i64();
+                let removed: Option<TimerItem> = {
+                    let mut s = store().lock().unwrap();
+                    let mut active_indices: Vec<usize> = s
+                        .timers
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, t)| t.fire_at > now)
+                        .map(|(i, _)| i)
+                        .collect();
+                    active_indices.sort_by_key(|&i| s.timers[i].fire_at);
+                    let pos = if let Some(req) = target_secs {
+                        active_indices
+                            .iter()
+                            .copied()
+                            .min_by_key(|&i| s.timers[i].total_secs.abs_diff(req))
+                    } else if let Some(ord) = index {
+                        active_indices.get(ord).copied()
+                    } else {
+                        None
+                    };
+                    let rem_item = pos.map(|i| s.timers.remove(i));
+                    if rem_item.is_some() {
+                        save_timers_disk(&s.timers);
+                    }
+                    rem_item
+                };
+                if let Some(t) = removed {
+                    // Only clear display if the removed timer was the displayed one
+                    let cur_disp_id = fs::read_to_string(TIMER_DISPLAY_FILE)
+                        .ok()
+                        .and_then(|raw| Json::parse(&raw).ok())
+                        .and_then(|j| j.get("timer_id").and_then(|v| v.as_i64()))
+                        .unwrap_or(0) as u64;
+                    if cur_disp_id == t.id {
+                        clear_timer_display();
+                    }
+                    println!("[local-ai] cancelled single timer id={} total={}s", t.id, t.total_secs);
+                    show_timer_popup_async("timer_off", None);
+                    let spoken = format!("Хорошо, таймер на {} отменён.", format_duration_ru(t.total_secs));
+                    if !speak_via_remote_tts(&spoken, "neutral", false) {
+                        if !speak_via_remote_tts("Готово.", "neutral", false) {
+                            play_command_chime("cancel");
+                        }
+                    }
+                } else {
+                    if !speak_via_remote_tts("Активных таймеров сейчас нет.", "neutral", false) {
+                        play_command_chime("tick");
+                    }
+                }
             }
         }
         LocalIntent::QueryTimers => {

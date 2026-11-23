@@ -322,7 +322,7 @@ mod tests {
         );
         assert_eq!(
             parse_local_intent("Атри отмени таймер", "Atri"),
-            Some(LocalIntent::CancelTimers)
+            Some(LocalIntent::CancelTimers { target_secs: None, index: None })
         );
         assert_eq!(
             parse_local_intent("Атри поставь будильник на 7 30", "Atri"),
@@ -432,7 +432,19 @@ mod tests {
         );
         assert_eq!(
             parse_local_intent("Атри, отмени таймер", "Atri"),
-            Some(LocalIntent::CancelTimers)
+            Some(LocalIntent::CancelTimers { target_secs: None, index: None })
+        );
+        assert_eq!(
+            parse_local_intent("Атри, удали таймер на 20 минут", "Atri"),
+            Some(LocalIntent::CancelTimers { target_secs: Some(1200), index: None })
+        );
+        assert_eq!(
+            parse_local_intent("Атри, удали второй таймер", "Atri"),
+            Some(LocalIntent::CancelTimers { target_secs: None, index: Some(1) })
+        );
+        assert_eq!(
+            parse_local_intent("Атри, удали все таймеры", "Atri"),
+            Some(LocalIntent::CancelTimers { target_secs: None, index: None })
         );
     }
 }
