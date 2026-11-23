@@ -21,6 +21,9 @@ import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -493,11 +496,16 @@ fun AtriOSApp(
                             .padding(bottom = 12.dp),
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
-                        // Swipeable dark mini-player (swipe left -> next, swipe right -> prev, tap -> Big Player!)
+                        // Smooth scrolling swipeable dark mini-player (swipe left -> next, swipe right -> prev, tap -> Big Player!)
                         val ym = status.ymusic
                         if (selectedTab != AppTab.WAVE && (ym.isActive || ym.title.isNotBlank())) {
                             var dragOffset by remember { mutableFloatStateOf(0f) }
-                            val animatedOffset by animateFloatAsState(targetValue = dragOffset, label = "miniDrag")
+                            var miniDir by remember { mutableIntStateOf(1) }
+                            val animatedOffset by animateFloatAsState(
+                                targetValue = dragOffset,
+                                animationSpec = spring(dampingRatio = 0.78f, stiffness = 420f),
+                                label = "miniDrag"
+                            )
                             Surface(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -506,16 +514,20 @@ fun AtriOSApp(
                                     .pointerInput(ym.trackId) {
                                         detectHorizontalDragGestures(
                                             onDragEnd = {
-                                                if (dragOffset < -85f) {
+                                                if (dragOffset < -65f) {
+                                                    miniDir = 1
                                                     client.ymusicControl("next")
-                                                } else if (dragOffset > 85f) {
+                                                    scope.launch { delay(350); client.ymusicStatus() }
+                                                } else if (dragOffset > 65f) {
+                                                    miniDir = -1
                                                     client.ymusicControl("prev")
+                                                    scope.launch { delay(350); client.ymusicStatus() }
                                                 }
                                                 dragOffset = 0f
                                             },
                                             onDragCancel = { dragOffset = 0f },
                                             onHorizontalDrag = { _, amt ->
-                                                dragOffset = (dragOffset + amt).coerceIn(-160f, 160f)
+                                                dragOffset = (dragOffset + amt * 0.75f).coerceIn(-140f, 140f)
                                             }
                                         )
                                     }
@@ -528,11 +540,30 @@ fun AtriOSApp(
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.spacedBy(10.dp)
                                 ) {
-                                    AsyncCoverArt(url = ym.coverUrl, shape = RoundedCornerShape(10.dp), modifier = Modifier.size(42.dp))
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        Text(ym.title.ifBlank { "Моя волна" }, color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                        if (ym.artist.isNotBlank()) {
-                                            Text(ym.artist, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    AnimatedContent(
+                                        targetState = Triple(ym.trackId, ym.title, ym.artist to ym.coverUrl),
+                                        modifier = Modifier.weight(1f),
+                                        transitionSpec = {
+                                            (slideInHorizontally(spring(dampingRatio = 0.84f, stiffness = 360f)) { it * miniDir } + fadeIn(tween(200)))
+                                                .togetherWith(
+                                                    slideOutHorizontally(spring(dampingRatio = 0.84f, stiffness = 360f)) { -it * miniDir } + fadeOut(tween(160))
+                                                )
+                                        },
+                                        label = "miniTrackSlide"
+                                    ) { (_, title, artistCover) ->
+                                        val (artist, coverUrl) = artistCover
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                            modifier = Modifier.fillMaxWidth()
+                                        ) {
+                                            AsyncCoverArt(url = coverUrl, shape = RoundedCornerShape(10.dp), modifier = Modifier.size(42.dp))
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text(title.ifBlank { "Моя волна" }, color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                                if (artist.isNotBlank()) {
+                                                    Text(artist, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                                }
+                                            }
                                         }
                                     }
                                     IconButton(onClick = { client.ymusicControl("like") }, modifier = Modifier.size(32.dp)) {
@@ -611,12 +642,16 @@ fun AtriOSApp(
                     transitionSpec = {
                         val dir = if (targetState.ordinal >= initialState.ordinal) 1 else -1
                         (slideInHorizontally(
-                            animationSpec = tween(TypeUI.MotionMediumMs, easing = FastOutSlowInEasing)
-                        ) { it / 5 * dir } + fadeIn(tween(TypeUI.MotionFastMs)))
+                            animationSpec = spring(dampingRatio = 0.86f, stiffness = 320f)
+                        ) { (it * 0.28f).toInt() * dir } +
+                            scaleIn(initialScale = 0.95f, animationSpec = tween(240, easing = FastOutSlowInEasing)) +
+                            fadeIn(tween(220)))
                             .togetherWith(
                                 slideOutHorizontally(
-                                    animationSpec = tween(TypeUI.MotionMediumMs, easing = FastOutSlowInEasing)
-                                ) { -it / 5 * dir } + fadeOut(tween(TypeUI.MotionFastMs))
+                                    animationSpec = spring(dampingRatio = 0.86f, stiffness = 320f)
+                                ) { -(it * 0.22f).toInt() * dir } +
+                                    scaleOut(targetScale = 0.96f, animationSpec = tween(180)) +
+                                    fadeOut(tween(160))
                             )
                     },
                     label = "tabTransition"

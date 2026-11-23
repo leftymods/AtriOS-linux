@@ -21,6 +21,17 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.pager.PageSize
 import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.foundation.pager.PagerSnapDistance
+import androidx.compose.foundation.pager.PagerDefaults
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.animation.togetherWith
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -59,6 +70,26 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.sin
+
+
+private fun orbFallbackIcon(orb: YMusicOrb): ImageVector {
+    val t = (orb.title + " " + orb.query + " " + orb.id).lowercase()
+    return when {
+        orb.mode == "likes" || "нравит" in t || "влюблен" in t || "влюблён" in t || "романт" in t || "love" in t -> Icons.Rounded.Favorite
+        "радост" in t || "весёл" in t || "весел" in t || "happy" in t -> Icons.Rounded.SentimentVerySatisfied
+        "электрон" in t || "techno" in t || "house" in t || "edm" in t || "брейк" in t || "dnb" in t -> Icons.Rounded.ElectricBolt
+        "вечерин" in t || "party" in t || "танц" in t -> Icons.Rounded.Celebration
+        "бег" in t || "спорт" in t || "тренир" in t || "workout" in t || "run" in t -> Icons.Rounded.DirectionsRun
+        "спокой" in t || "сон" in t || "чил" in t || "calm" in t || "chill" in t || "relax" in t -> Icons.Rounded.SelfImprovement
+        "рок" in t || "метал" in t || "rock" in t || "metal" in t || "панк" in t -> Icons.Rounded.Whatshot
+        "груст" in t || "печал" in t || "sad" in t -> Icons.Rounded.WaterDrop
+        "бодр" in t || "энерг" in t || "energetic" in t -> Icons.Rounded.FlashOn
+        "работ" in t || "фокус" in t || "work" in t || "focus" in t -> Icons.Rounded.Headphones
+        orb.mode == "chart" || "тренд" in t || "чарт" in t -> Icons.Rounded.TrendingUp
+        orb.subtitle == "Артист" -> Icons.Rounded.Person
+        else -> Icons.Rounded.MusicNote
+    }
+}
 
 private fun parseHexColor(hex: String, fallback: Color): Color {
     return try {
@@ -524,12 +555,38 @@ fun YandexWaveFullScreen(
                             }
                         }
 
-                        // Frosted track pill (like Yandex Music screenshot!)
+                        // Smooth swipeable frosted track pill (swipe left -> next, swipe right -> prev, smoothly scrolls & settles!)
+                        var pillDrag by remember { mutableFloatStateOf(0f) }
+                        var pillDir by remember { mutableIntStateOf(1) }
+                        val pillAnimX by animateFloatAsState(
+                            targetValue = pillDrag,
+                            animationSpec = spring(dampingRatio = 0.78f, stiffness = 420f),
+                            label = "pillDragX"
+                        )
                         Surface(
                             shape = RoundedCornerShape(99.dp),
                             color = Color(0x991C1C22),
                             modifier = Modifier
                                 .fillMaxWidth(0.92f)
+                                .graphicsLayer { translationX = pillAnimX }
+                                .pointerInput(ymusic.trackId) {
+                                    detectHorizontalDragGestures(
+                                        onDragEnd = {
+                                            if (pillDrag < -65f) {
+                                                pillDir = 1
+                                                onControl("next")
+                                            } else if (pillDrag > 65f) {
+                                                pillDir = -1
+                                                onControl("prev")
+                                            }
+                                            pillDrag = 0f
+                                        },
+                                        onDragCancel = { pillDrag = 0f },
+                                        onHorizontalDrag = { _, amt ->
+                                            pillDrag = (pillDrag + amt * 0.7f).coerceIn(-120f, 120f)
+                                        }
+                                    )
+                                }
                                 .clickable { onOpenBigPlayer() }
                         ) {
                             Row(
@@ -537,26 +594,45 @@ fun YandexWaveFullScreen(
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(10.dp)
                             ) {
-                                if (ymusic.coverUrl.isNotBlank()) {
-                                    AsyncCoverArt(
-                                        url = ymusic.coverUrl,
-                                        shape = CircleShape,
-                                        modifier = Modifier.size(34.dp),
-                                        fallbackIcon = Icons.Rounded.MusicNote
-                                    )
+                                AnimatedContent(
+                                    targetState = Triple(ymusic.trackId, ymusic.title, ymusic.artist to ymusic.coverUrl),
+                                    modifier = Modifier.weight(1f),
+                                    transitionSpec = {
+                                        (slideInHorizontally(spring(dampingRatio = 0.85f, stiffness = 360f)) { it * pillDir } + fadeIn(tween(200)))
+                                            .togetherWith(
+                                                slideOutHorizontally(spring(dampingRatio = 0.85f, stiffness = 360f)) { -it * pillDir } + fadeOut(tween(160))
+                                            )
+                                    },
+                                    label = "wavePillTrack"
+                                ) { (_, title, artistCover) ->
+                                    val (artist, coverUrl) = artistCover
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        if (coverUrl.isNotBlank()) {
+                                            AsyncCoverArt(
+                                                url = coverUrl,
+                                                shape = CircleShape,
+                                                modifier = Modifier.size(34.dp),
+                                                fallbackIcon = Icons.Rounded.MusicNote
+                                            )
+                                        }
+                                        Text(
+                                            if (title.isNotBlank()) {
+                                                if (artist.isNotBlank()) "$artist — $title" else title
+                                            } else "Нажмите ▶ или свайпните для выбора",
+                                            color = Color.White,
+                                            fontWeight = FontWeight.SemiBold,
+                                            fontSize = 14.sp,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            textAlign = if (coverUrl.isBlank()) TextAlign.Center else TextAlign.Start,
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                    }
                                 }
-                                Text(
-                                    if (ymusic.title.isNotBlank()) {
-                                        if (ymusic.artist.isNotBlank()) "${ymusic.artist} — ${ymusic.title}" else ymusic.title
-                                    } else "Нажмите ▶ для запуска на колонке",
-                                    color = Color.White,
-                                    fontWeight = FontWeight.SemiBold,
-                                    fontSize = 14.sp,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                    textAlign = if (ymusic.coverUrl.isBlank()) TextAlign.Center else TextAlign.Start,
-                                    modifier = Modifier.weight(1f)
-                                )
                                 IconButton(
                                     onClick = { onControl("like") },
                                     modifier = Modifier.size(30.dp)
@@ -603,6 +679,10 @@ fun YandexWaveFullScreen(
                     pageSize = PageSize.Fixed(128.dp),
                     pageSpacing = 12.dp,
                     contentPadding = PaddingValues(horizontal = 112.dp),
+                    flingBehavior = PagerDefaults.flingBehavior(
+                        state = orbPagerState,
+                        pagerSnapDistance = PagerSnapDistance.atMost(6)
+                    ),
                     modifier = Modifier.fillMaxWidth().height(156.dp)
                 ) { page ->
                     val orb = displayOrbs[((page % orbCount) + orbCount) % orbCount]
