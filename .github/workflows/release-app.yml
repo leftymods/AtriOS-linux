@@ -36,12 +36,12 @@ jobs:
           git clone --depth 1 --filter=blob:none --no-checkout --branch mainline https://github.com/leftymods/AtriOS-linux.git mainline_src
           cd mainline_src
           git sparse-checkout init --cone
-          git sparse-checkout set board/yandex/station2/src/atrios_runtime
+          git sparse-checkout set board/yandex/station2/src
           git checkout
-          cd board/yandex/station2/src/atrios_runtime
-          rustc --edition=2021 --test main.rs -o /tmp/atrios_runtime_test
+          cd board/yandex/station2/src
+          rustc --edition=2021 --test atrios_runtime.rs -o /tmp/atrios_runtime_test
           /tmp/atrios_runtime_test
-          rustc --edition=2021 -C opt-level=2 --target aarch64-unknown-linux-gnu -C linker=aarch64-linux-gnu-gcc main.rs -o "$GITHUB_WORKSPACE/atrios-runtime-aarch64"
+          rustc --edition=2021 -C opt-level=2 --target aarch64-unknown-linux-gnu -C linker=aarch64-linux-gnu-gcc atrios_runtime.rs -o "$GITHUB_WORKSPACE/atrios-runtime-aarch64"
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
