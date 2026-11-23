@@ -11,6 +11,7 @@ import com.leftymods.atrios.model.SpeakerStatus
 import com.leftymods.atrios.model.TimerItem
 import com.leftymods.atrios.model.YMusicStatus
 import com.leftymods.atrios.model.YMusicAlbum
+import com.leftymods.atrios.model.YMusicOrb
 import com.leftymods.atrios.model.YMusicTrack
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -38,6 +39,7 @@ class BtControlClient(
     private val onOtaUpdate: (OtaStatus) -> Unit = {},
     private val onYMusicUpdate: (YMusicStatus) -> Unit = {},
     private val onYMusicSearchResults: (List<YMusicTrack>, List<YMusicAlbum>) -> Unit = { _, _ -> },
+    private val onYMusicOrbsUpdate: (List<YMusicOrb>) -> Unit = {},
     private val onTimersUpdate: (List<TimerItem>) -> Unit = {},
     private val onAlarmsUpdate: (List<AlarmItem>) -> Unit = {},
     private val onBtSpeakerPush: (Boolean) -> Unit = {},
@@ -343,6 +345,8 @@ class BtControlClient(
 
     fun ymusicSearch(query: String) = sendCommand(JSONObject().put("cmd", "ymusic_search").put("query", query))
 
+    fun ymusicOrbs() = sendCommand(JSONObject().put("cmd", "ymusic_orbs"))
+
     fun ymusicControl(action: String) = sendCommand(
         JSONObject().put("cmd", "ymusic_control").put("action", action)
     )
@@ -535,6 +539,12 @@ class BtControlClient(
                 val albums = YMusicAlbum.fromJsonArray(json.optJSONArray("albums"))
                 withContext(Dispatchers.Main) {
                     onYMusicSearchResults(tracks, albums)
+                }
+            }
+            "ymusic_orbs_response" -> {
+                val orbs = YMusicOrb.fromJsonArray(json.optJSONArray("orbs"))
+                withContext(Dispatchers.Main) {
+                    onYMusicOrbsUpdate(orbs)
                 }
             }
             "ymusic_status", "ymusic_login_response", "ymusic_logout_response",

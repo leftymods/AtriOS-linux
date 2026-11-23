@@ -13,6 +13,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -29,6 +30,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -43,6 +45,7 @@ import com.leftymods.atrios.model.SavedSpeaker
 import com.leftymods.atrios.model.SpeakerStatus
 import com.leftymods.atrios.model.TimerItem
 import com.leftymods.atrios.model.YMusicAlbum
+import com.leftymods.atrios.model.YMusicOrb
 import com.leftymods.atrios.model.YMusicTrack
 import com.leftymods.atrios.ui.AiAssistantCard
 import com.leftymods.atrios.ui.AsyncCoverArt
@@ -55,12 +58,13 @@ import com.leftymods.atrios.ui.TelemetryCard
 import com.leftymods.atrios.ui.TimeAndTimezoneCard
 import com.leftymods.atrios.ui.TimersAndAlarmsCard
 import com.leftymods.atrios.ui.WifiCard
-import com.leftymods.atrios.ui.YMusicCard
+import com.leftymods.atrios.ui.YandexAccountCard
+import com.leftymods.atrios.ui.YandexWaveFullScreen
+import com.leftymods.atrios.ui.theme.AppPalette
 import com.leftymods.atrios.ui.theme.AtriOSTheme
 import com.leftymods.atrios.ui.theme.OledBlack
 import com.leftymods.atrios.ui.theme.OledCard
 import com.leftymods.atrios.ui.theme.OledCardHigh
-import com.leftymods.atrios.ui.theme.YandexYellow
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -69,9 +73,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         applyFullScreenImmersive()
         setContent {
-            AtriOSTheme {
-                AtriOSApp()
-            }
+            AtriOSRoot()
         }
     }
 
@@ -84,25 +86,57 @@ class MainActivity : ComponentActivity() {
         WindowCompat.setDecorFitsSystemWindows(window, false)
         val ctrl = WindowInsetsControllerCompat(window, window.decorView)
         ctrl.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-        // Auto-hide gesture swipe navigation bar so the app fills 100% of the screen
         ctrl.hide(WindowInsetsCompat.Type.navigationBars())
     }
 }
 
 private enum class AppTab(val label: String, val icon: ImageVector) {
-    MUSIC("Музыка", Icons.Rounded.AutoAwesome),
-    SPEAKER("Колонка", Icons.Rounded.Speaker),
-    SETTINGS("Настройки", Icons.Rounded.Settings)
+    WAVE("Волна", Icons.Rounded.AutoAwesome),
+    SPEAKER("Звук", Icons.Rounded.GraphicEq),
+    TIMERS("Таймеры", Icons.Rounded.Timer),
+    SETTINGS("Меню", Icons.Rounded.Tune)
+}
+
+private enum class SettingsPage(val title: String, val subtitle: String, val icon: ImageVector) {
+    ROOT("Настройки", "", Icons.Rounded.Tune),
+    ACCOUNT("Аккаунт Яндекс", "Яндекс Музыка, вход и профиль", Icons.Rounded.Person),
+    WIFI("Wi-Fi и сеть", "Подключение колонки к Wi-Fi, интернет-пара", Icons.Rounded.Wifi),
+    BLUETOOTH("Bluetooth", "Режим BT-колонки и сопряжение", Icons.Rounded.Bluetooth),
+    PALETTE("Оформление и палитра", "Цвет интерфейса и анимации волны", Icons.Rounded.Palette),
+    TIME("Время и регион", "Синхронизация NTP и часовой пояс", Icons.Rounded.Schedule),
+    ABOUT("Об устройстве", "Прошивка, OTA и обновления приложения", Icons.Rounded.Info),
+    DEBUG("Debug-меню", "ИИ-сервер, Qwen3-TTS, анимации, RGB, телеметрия", Icons.Rounded.BugReport)
+}
+
+@Composable
+fun AtriOSRoot() {
+    val context = LocalContext.current
+    val storage = remember { SpeakerStorage(context) }
+    var palette by remember { mutableStateOf(AppPalette.fromId(storage.loadPaletteId())) }
+
+    AtriOSTheme(palette = palette) {
+        AtriOSApp(
+            storage = storage,
+            palette = palette,
+            onPaletteChange = { p ->
+                palette = p
+                storage.savePaletteId(p.id)
+            }
+        )
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @SuppressLint("MissingPermission")
 @Composable
-fun AtriOSApp() {
+fun AtriOSApp(
+    storage: SpeakerStorage,
+    palette: AppPalette,
+    onPaletteChange: (AppPalette) -> Unit
+) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
-    val storage = remember { SpeakerStorage(context) }
     val btManager = remember { context.getSystemService(BluetoothManager::class.java) }
     val adapter: BluetoothAdapter? = btManager?.adapter
 
@@ -120,18 +154,23 @@ fun AtriOSApp() {
 
     var connected by remember { mutableStateOf(false) }
     var activeDevice by remember { mutableStateOf<BluetoothDevice?>(null) }
-    var connText by remember { mutableStateOf("Выберите колонку") }
+    var connText by remember { mutableStateOf("Подключение к колонке...") }
+    var autoConnectState by remember { mutableStateOf("trying") } // trying | failed | manual | connected
+    var autoAttemptSeq by remember { mutableIntStateOf(0) }
+
     var status by remember { mutableStateOf(SpeakerStatus()) }
     var sliderVol by remember { mutableFloatStateOf(60f) }
     var timers by remember { mutableStateOf<List<TimerItem>>(emptyList()) }
     var alarms by remember { mutableStateOf<List<AlarmItem>>(emptyList()) }
     var ymSearchResults by remember { mutableStateOf<List<YMusicTrack>>(emptyList()) }
     var ymAlbumResults by remember { mutableStateOf<List<YMusicAlbum>>(emptyList()) }
+    var ymOrbs by remember { mutableStateOf<List<YMusicOrb>>(emptyList()) }
     var savedSpeakers by remember { mutableStateOf(storage.loadSpeakers()) }
     var relayConfig by remember { mutableStateOf(storage.loadRelayConfig()) }
-    var selectedTab by remember { mutableStateOf(AppTab.MUSIC) }
+
+    var selectedTab by remember { mutableStateOf(AppTab.WAVE) }
+    var settingsPage by remember { mutableStateOf(SettingsPage.ROOT) }
     var showRebootDialog by remember { mutableStateOf(false) }
-    var showDebugMenu by remember { mutableStateOf(false) }
     var availableAppUpdate by remember { mutableStateOf<AppReleaseInfo?>(null) }
     var appUpdateProgress by remember { mutableStateOf<Float?>(null) }
 
@@ -170,6 +209,7 @@ fun AtriOSApp() {
                 ymSearchResults = tracks
                 ymAlbumResults = albums
             },
+            onYMusicOrbsUpdate = { orbs -> ymOrbs = orbs },
             onYMusicUpdate = { ym -> status = status.copy(ymusic = ym) },
             onTimersUpdate = { list -> timers = list },
             onAlarmsUpdate = { list -> alarms = list },
@@ -194,7 +234,9 @@ fun AtriOSApp() {
                 connected = ok
                 connText = msg
                 activeDevice = dev
-                if (!ok) {
+                if (ok) {
+                    autoConnectState = "connected"
+                } else {
                     timers = emptyList()
                     alarms = emptyList()
                     ymSearchResults = emptyList()
@@ -202,14 +244,57 @@ fun AtriOSApp() {
                 }
             }
         ).also { c ->
-            // Seed saved internet-pair credentials immediately for seamless BT -> Wi-Fi failover
             c.setSavedRelayConfig(relayConfig.gatewayUrl, relayConfig.deviceId, relayConfig.token)
         }
     }
 
+    val bondedDevices: List<BluetoothDevice> = remember(hasPerms, adapter, connected) {
+        if (hasPerms && adapter != null) adapter.bondedDevices.toList() else emptyList()
+    }
+
+    // Automatic connection to any available transport (BT first, then Wi-Fi Relay)
+    LaunchedEffect(autoAttemptSeq, hasPerms) {
+        if (connected || autoConnectState == "manual") return@LaunchedEffect
+        autoConnectState = "trying"
+        val saved = storage.loadSpeakers()
+        val relay = storage.loadRelayConfig()
+
+        // 1. Try saved Bluetooth speaker if BT is enabled & bonded
+        val btTarget = if (hasPerms && adapter?.isEnabled == true) {
+            val bonded = adapter.bondedDevices.orEmpty()
+            saved.firstNotNullOfOrNull { s -> bonded.firstOrNull { it.address.equals(s.mac, ignoreCase = true) } }
+                ?: bonded.firstOrNull { (it.name ?: "").contains("Atri", ignoreCase = true) }
+        } else null
+
+        if (btTarget != null) {
+            client.connect(btTarget)
+            val deadline = System.currentTimeMillis() + 5500L
+            while (!connected && System.currentTimeMillis() < deadline) {
+                delay(200)
+            }
+            if (connected) return@LaunchedEffect
+        }
+
+        // 2. Fallback to saved Wi-Fi / Internet Relay automatically
+        if (relay.gatewayUrl.startsWith("https://") && relay.deviceId.isNotBlank() && relay.token.isNotBlank()) {
+            client.connectRelay(relay.gatewayUrl, relay.deviceId, relay.token)
+            val deadline = System.currentTimeMillis() + 6500L
+            while (!connected && System.currentTimeMillis() < deadline) {
+                delay(200)
+            }
+            if (connected) return@LaunchedEffect
+        }
+
+        if (!connected && autoConnectState != "manual") {
+            autoConnectState = "failed"
+        }
+    }
+
+    // Sync Yandex Music, Orbs, Timers & Alarms right after connecting
     LaunchedEffect(connected) {
         if (connected) {
             client.ymusicStatus()
+            client.ymusicOrbs()
             client.getTimers()
             client.getAlarms()
         }
@@ -225,551 +310,598 @@ fun AtriOSApp() {
 
     DisposableEffect(Unit) { onDispose { client.disconnect(silent = true) } }
 
-    val bondedDevices: List<BluetoothDevice> = remember(hasPerms, adapter, connected) {
-        if (hasPerms && adapter != null) adapter.bondedDevices.toList() else emptyList()
-    }
-
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(OledBlack)
-    ) {
-        Scaffold(
-            containerColor = OledBlack,
-            contentWindowInsets = WindowInsets(0, 0, 0, 0),
-            snackbarHost = {
-                SnackbarHost(snackbarHostState) { data ->
-                    Snackbar(
-                        snackbarData = data,
-                        containerColor = Color(0xFF2B121A),
-                        contentColor = Color(0xFFFFD6DC),
-                        shape = RoundedCornerShape(14.dp)
-                    )
-                }
-            },
-            topBar = {
-                // On Music tab when connected, YMusicCard renders its own clean Yandex Music header
-                if (!connected || selectedTab != AppTab.MUSIC) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .background(OledBlack)
-                            .statusBarsPadding()
-                            .padding(horizontal = 16.dp, vertical = 12.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
+    Box(modifier = Modifier.fillMaxSize().background(OledBlack)) {
+        if (!connected) {
+            // Disconnected / Auto-connecting / Error / Manual Connect Screen
+            when (autoConnectState) {
+                "trying" -> {
+                    Column(
+                        modifier = Modifier.fillMaxSize().padding(32.dp),
+                        verticalArrangement = Arrangement.Center,
+                        horizontalAlignment = Alignment.CenterHorizontally
                     ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(10.dp),
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(9.dp)
-                                    .clip(CircleShape)
-                                    .background(if (connected) YandexYellow else Color(0xFF555560))
-                            )
-                            Column {
-                                Text(
-                                    if (connected) status.model else "AtriOS Control",
-                                    color = Color.White,
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 18.sp,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                                Text(
-                                    connText,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    fontSize = 11.sp,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                            }
-                        }
-                        if (connected) {
-                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                IconButton(
-                                    onClick = { client.requestStatus(); client.ymusicStatus() },
-                                    modifier = Modifier.size(36.dp).clip(CircleShape).background(OledCard)
-                                ) {
-                                    Icon(Icons.Rounded.Refresh, contentDescription = "Обновить", tint = Color.White, modifier = Modifier.size(18.dp))
-                                }
-                                IconButton(
-                                    onClick = { client.disconnect() },
-                                    modifier = Modifier.size(36.dp).clip(CircleShape).background(OledCard)
-                                ) {
-                                    Icon(Icons.Rounded.PowerSettingsNew, contentDescription = "Отключить", tint = Color.White, modifier = Modifier.size(18.dp))
-                                }
-                            }
+                        CircularProgressIndicator(color = palette.accent, strokeWidth = 3.dp, modifier = Modifier.size(44.dp))
+                        Spacer(Modifier.height(20.dp))
+                        Text("Подключаемся к колонке...", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                        Spacer(Modifier.height(6.dp))
+                        Text(connText, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp, textAlign = TextAlign.Center)
+                        Spacer(Modifier.height(24.dp))
+                        TextButton(onClick = { autoConnectState = "manual" }) {
+                            Text("Выбрать вручную", color = palette.accent)
                         }
                     }
                 }
-            },
-            bottomBar = {
-                if (connected) {
+                "failed" -> {
                     Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .background(OledBlack)
+                        modifier = Modifier.fillMaxSize().padding(32.dp),
+                        verticalArrangement = Arrangement.Center,
+                        horizontalAlignment = Alignment.CenterHorizontally
                     ) {
-                        // Yandex-Music-style dark floating mini-player on non-Music tabs
-                        val ym = status.ymusic
-                        if (selectedTab != AppTab.MUSIC && (ym.isActive || ym.title.isNotBlank())) {
-                            Surface(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 12.dp, vertical = 6.dp)
-                                    .clickable {
-                                        selectedTab = AppTab.MUSIC
-                                        client.ymusicStatus()
-                                    },
-                                shape = RoundedCornerShape(18.dp),
-                                color = Color(0xFF1A1A1E)
+                        Box(
+                            modifier = Modifier.size(72.dp).clip(CircleShape).background(OledCardHigh),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(Icons.Rounded.WifiOff, contentDescription = null, tint = palette.accent, modifier = Modifier.size(34.dp))
+                        }
+                        Spacer(Modifier.height(20.dp))
+                        Text(
+                            "Упс, не удалось подключиться к колонке",
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 20.sp,
+                            textAlign = TextAlign.Center
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            "Проверьте, что колонка включена, рядом по Bluetooth или подключена к интернету.",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontSize = 13.sp,
+                            textAlign = TextAlign.Center
+                        )
+                        Spacer(Modifier.height(28.dp))
+                        Button(
+                            onClick = { autoConnectState = "trying"; autoAttemptSeq++ },
+                            modifier = Modifier.fillMaxWidth().height(52.dp),
+                            shape = RoundedCornerShape(99.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = palette.accent, contentColor = palette.onAccent)
+                        ) {
+                            Icon(Icons.Rounded.Refresh, contentDescription = null)
+                            Spacer(Modifier.width(8.dp))
+                            Text("Попробовать ещё раз", fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                        }
+                        Spacer(Modifier.height(12.dp))
+                        OutlinedButton(
+                            onClick = { autoConnectState = "manual" },
+                            modifier = Modifier.fillMaxWidth().height(50.dp),
+                            shape = RoundedCornerShape(99.dp)
+                        ) {
+                            Icon(Icons.Rounded.Tune, contentDescription = null)
+                            Spacer(Modifier.width(8.dp))
+                            Text("Подключить вручную", fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
+                        }
+                    }
+                }
+                else -> {
+                    // Manual picker screen
+                    LazyColumn(
+                        modifier = Modifier.fillMaxSize().statusBarsPadding().padding(horizontal = 16.dp),
+                        verticalArrangement = Arrangement.spacedBy(14.dp),
+                        contentPadding = PaddingValues(vertical = 16.dp)
+                    ) {
+                        item {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                modifier = Modifier.fillMaxWidth()
                             ) {
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(horizontal = 10.dp, vertical = 8.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                                ) {
-                                    AsyncCoverArt(
-                                        url = ym.coverUrl,
-                                        shape = RoundedCornerShape(10.dp),
-                                        modifier = Modifier.size(42.dp),
-                                        fallbackIcon = Icons.Rounded.MusicNote
-                                    )
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        Text(
-                                            ym.title.ifBlank { "Моя волна" },
-                                            color = Color.White,
-                                            fontWeight = FontWeight.SemiBold,
-                                            fontSize = 14.sp,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
-                                        if (ym.artist.isNotBlank()) {
-                                            Text(
-                                                ym.artist,
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                                fontSize = 12.sp,
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis
-                                            )
-                                        }
-                                    }
-                                    IconButton(
-                                        onClick = { client.ymusicControl("like") },
-                                        modifier = Modifier.size(34.dp)
-                                    ) {
-                                        Icon(
-                                            if (ym.liked) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
-                                            contentDescription = "Нравится",
-                                            tint = if (ym.liked) Color(0xFFFF3366) else Color.White,
-                                            modifier = Modifier.size(20.dp)
-                                        )
-                                    }
-                                    IconButton(
-                                        onClick = {
-                                            val nextState = if (ym.state == "playing") "paused" else "playing"
-                                            status = status.copy(ymusic = ym.copy(state = nextState))
-                                            client.ymusicControl(if (ym.state == "playing") "pause" else "play")
-                                        },
-                                        modifier = Modifier.size(36.dp)
-                                    ) {
-                                        Icon(
-                                            if (ym.state == "playing") Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
-                                            contentDescription = "Пауза / Плей",
-                                            tint = Color.White,
-                                            modifier = Modifier.size(26.dp)
-                                        )
-                                    }
-                                    IconButton(
-                                        onClick = { client.ymusicControl("next") },
-                                        modifier = Modifier.size(34.dp)
-                                    ) {
-                                        Icon(Icons.Rounded.SkipNext, contentDescription = "Следующий", tint = Color.White, modifier = Modifier.size(22.dp))
-                                    }
+                                Text("Подключение вручную", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 22.sp)
+                                TextButton(onClick = { autoConnectState = "trying"; autoAttemptSeq++ }) {
+                                    Text("Автопоиск", color = palette.accent)
                                 }
                             }
                         }
-
-                        // Minimalist Yandex Music style bottom icon bar
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .background(OledBlack)
-                                .padding(horizontal = 20.dp, vertical = 10.dp),
-                            horizontalArrangement = Arrangement.SpaceEvenly,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            AppTab.entries.forEach { tab ->
-                                val sel = selectedTab == tab
-                                Column(
-                                    horizontalAlignment = Alignment.CenterHorizontally,
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(14.dp))
-                                        .clickable {
-                                            selectedTab = tab
-                                            when (tab) {
-                                                AppTab.MUSIC -> client.ymusicStatus()
-                                                AppTab.SPEAKER -> {
-                                                    client.getTimers()
-                                                    client.getAlarms()
+                        if (!hasPerms) {
+                            item {
+                                Surface(shape = RoundedCornerShape(22.dp), color = OledCard) {
+                                    Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                        Text("Разрешение Bluetooth", fontWeight = FontWeight.Bold)
+                                        Text("Нужно для поиска колонки по Bluetooth.", style = MaterialTheme.typography.bodySmall)
+                                        Button(
+                                            onClick = {
+                                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                                                    permLauncher.launch(arrayOf(Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.BLUETOOTH_SCAN))
                                                 }
-                                                AppTab.SETTINGS -> client.otaStatus()
-                                            }
-                                        }
-                                        .padding(horizontal = 18.dp, vertical = 6.dp)
-                                ) {
-                                    Icon(
-                                        tab.icon,
-                                        contentDescription = tab.label,
-                                        tint = if (sel) YandexYellow else Color(0xFF6E6E78),
-                                        modifier = Modifier.size(26.dp)
-                                    )
-                                    Spacer(Modifier.height(2.dp))
-                                    Text(
-                                        tab.label,
-                                        color = if (sel) YandexYellow else Color(0xFF6E6E78),
-                                        fontSize = 11.sp,
-                                        fontWeight = if (sel) FontWeight.SemiBold else FontWeight.Normal
-                                    )
+                                            },
+                                            shape = RoundedCornerShape(99.dp)
+                                        ) { Text("Разрешить") }
+                                    }
+                                }
+                            }
+                        } else {
+                            item {
+                                DevicePickerSection(
+                                    savedSpeakers = savedSpeakers,
+                                    bondedDevices = bondedDevices,
+                                    onConnect = { dev -> client.connect(dev) },
+                                    onForgetSaved = { mac -> savedSpeakers = storage.removeSpeaker(mac) }
+                                )
+                            }
+                        }
+                        item {
+                            var gwInput by remember(relayConfig.gatewayUrl) { mutableStateOf(relayConfig.gatewayUrl) }
+                            var didInput by remember(relayConfig.deviceId) { mutableStateOf(relayConfig.deviceId) }
+                            var tokInput by remember(relayConfig.token) { mutableStateOf(relayConfig.token) }
+                            Surface(shape = RoundedCornerShape(22.dp), color = OledCard) {
+                                Column(Modifier.fillMaxWidth().padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                    Text("Через интернет (HTTPS Relay)", fontWeight = FontWeight.Bold, color = Color.White)
+                                    OutlinedTextField(value = gwInput, onValueChange = { gwInput = it }, label = { Text("HTTPS шлюз") }, singleLine = true, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp))
+                                    OutlinedTextField(value = didInput, onValueChange = { didInput = it }, label = { Text("Device ID") }, singleLine = true, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp))
+                                    OutlinedTextField(value = tokInput, onValueChange = { tokInput = it }, label = { Text("Bearer токен") }, singleLine = true, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp))
+                                    Button(
+                                        onClick = {
+                                            val cfg = RelayConfig(gwInput.trim(), didInput.trim(), tokInput.trim())
+                                            relayConfig = cfg
+                                            storage.saveRelayConfig(cfg)
+                                            client.connectRelay(cfg.gatewayUrl, cfg.deviceId, cfg.token)
+                                        },
+                                        enabled = gwInput.trim().startsWith("https://") && didInput.isNotBlank() && tokInput.isNotBlank(),
+                                        modifier = Modifier.fillMaxWidth().height(48.dp),
+                                        shape = RoundedCornerShape(99.dp)
+                                    ) { Text("Подключиться", fontWeight = FontWeight.Bold) }
                                 }
                             }
                         }
                     }
                 }
             }
-        ) { pad ->
-            LazyColumn(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(pad)
-                    .then(if (connected && selectedTab == AppTab.MUSIC) Modifier.statusBarsPadding() else Modifier)
-                    .padding(horizontal = 14.dp),
-                verticalArrangement = Arrangement.spacedBy(14.dp),
-                contentPadding = PaddingValues(top = 6.dp, bottom = 18.dp)
-            ) {
-                if (!hasPerms) {
-                    item {
-                        Surface(shape = RoundedCornerShape(24.dp), color = OledCard) {
-                            Column(
-                                Modifier.padding(20.dp),
-                                verticalArrangement = Arrangement.spacedBy(12.dp)
-                            ) {
-                                Text("Разрешение Bluetooth", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                                Text("Для первичной связки с колонкой AtriOS требуется разрешение Bluetooth.")
-                                Button(
-                                    onClick = {
-                                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                                            permLauncher.launch(
-                                                arrayOf(
-                                                    Manifest.permission.BLUETOOTH_CONNECT,
-                                                    Manifest.permission.BLUETOOTH_SCAN
-                                                )
-                                            )
-                                        }
-                                    },
-                                    shape = RoundedCornerShape(99.dp)
-                                ) { Text("Разрешить", fontWeight = FontWeight.Bold) }
-                            }
-                        }
+        } else {
+            // CONNECTED UI
+            Scaffold(
+                containerColor = OledBlack,
+                contentWindowInsets = WindowInsets(0, 0, 0, 0),
+                snackbarHost = {
+                    SnackbarHost(snackbarHostState) { data ->
+                        Snackbar(
+                            snackbarData = data,
+                            containerColor = Color(0xFF2B121A),
+                            contentColor = Color(0xFFFFD6DC),
+                            shape = RoundedCornerShape(14.dp)
+                        )
                     }
-                }
-
-                if (!connected && hasPerms) {
-                    // Quick 1-tap connect over saved Internet pair if already paired once via BT!
-                    if (relayConfig.gatewayUrl.startsWith("https://") && relayConfig.deviceId.isNotBlank() && relayConfig.token.isNotBlank()) {
-                        item {
-                            Surface(shape = RoundedCornerShape(24.dp), color = OledCard) {
-                                Column(
-                                    modifier = Modifier.fillMaxWidth().padding(18.dp),
-                                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                },
+                bottomBar = {
+                    Column(modifier = Modifier.fillMaxWidth().background(OledBlack)) {
+                        // Floating dark mini-player on non-Wave tabs
+                        val ym = status.ymusic
+                        if (selectedTab != AppTab.WAVE && (ym.isActive || ym.title.isNotBlank())) {
+                            Surface(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp, vertical = 6.dp)
+                                    .clickable { selectedTab = AppTab.WAVE; client.ymusicStatus() },
+                                shape = RoundedCornerShape(16.dp),
+                                color = Color(0xFF1A1A1E)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
                                 ) {
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(10.dp)
-                                    ) {
-                                        Icon(Icons.Rounded.CloudDone, contentDescription = null, tint = YandexYellow)
-                                        Column(modifier = Modifier.weight(1f)) {
-                                            Text("Интернет-пара готова", fontWeight = FontWeight.Bold, color = Color.White)
-                                            Text(
-                                                "${relayConfig.deviceId} · ${relayConfig.gatewayUrl.removePrefix("https://")}",
-                                                style = MaterialTheme.typography.labelSmall,
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                                            )
+                                    AsyncCoverArt(url = ym.coverUrl, shape = RoundedCornerShape(8.dp), modifier = Modifier.size(40.dp))
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(ym.title.ifBlank { "Моя волна" }, color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                        if (ym.artist.isNotBlank()) {
+                                            Text(ym.artist, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                         }
                                     }
-                                    Button(
+                                    IconButton(onClick = { client.ymusicControl("like") }, modifier = Modifier.size(32.dp)) {
+                                        Icon(if (ym.liked) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder, contentDescription = null, tint = if (ym.liked) Color(0xFFFF2E7A) else Color.White, modifier = Modifier.size(20.dp))
+                                    }
+                                    IconButton(
                                         onClick = {
-                                            client.connectRelay(relayConfig.gatewayUrl, relayConfig.deviceId, relayConfig.token)
+                                            val nxt = if (ym.state == "playing") "paused" else "playing"
+                                            status = status.copy(ymusic = ym.copy(state = nxt))
+                                            client.ymusicControl(if (ym.state == "playing") "pause" else "play")
                                         },
-                                        modifier = Modifier.fillMaxWidth().height(48.dp),
-                                        shape = RoundedCornerShape(99.dp),
-                                        colors = ButtonDefaults.buttonColors(containerColor = YandexYellow, contentColor = Color.Black)
+                                        modifier = Modifier.size(34.dp)
                                     ) {
-                                        Icon(Icons.Rounded.Wifi, contentDescription = null)
-                                        Spacer(Modifier.width(8.dp))
-                                        Text("Подключиться через интернет", fontWeight = FontWeight.Bold)
+                                        Icon(if (ym.state == "playing") Icons.Rounded.Pause else Icons.Rounded.PlayArrow, contentDescription = null, tint = Color.White, modifier = Modifier.size(26.dp))
+                                    }
+                                    IconButton(onClick = { client.ymusicControl("next") }, modifier = Modifier.size(32.dp)) {
+                                        Icon(Icons.Rounded.SkipNext, contentDescription = null, tint = Color.White, modifier = Modifier.size(22.dp))
                                     }
                                 }
                             }
                         }
-                    }
 
-                    item {
-                        DevicePickerSection(
-                            savedSpeakers = savedSpeakers,
-                            bondedDevices = bondedDevices,
-                            onConnect = { dev -> client.connect(dev) },
-                            onForgetSaved = { mac -> savedSpeakers = storage.removeSpeaker(mac) }
-                        )
+                        // Minimalist 4-icon OLED Bottom Bar (matching Yandex Music screenshot!)
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(OledBlack)
+                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                            horizontalArrangement = Arrangement.SpaceEvenly,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            AppTab.entries.forEach { tab ->
+                                val sel = selectedTab == tab
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(14.dp))
+                                        .clickable {
+                                            selectedTab = tab
+                                            if (tab == AppTab.SETTINGS) settingsPage = SettingsPage.ROOT
+                                            when (tab) {
+                                                AppTab.WAVE -> { client.ymusicStatus(); if (ymOrbs.isEmpty()) client.ymusicOrbs() }
+                                                AppTab.TIMERS -> { client.getTimers(); client.getAlarms() }
+                                                AppTab.SETTINGS -> client.otaStatus()
+                                                else -> Unit
+                                            }
+                                        }
+                                        .padding(horizontal = 18.dp, vertical = 8.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        tab.icon,
+                                        contentDescription = tab.label,
+                                        tint = if (sel) palette.accent else Color(0xFF6B6B75),
+                                        modifier = Modifier.size(27.dp)
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
-
-                if (connected) {
+            ) { pad ->
+                Box(modifier = Modifier.fillMaxSize().padding(pad)) {
                     when (selectedTab) {
-                        AppTab.MUSIC -> {
-                            item {
-                                YMusicCard(
-                                    ymusic = status.ymusic,
-                                    searchResults = ymSearchResults,
-                                    albumResults = ymAlbumResults,
-                                    onRefresh = { client.ymusicStatus() },
-                                    onLogin = { token -> client.ymusicLogin(token) },
-                                    onLogout = { client.ymusicLogout() },
-                                    onPlay = { mode, query ->
-                                        client.ymusicPlay(mode, query)
-                                        scope.launch {
-                                            delay(1100)
-                                            client.ymusicStatus()
-                                        }
-                                    },
-                                    onSearch = { q -> client.ymusicSearch(q) },
-                                    onControl = { action ->
-                                        if (action == "pause" || action == "play") {
-                                            status = status.copy(
-                                                ymusic = status.ymusic.copy(
-                                                    state = if (action == "pause") "paused" else "playing"
-                                                )
-                                            )
-                                        }
-                                        client.ymusicControl(action)
+                        AppTab.WAVE -> {
+                            YandexWaveFullScreen(
+                                ymusic = status.ymusic,
+                                palette = palette,
+                                orbs = ymOrbs,
+                                searchResults = ymSearchResults,
+                                albumResults = ymAlbumResults,
+                                onRefresh = { client.ymusicStatus(); client.ymusicOrbs() },
+                                onLogin = { tok -> client.ymusicLogin(tok) },
+                                onPlay = { mode, q ->
+                                    client.ymusicPlay(mode, q)
+                                    scope.launch { delay(900); client.ymusicStatus() }
+                                },
+                                onSearch = { q -> client.ymusicSearch(q) },
+                                onControl = { action ->
+                                    if (action == "pause" || action == "play") {
+                                        status = status.copy(ymusic = status.ymusic.copy(state = if (action == "pause") "paused" else "playing"))
                                     }
-                                )
-                            }
+                                    client.ymusicControl(action)
+                                },
+                                onOpenAccountSettings = {
+                                    selectedTab = AppTab.SETTINGS
+                                    settingsPage = SettingsPage.ACCOUNT
+                                }
+                            )
                         }
 
                         AppTab.SPEAKER -> {
-                            item {
-                                AudioCard(
-                                    volume = sliderVol,
-                                    mute = status.mute,
-                                    speakersDesc = status.speakersDesc,
-                                    onVolumeChange = { sliderVol = it },
-                                    onVolumeCommit = { client.setVolume(it) },
-                                    onToggleMute = { client.setMute(!status.mute) },
-                                    onAudioTest = { client.audioTest() }
-                                )
+                            LazyColumn(
+                                modifier = Modifier.fillMaxSize().statusBarsPadding().padding(horizontal = 16.dp),
+                                verticalArrangement = Arrangement.spacedBy(14.dp),
+                                contentPadding = PaddingValues(vertical = 14.dp)
+                            ) {
+                                item {
+                                    Text("Звук и колонка", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 24.sp)
+                                    Text(connText, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
+                                }
+                                item {
+                                    AudioCard(
+                                        volume = sliderVol,
+                                        mute = status.mute,
+                                        speakersDesc = status.speakersDesc,
+                                        onVolumeChange = { sliderVol = it },
+                                        onVolumeCommit = { client.setVolume(it) },
+                                        onToggleMute = { client.setMute(!status.mute) },
+                                        onAudioTest = { client.audioTest() }
+                                    )
+                                }
                             }
-                            item {
-                                TimersAndAlarmsCard(
-                                    timers = timers,
-                                    alarms = alarms,
-                                    onRefresh = {
-                                        client.getTimers()
-                                        client.getAlarms()
-                                    },
-                                    onAddTimer = { secs -> client.setTimer(secs) },
-                                    onCancelTimer = { id -> client.cancelTimers(id) },
-                                    onAddAlarm = { h, m -> client.setAlarm(h, m) },
-                                    onCancelAlarm = { id -> client.cancelAlarms(id) }
-                                )
+                        }
+
+                        AppTab.TIMERS -> {
+                            LazyColumn(
+                                modifier = Modifier.fillMaxSize().statusBarsPadding().padding(horizontal = 16.dp),
+                                verticalArrangement = Arrangement.spacedBy(14.dp),
+                                contentPadding = PaddingValues(vertical = 14.dp)
+                            ) {
+                                item {
+                                    Text("Таймеры и будильники", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 24.sp)
+                                }
+                                item {
+                                    TimersAndAlarmsCard(
+                                        timers = timers,
+                                        alarms = alarms,
+                                        onRefresh = { client.getTimers(); client.getAlarms() },
+                                        onAddTimer = { secs -> client.setTimer(secs) },
+                                        onCancelTimer = { id -> client.cancelTimers(id) },
+                                        onAddAlarm = { h, m -> client.setAlarm(h, m) },
+                                        onCancelAlarm = { id -> client.cancelAlarms(id) }
+                                    )
+                                }
                             }
                         }
 
                         AppTab.SETTINGS -> {
-                            // Auto-paired Internet link status badge
-                            item {
-                                Surface(shape = RoundedCornerShape(22.dp), color = OledCard) {
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth().padding(16.dp),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(12.dp)
-                                    ) {
-                                        Icon(
-                                            if (relayConfig.token.isNotBlank()) Icons.Rounded.CloudDone else Icons.Rounded.CloudOff,
-                                            contentDescription = null,
-                                            tint = if (relayConfig.token.isNotBlank()) YandexYellow else Color(0xFF6E6E78)
-                                        )
-                                        Column(modifier = Modifier.weight(1f)) {
-                                            Text(
-                                                if (relayConfig.token.isNotBlank()) "Интернет-пара активна (автопереход)" else "Интернет-пара не создана",
-                                                fontWeight = FontWeight.SemiBold,
-                                                color = Color.White,
-                                                fontSize = 14.sp
-                                            )
-                                            Text(
-                                                if (relayConfig.token.isNotBlank())
-                                                    "ID: ${relayConfig.deviceId} · при отключении BT перейдёт на Wi-Fi автоматически"
-                                                else "Подключитесь один раз по Bluetooth для автоматической привязки",
-                                                style = MaterialTheme.typography.labelSmall,
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                                            )
-                                        }
-                                    }
-                                }
-                            }
-                            item {
-                                WifiCard(
-                                    wifiConnected = status.wifiConnected,
-                                    wifiSsid = status.wifiSsid,
-                                    wifiIp = status.wifiIp,
-                                    onConnectWifi = { ssid, psk -> client.wifiConnect(ssid, psk) }
-                                )
-                            }
-                            item {
-                                BluetoothCard(
-                                    status = status,
-                                    onToggleSpeakerMode = { enabled -> client.setBtSpeakerMode(enabled) },
-                                    onPair = { secs -> client.btPair(secs) },
-                                    onHide = { client.btHide() },
-                                    onUnpair = { mac -> client.btUnpair(mac) }
-                                )
-                            }
-                            item {
-                                TimeAndTimezoneCard(
-                                    localTime = status.localTime,
-                                    timezone = status.timezone,
-                                    onSyncNtp = { client.ntpSync() },
-                                    onSetTimezone = { tz -> client.setTimezone(tz) }
-                                )
-                            }
-                            item {
-                                OtaUpdateCard(
-                                    fwVersion = status.fwVersion,
-                                    codename = status.codename,
-                                    ota = status.ota,
-                                    onCheckUpdates = { client.otaCheck() },
-                                    onRefreshStatus = { client.otaStatus() },
-                                    onApplyUpdate = { reboot -> client.otaApply(reboot) },
-                                    onRollback = { reboot -> client.otaRollback(reboot) },
-                                    onRebootNow = { showRebootDialog = true }
-                                )
-                            }
-                            item {
-                                Surface(shape = RoundedCornerShape(22.dp), color = OledCard) {
-                                    Column(
-                                        modifier = Modifier.fillMaxWidth().padding(18.dp),
-                                        verticalArrangement = Arrangement.spacedBy(10.dp)
-                                    ) {
-                                        Text("Об устройстве и приложении", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                                        Text("${status.model} · прошивка v${status.fwVersion}", style = MaterialTheme.typography.bodyMedium)
-                                        val rel = availableAppUpdate
-                                        if (rel != null) {
-                                            val prog = appUpdateProgress
-                                            if (prog != null) {
-                                                LinearProgressIndicator(progress = { prog }, modifier = Modifier.fillMaxWidth(), color = YandexYellow)
-                                                Text("Загрузка APK: ${(prog * 100).toInt()}%", style = MaterialTheme.typography.bodySmall)
-                                            } else {
-                                                Button(
-                                                    onClick = {
-                                                        scope.launch {
-                                                            appUpdateProgress = 0f
-                                                            val res = AppUpdater.downloadAndInstall(context, rel) { p -> appUpdateProgress = p }
-                                                            appUpdateProgress = null
-                                                            res.onFailure { e ->
-                                                                snackbarHostState.showSnackbar("Ошибка загрузки APK: ${e.message}")
-                                                            }
-                                                        }
-                                                    },
-                                                    shape = RoundedCornerShape(99.dp)
-                                                ) {
-                                                    Icon(Icons.Rounded.Download, contentDescription = null)
-                                                    Spacer(Modifier.width(6.dp))
-                                                    Text("Обновить приложение (v${rel.version})", fontWeight = FontWeight.Bold)
-                                                }
+                            LazyColumn(
+                                modifier = Modifier.fillMaxSize().statusBarsPadding().padding(horizontal = 16.dp),
+                                verticalArrangement = Arrangement.spacedBy(12.dp),
+                                contentPadding = PaddingValues(vertical = 14.dp)
+                            ) {
+                                if (settingsPage == SettingsPage.ROOT) {
+                                    item {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Column {
+                                                Text("Настройки", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 26.sp)
+                                                Text("${status.model} · $connText", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
                                             }
-                                        } else {
-                                            FilledTonalButton(
-                                                onClick = { scope.launch { availableAppUpdate = AppUpdater.checkForUpdate(context) } },
-                                                shape = RoundedCornerShape(99.dp)
+                                            IconButton(
+                                                onClick = { client.disconnect(); autoConnectState = "manual" },
+                                                modifier = Modifier.size(38.dp).clip(CircleShape).background(OledCard)
                                             ) {
-                                                Icon(Icons.Rounded.Refresh, contentDescription = null)
-                                                Spacer(Modifier.width(6.dp))
-                                                Text("Проверить обновления приложения")
+                                                Icon(Icons.Rounded.PowerSettingsNew, contentDescription = "Отключить", tint = Color.White, modifier = Modifier.size(19.dp))
                                             }
                                         }
                                     }
-                                }
-                            }
-
-                            // Collapsible Debug / Engineering Menu: AI server, Qwen3-TTS, Screen animations, RGB ring, Telemetry
-                            item {
-                                Surface(
-                                    shape = RoundedCornerShape(22.dp),
-                                    color = OledCardHigh,
-                                    modifier = Modifier.clickable { showDebugMenu = !showDebugMenu }
-                                ) {
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 16.dp),
-                                        horizontalArrangement = Arrangement.SpaceBetween,
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
+                                    val menuPages = listOf(
+                                        SettingsPage.ACCOUNT,
+                                        SettingsPage.WIFI,
+                                        SettingsPage.BLUETOOTH,
+                                        SettingsPage.PALETTE,
+                                        SettingsPage.TIME,
+                                        SettingsPage.ABOUT,
+                                        SettingsPage.DEBUG
+                                    )
+                                    items(menuPages.size) { idx ->
+                                        val page = menuPages[idx]
+                                        Surface(
+                                            shape = RoundedCornerShape(20.dp),
+                                            color = OledCard,
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .clickable {
+                                                    settingsPage = page
+                                                    if (page == SettingsPage.ABOUT) client.otaStatus()
+                                                }
+                                        ) {
+                                            Row(
+                                                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 15.dp),
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(14.dp)
+                                            ) {
+                                                Box(
+                                                    modifier = Modifier.size(40.dp).clip(CircleShape).background(palette.accent.copy(alpha = 0.14f)),
+                                                    contentAlignment = Alignment.Center
+                                                ) {
+                                                    Icon(page.icon, contentDescription = null, tint = palette.accent, modifier = Modifier.size(22.dp))
+                                                }
+                                                Column(modifier = Modifier.weight(1f)) {
+                                                    Text(page.title, color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
+                                                    Text(page.subtitle, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                                }
+                                                Icon(Icons.Rounded.ChevronRight, contentDescription = null, tint = Color(0xFF6B6B75))
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    // Submenu header with Back button
+                                    item {
                                         Row(
                                             verticalAlignment = Alignment.CenterVertically,
-                                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                            modifier = Modifier.fillMaxWidth()
                                         ) {
-                                            Icon(Icons.Rounded.BugReport, contentDescription = null, tint = YandexYellow)
-                                            Column {
-                                                Text("Debug-меню", fontWeight = FontWeight.Bold, color = Color.White)
-                                                Text(
-                                                    "ИИ-сервер, Qwen3-TTS, анимации экрана, RGB-кольцо, телеметрия",
-                                                    style = MaterialTheme.typography.labelSmall,
-                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            IconButton(
+                                                onClick = { settingsPage = SettingsPage.ROOT },
+                                                modifier = Modifier.size(38.dp).clip(CircleShape).background(OledCard)
+                                            ) {
+                                                Icon(Icons.Rounded.ArrowBack, contentDescription = "Назад", tint = Color.White)
+                                            }
+                                            Text(settingsPage.title, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 22.sp)
+                                        }
+                                    }
+
+                                    when (settingsPage) {
+                                        SettingsPage.ACCOUNT -> {
+                                            item {
+                                                YandexAccountCard(
+                                                    ymusic = status.ymusic,
+                                                    onLogin = { tok -> client.ymusicLogin(tok) },
+                                                    onLogout = { client.ymusicLogout() },
+                                                    onRefresh = { client.ymusicStatus(); client.ymusicOrbs() }
                                                 )
                                             }
                                         }
-                                        Icon(
-                                            if (showDebugMenu) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
-                                            contentDescription = null,
-                                            tint = Color.White
-                                        )
+                                        SettingsPage.WIFI -> {
+                                            item {
+                                                WifiCard(
+                                                    wifiConnected = status.wifiConnected,
+                                                    wifiSsid = status.wifiSsid,
+                                                    wifiIp = status.wifiIp,
+                                                    onConnectWifi = { ssid, psk -> client.wifiConnect(ssid, psk) }
+                                                )
+                                            }
+                                            item {
+                                                Surface(shape = RoundedCornerShape(22.dp), color = OledCard) {
+                                                    Row(
+                                                        modifier = Modifier.fillMaxWidth().padding(16.dp),
+                                                        verticalAlignment = Alignment.CenterVertically,
+                                                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                                                    ) {
+                                                        Icon(
+                                                            if (relayConfig.token.isNotBlank()) Icons.Rounded.CloudDone else Icons.Rounded.CloudOff,
+                                                            contentDescription = null,
+                                                            tint = if (relayConfig.token.isNotBlank()) palette.accent else Color(0xFF6B6B75)
+                                                        )
+                                                        Column {
+                                                            Text(
+                                                                if (relayConfig.token.isNotBlank()) "Интернет-пара активна" else "Интернет-пара не настроена",
+                                                                color = Color.White,
+                                                                fontWeight = FontWeight.SemiBold
+                                                            )
+                                                            Text(
+                                                                if (relayConfig.token.isNotBlank()) "ID: ${relayConfig.deviceId} · автопереход при отключении BT"
+                                                                else "Подключитесь 1 раз по Bluetooth для автопривязки",
+                                                                style = MaterialTheme.typography.labelSmall,
+                                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                            )
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        SettingsPage.BLUETOOTH -> {
+                                            item {
+                                                BluetoothCard(
+                                                    status = status,
+                                                    onToggleSpeakerMode = { enabled -> client.setBtSpeakerMode(enabled) },
+                                                    onPair = { secs -> client.btPair(secs) },
+                                                    onHide = { client.btHide() },
+                                                    onUnpair = { mac -> client.btUnpair(mac) }
+                                                )
+                                            }
+                                        }
+                                        SettingsPage.PALETTE -> {
+                                            item {
+                                                Surface(shape = RoundedCornerShape(22.dp), color = OledCard) {
+                                                    Column(Modifier.fillMaxWidth().padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                                                        Text("Выберите палитру приложения", color = Color.White, fontWeight = FontWeight.SemiBold)
+                                                        AppPalette.entries.forEach { p ->
+                                                            val sel = p == palette
+                                                            Row(
+                                                                modifier = Modifier
+                                                                    .fillMaxWidth()
+                                                                    .clip(RoundedCornerShape(16.dp))
+                                                                    .background(if (sel) p.accent.copy(alpha = 0.14f) else OledCardHigh)
+                                                                    .border(1.dp, if (sel) p.accent else Color.Transparent, RoundedCornerShape(16.dp))
+                                                                    .clickable { onPaletteChange(p) }
+                                                                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                                                                verticalAlignment = Alignment.CenterVertically,
+                                                                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                                                            ) {
+                                                                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                                                    Box(Modifier.size(20.dp).clip(CircleShape).background(p.aura1))
+                                                                    Box(Modifier.size(20.dp).clip(CircleShape).background(p.aura2))
+                                                                    Box(Modifier.size(20.dp).clip(CircleShape).background(p.aura3))
+                                                                }
+                                                                Text(p.label, color = Color.White, fontWeight = if (sel) FontWeight.Bold else FontWeight.Medium, modifier = Modifier.weight(1f))
+                                                                if (sel) Icon(Icons.Rounded.CheckCircle, contentDescription = null, tint = p.accent)
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        SettingsPage.TIME -> {
+                                            item {
+                                                TimeAndTimezoneCard(
+                                                    localTime = status.localTime,
+                                                    timezone = status.timezone,
+                                                    onSyncNtp = { client.ntpSync() },
+                                                    onSetTimezone = { tz -> client.setTimezone(tz) }
+                                                )
+                                            }
+                                        }
+                                        SettingsPage.ABOUT -> {
+                                            item {
+                                                Surface(shape = RoundedCornerShape(22.dp), color = OledCard) {
+                                                    Column(Modifier.fillMaxWidth().padding(18.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                                        Text("Колонка", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                                                        Text("Модель: ${status.model}", color = Color.White)
+                                                        Text("Прошивка: v${status.fwVersion}", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                                        if (status.codename.isNotBlank()) Text("Кодовое имя: ${status.codename} ${status.rev}".trim(), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
+                                                        if (status.soc.isNotBlank()) Text("SoC: ${status.soc}", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
+                                                        if (relayConfig.deviceId.isNotBlank()) Text("Device ID: ${relayConfig.deviceId}", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
+                                                    }
+                                                }
+                                            }
+                                            item {
+                                                OtaUpdateCard(
+                                                    fwVersion = status.fwVersion,
+                                                    codename = status.codename,
+                                                    ota = status.ota,
+                                                    onCheckUpdates = { client.otaCheck() },
+                                                    onRefreshStatus = { client.otaStatus() },
+                                                    onApplyUpdate = { reboot -> client.otaApply(reboot) },
+                                                    onRollback = { reboot -> client.otaRollback(reboot) },
+                                                    onRebootNow = { showRebootDialog = true }
+                                                )
+                                            }
+                                            item {
+                                                Surface(shape = RoundedCornerShape(22.dp), color = OledCard) {
+                                                    Column(Modifier.fillMaxWidth().padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                                        Text("Приложение AtriOS Control", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                                                        val rel = availableAppUpdate
+                                                        if (rel != null) {
+                                                            val prog = appUpdateProgress
+                                                            if (prog != null) {
+                                                                LinearProgressIndicator(progress = { prog }, modifier = Modifier.fillMaxWidth(), color = palette.accent)
+                                                                Text("Загрузка APK: ${(prog * 100).toInt()}%", style = MaterialTheme.typography.bodySmall)
+                                                            } else {
+                                                                Button(
+                                                                    onClick = {
+                                                                        scope.launch {
+                                                                            appUpdateProgress = 0f
+                                                                            val res = AppUpdater.downloadAndInstall(context, rel) { p -> appUpdateProgress = p }
+                                                                            appUpdateProgress = null
+                                                                            res.onFailure { e -> snackbarHostState.showSnackbar("Ошибка загрузки APK: ${e.message}") }
+                                                                        }
+                                                                    },
+                                                                    shape = RoundedCornerShape(99.dp)
+                                                                ) {
+                                                                    Icon(Icons.Rounded.Download, contentDescription = null)
+                                                                    Spacer(Modifier.width(6.dp))
+                                                                    Text("Обновить до v${rel.version}", fontWeight = FontWeight.Bold)
+                                                                }
+                                                            }
+                                                        } else {
+                                                            FilledTonalButton(
+                                                                onClick = { scope.launch { availableAppUpdate = AppUpdater.checkForUpdate(context) } },
+                                                                shape = RoundedCornerShape(99.dp)
+                                                            ) {
+                                                                Icon(Icons.Rounded.Refresh, contentDescription = null)
+                                                                Spacer(Modifier.width(6.dp))
+                                                                Text("Проверить обновления приложения")
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        SettingsPage.DEBUG -> {
+                                            item {
+                                                AiAssistantCard(
+                                                    ai = status.ai,
+                                                    onApplyAi = { enabled, mode, server, wake, voice, emotion ->
+                                                        client.setAi(enabled = enabled, mode = mode, server = server, wakeWord = wake, ttsVoice = voice, ttsEmotion = emotion)
+                                                    }
+                                                )
+                                            }
+                                            item {
+                                                LedAndScreenCard(
+                                                    capabilities = status.capabilities,
+                                                    currentScreenMode = status.screenMode,
+                                                    currentRingMode = status.ringMode,
+                                                    onSetScreen = { mode, st, txt -> client.setScreen(mode, st, txt) },
+                                                    onSetRing = { mode -> status = status.copy(ringMode = mode); client.setRing(mode) }
+                                                )
+                                            }
+                                            item { TelemetryCard(status = status) }
+                                        }
+                                        SettingsPage.ROOT -> Unit
                                     }
                                 }
-                            }
-                            if (showDebugMenu) {
-                                item {
-                                    AiAssistantCard(
-                                        ai = status.ai,
-                                        onApplyAi = { enabled, mode, server, wake, voice, emotion ->
-                                            client.setAi(
-                                                enabled = enabled,
-                                                mode = mode,
-                                                server = server,
-                                                wakeWord = wake,
-                                                ttsVoice = voice,
-                                                ttsEmotion = emotion
-                                            )
-                                        }
-                                    )
-                                }
-                                item {
-                                    LedAndScreenCard(
-                                        capabilities = status.capabilities,
-                                        currentScreenMode = status.screenMode,
-                                        currentRingMode = status.ringMode,
-                                        onSetScreen = { mode, st, txt -> client.setScreen(mode, st, txt) },
-                                        onSetRing = { mode ->
-                                            status = status.copy(ringMode = mode)
-                                            client.setRing(mode)
-                                        }
-                                    )
-                                }
-                                item { TelemetryCard(status = status) }
                             }
                         }
                     }
@@ -783,10 +915,7 @@ fun AtriOSApp() {
                 title = { Text("Перезагрузить колонку?") },
                 text = { Text("Соединение будет временно прервано на время перезагрузки.") },
                 confirmButton = {
-                    Button(onClick = {
-                        showRebootDialog = false
-                        client.reboot()
-                    }) { Text("Перезагрузить") }
+                    Button(onClick = { showRebootDialog = false; client.reboot() }) { Text("Перезагрузить") }
                 },
                 dismissButton = {
                     TextButton(onClick = { showRebootDialog = false }) { Text("Отмена") }

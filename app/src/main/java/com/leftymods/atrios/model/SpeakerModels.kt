@@ -302,6 +302,43 @@ data class YMusicAlbum(
     }
 }
 
+
+data class YMusicOrb(
+    val id: String,
+    val title: String,
+    val subtitle: String = "",
+    val mode: String = "wave",
+    val query: String = "",
+    val coverUrl: String = "",
+    val colorHex: String = "#FF4D00"
+) {
+    companion object {
+        fun fromJsonArray(arr: JSONArray?): List<YMusicOrb> {
+            if (arr == null) return emptyList()
+            return buildList {
+                for (i in 0 until arr.length()) {
+                    val o = arr.optJSONObject(i) ?: continue
+                    val id = o.optString("id", "").trim()
+                    val title = o.optString("title", "").trim()
+                    if (id.isNotEmpty() && title.isNotEmpty()) {
+                        add(
+                            YMusicOrb(
+                                id = id,
+                                title = title,
+                                subtitle = o.optString("subtitle", ""),
+                                mode = o.optString("mode", "wave"),
+                                query = o.optString("query", ""),
+                                coverUrl = o.optString("cover_url", ""),
+                                colorHex = o.optString("color", "#FF4D00")
+                            )
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
 data class YMusicStatus(
     val loggedIn: Boolean = false,
     val login: String = "",

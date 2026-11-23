@@ -8,12 +8,12 @@ import android.webkit.CookieManager
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
@@ -30,7 +30,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -42,66 +41,57 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.leftymods.atrios.model.YMusicAlbum
+import com.leftymods.atrios.model.YMusicOrb
 import com.leftymods.atrios.model.YMusicStatus
 import com.leftymods.atrios.model.YMusicTrack
+import com.leftymods.atrios.ui.theme.AppPalette
 import com.leftymods.atrios.ui.theme.OledBlack
 import com.leftymods.atrios.ui.theme.OledCard
 import com.leftymods.atrios.ui.theme.OledCardHigh
-import com.leftymods.atrios.ui.theme.YandexYellow
 import kotlinx.coroutines.delay
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.sin
 
-private data class WavePreset(
-    val title: String,
-    val mode: String,
-    val query: String?,
-    val icon: ImageVector,
-    val colorTop: Color,
-    val colorBottom: Color
-)
-
-private val WAVE_PRESETS = listOf(
-    WavePreset("Моя волна", "wave", null, Icons.Rounded.AutoAwesome, Color(0xFFFFD600), Color(0xFF4A2800)),
-    WavePreset("Мне нравится", "likes", null, Icons.Rounded.Favorite, Color(0xFFFF2E7A), Color(0xFF4A0020)),
-    WavePreset("Тренды", "chart", null, Icons.Rounded.Bolt, Color(0xFFFF4081), Color(0xFF3E0028)),
-    WavePreset("Вечериниться", "station", "mood:party", Icons.Rounded.LocalBar, Color(0xFF00E5B0), Color(0xFF003B30)),
-    WavePreset("Бегаю и не устаю", "station", "activity:workout", Icons.Rounded.DirectionsRun, Color(0xFF6B8CFF), Color(0xFF141E4A)),
-    WavePreset("Бодрое", "station", "mood:energetic", Icons.Rounded.Whatshot, Color(0xFFFF6D00), Color(0xFF421800)),
-    WavePreset("Спокойное", "station", "mood:calm", Icons.Rounded.SelfImprovement, Color(0xFF9B6BFF), Color(0xFF24104A))
-)
+private fun parseHexColor(hex: String, fallback: Color): Color {
+    return try {
+        Color(android.graphics.Color.parseColor(hex))
+    } catch (_: Exception) {
+        fallback
+    }
+}
 
 @Composable
 fun MyWaveAnimatedAura(
     isPlaying: Boolean,
+    palette: AppPalette,
     modifier: Modifier = Modifier
 ) {
     val inf = rememberInfiniteTransition(label = "waveAura")
-    val phase1 by inf.animateFloat(
+    val p1 by inf.animateFloat(
         initialValue = 0f,
         targetValue = (2f * PI).toFloat(),
         animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = if (isPlaying) 5200 else 9000, easing = LinearEasing),
+            animation = tween(if (isPlaying) 4600 else 8600, easing = LinearEasing),
             repeatMode = RepeatMode.Restart
         ),
         label = "p1"
     )
-    val phase2 by inf.animateFloat(
+    val p2 by inf.animateFloat(
         initialValue = 0f,
         targetValue = (2f * PI).toFloat(),
         animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = if (isPlaying) 7400 else 12500, easing = LinearEasing),
+            animation = tween(if (isPlaying) 6800 else 12000, easing = LinearEasing),
             repeatMode = RepeatMode.Restart
         ),
         label = "p2"
     )
     val pulse by inf.animateFloat(
-        initialValue = 0.88f,
-        targetValue = 1.14f,
+        initialValue = 0.90f,
+        targetValue = 1.15f,
         animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = if (isPlaying) 1900 else 3600, easing = FastOutSlowInEasing),
+            animation = tween(if (isPlaying) 1700 else 3400, easing = FastOutSlowInEasing),
             repeatMode = RepeatMode.Reverse
         ),
         label = "pulse"
@@ -109,92 +99,78 @@ fun MyWaveAnimatedAura(
 
     Canvas(modifier = modifier) {
         val cx = size.width * 0.5f
-        val cy = size.height * 0.46f
-        val baseR = size.minDimension * 0.56f * pulse
+        val cy = size.height * 0.42f
+        val r = size.minDimension * 0.68f * pulse
 
-        // Deep fiery red-orange outer glow
-        val cRed = Offset(
-            cx + cos(phase2 * 0.8f) * size.width * 0.14f,
-            cy + sin(phase1 * 0.7f) * size.height * 0.10f
-        )
+        // Outer wide fiery red-orange / tertiary nebula
+        val c1 = Offset(cx + cos(p2 * 0.7f) * size.width * 0.16f, cy + sin(p1 * 0.6f) * size.height * 0.08f)
         drawCircle(
             brush = Brush.radialGradient(
-                colors = listOf(Color(0xDDFD3B00), Color(0x66C71558), Color.Transparent),
-                center = cRed,
-                radius = baseR * 1.25f
+                listOf(palette.aura2.copy(alpha = 0.88f), palette.aura3.copy(alpha = 0.42f), Color.Transparent),
+                center = c1,
+                radius = r * 1.35f
             ),
-            radius = baseR * 1.25f,
-            center = cRed
+            radius = r * 1.35f,
+            center = c1
         )
 
-        // Hot magenta-pink lobe (like Yandex Music wave right side)
-        val cPink = Offset(
-            cx + cos(phase1 + 0.6f) * size.width * 0.22f,
-            cy + sin(phase2 + 1.1f) * size.height * 0.16f
-        )
+        // Vivid magenta / right swirling lobe
+        val c2 = Offset(cx + cos(p1 + 0.5f) * size.width * 0.24f, cy + sin(p2 + 0.9f) * size.height * 0.13f)
         drawCircle(
             brush = Brush.radialGradient(
-                colors = listOf(Color(0xEEFF1C96), Color(0x88FF0066), Color.Transparent),
-                center = cPink,
-                radius = baseR * 0.96f
+                listOf(palette.aura3.copy(alpha = 0.95f), palette.aura3.copy(alpha = 0.45f), Color.Transparent),
+                center = c2,
+                radius = r * 1.02f
             ),
-            radius = baseR * 0.96f,
-            center = cPink
+            radius = r * 1.02f,
+            center = c2
         )
 
-        // Bright golden yellow-amber plasma core (left/center swirling lobe)
-        val cYellow = Offset(
-            cx - cos(phase1 * 1.1f) * size.width * 0.18f,
-            cy - sin(phase2 * 0.9f) * size.height * 0.14f
-        )
+        // Bright golden-yellow / primary plasma lobe
+        val c3 = Offset(cx - cos(p1 * 1.15f) * size.width * 0.20f, cy - sin(p2 * 0.85f) * size.height * 0.11f)
         drawCircle(
             brush = Brush.radialGradient(
-                colors = listOf(Color(0xFFFFD800), Color(0xCCFF8C00), Color.Transparent),
-                center = cYellow,
-                radius = baseR * 0.92f
+                listOf(palette.aura1, palette.aura2.copy(alpha = 0.72f), Color.Transparent),
+                center = c3,
+                radius = r * 0.96f
             ),
-            radius = baseR * 0.92f,
-            center = cYellow
+            radius = r * 0.96f,
+            center = c3
         )
 
-        // Secondary warm solar highlight
-        val cGold = Offset(
-            cx + sin(phase2 * 1.3f) * size.width * 0.11f,
-            cy - cos(phase1 * 1.2f) * size.height * 0.11f
-        )
+        // Hot luminous core highlight
+        val c4 = Offset(cx + sin(p2 * 1.3f) * size.width * 0.10f, cy - cos(p1 * 1.2f) * size.height * 0.09f)
         drawCircle(
             brush = Brush.radialGradient(
-                colors = listOf(Color(0xDDFFEE33), Color(0x44FF5500), Color.Transparent),
-                center = cGold,
-                radius = baseR * 0.62f
+                listOf(Color.White.copy(alpha = 0.35f), palette.aura1.copy(alpha = 0.78f), Color.Transparent),
+                center = c4,
+                radius = r * 0.56f
             ),
-            radius = baseR * 0.62f,
-            center = cGold
+            radius = r * 0.56f,
+            center = c4
         )
     }
 }
 
 @Composable
-fun YMusicCard(
+fun YandexWaveFullScreen(
     ymusic: YMusicStatus,
-    searchResults: List<YMusicTrack> = emptyList(),
-    albumResults: List<YMusicAlbum> = emptyList(),
+    palette: AppPalette,
+    orbs: List<YMusicOrb>,
+    searchResults: List<YMusicTrack>,
+    albumResults: List<YMusicAlbum>,
     onRefresh: () -> Unit,
     onLogin: (String) -> Unit,
-    onLogout: () -> Unit,
     onPlay: (String, String?) -> Unit,
-    onSearch: (String) -> Unit = {},
-    onControl: (String) -> Unit
+    onSearch: (String) -> Unit,
+    onControl: (String) -> Unit,
+    onOpenAccountSettings: () -> Unit
 ) {
-    val context = LocalContext.current
-    val clipboard = LocalClipboardManager.current
-    var tokenInput by remember { mutableStateOf("") }
-    var searchQuery by remember { mutableStateOf("") }
     var searchOpen by remember { mutableStateOf(false) }
+    var searchQuery by remember { mutableStateOf("") }
     var searching by remember { mutableStateOf(false) }
-    var showOAuthDialog by remember { mutableStateOf(false) }
-    var showManualToken by remember { mutableStateOf(false) }
     var activePreset by remember { mutableStateOf<String?>(null) }
+    var showOAuthDialog by remember { mutableStateOf(false) }
 
     LaunchedEffect(searchQuery, ymusic.loggedIn) {
         if (!ymusic.loggedIn) return@LaunchedEffect
@@ -205,7 +181,7 @@ fun YMusicCard(
             return@LaunchedEffect
         }
         searching = true
-        delay(300)
+        delay(280)
         onSearch(q)
     }
 
@@ -213,207 +189,65 @@ fun YMusicCard(
         searching = false
     }
 
-    Column(
-        modifier = Modifier.fillMaxWidth(),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
+    val displayOrbs = remember(orbs) {
+        if (orbs.isNotEmpty()) orbs else listOf(
+            YMusicOrb("likes", "Мне нравится", "Коллекция", "likes", "", "", "#FF1F8E"),
+            YMusicOrb("chart", "Тренды", "Чарт", "chart", "", "", "#FF4D00"),
+            YMusicOrb("party", "Вечериниться", "Настроение", "station", "mood:party", "", "#00C896"),
+            YMusicOrb("run", "Бегаю и не устаю", "Занятие", "station", "activity:workout", "", "#4C7CFF"),
+            YMusicOrb("calm", "Спокойное", "Настроение", "station", "mood:calm", "", "#9B6BFF")
+        )
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(OledBlack)
     ) {
-        // Yandex Music top header row (Avatar | Яндекс * Музыка | Search)
-        Row(
+        // Full-bleed animated Yandex Music aura spanning top 70% of the screen!
+        MyWaveAnimatedAura(
+            isPlaying = ymusic.state == "playing",
+            palette = palette,
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 4.dp, vertical = 2.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                if (ymusic.loggedIn) {
-                    AsyncCoverArt(
-                        url = ymusic.avatarUrl,
-                        shape = CircleShape,
-                        modifier = Modifier
-                            .size(34.dp)
-                            .clickable { onRefresh() },
-                        fallbackIcon = Icons.Rounded.Person
-                    )
-                } else {
-                    Box(
-                        modifier = Modifier
-                            .size(34.dp)
-                            .clip(CircleShape)
-                            .background(Color(0xFF1F1F24)),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(Icons.Rounded.Add, contentDescription = null, tint = Color.White, modifier = Modifier.size(20.dp))
-                    }
-                }
-            }
+                .fillMaxHeight(0.74f)
+                .align(Alignment.TopCenter)
+        )
 
-            // Center title pill (or active mood pill)
-            if (activePreset != null && ymusic.loggedIn) {
-                Surface(
-                    shape = RoundedCornerShape(99.dp),
-                    color = Color(0xFF262010),
-                    modifier = Modifier.clickable {
-                        activePreset = null
-                        onPlay("wave", null)
-                    }
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        Text(activePreset!!, color = YandexYellow, fontWeight = FontWeight.Bold, fontSize = 15.sp)
-                        Icon(Icons.Rounded.Cancel, contentDescription = "Сбросить", tint = YandexYellow, modifier = Modifier.size(18.dp))
-                    }
-                }
-            } else {
+        if (searchOpen && ymusic.loggedIn) {
+            // Clean full-screen Search Overlay (Tracks + Albums with cover art)
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(OledBlack.copy(alpha = 0.96f))
+                    .statusBarsPadding()
+                    .padding(horizontal = 16.dp, vertical = 10.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text("Яндекс", color = YandexYellow, fontWeight = FontWeight.SemiBold, fontSize = 17.sp)
-                    Icon(Icons.Rounded.AutoAwesome, contentDescription = null, tint = YandexYellow, modifier = Modifier.size(18.dp))
-                    Text("Музыка", color = YandexYellow, fontWeight = FontWeight.ExtraBold, fontSize = 17.sp)
-                }
-            }
-
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                if (ymusic.loggedIn) {
-                    IconButton(onClick = {
-                        searchOpen = !searchOpen
-                        if (!searchOpen) {
-                            searchQuery = ""
-                            onSearch("")
-                        }
-                    }) {
-                        Icon(
-                            if (searchOpen) Icons.Rounded.Close else Icons.Rounded.Search,
-                            contentDescription = "Поиск",
-                            tint = Color.White
-                        )
+                    IconButton(onClick = { searchOpen = false; searchQuery = ""; onSearch("") }) {
+                        Icon(Icons.Rounded.ArrowBack, contentDescription = "Назад", tint = Color.White)
                     }
-                } else {
-                    Spacer(Modifier.size(40.dp))
-                }
-            }
-        }
-
-        if (!ymusic.loggedIn) {
-            // Login card in OLED style
-            Surface(
-                shape = RoundedCornerShape(26.dp),
-                color = OledCard
-            ) {
-                Column(
-                    modifier = Modifier.fillMaxWidth().padding(22.dp),
-                    verticalArrangement = Arrangement.spacedBy(14.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
-                    Box(
-                        modifier = Modifier.fillMaxWidth().height(160.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        MyWaveAnimatedAura(isPlaying = false, modifier = Modifier.fillMaxSize())
-                        Text(
-                            "Моя волна",
-                            color = Color.White,
-                            fontSize = 32.sp,
-                            fontWeight = FontWeight.Black
-                        )
-                    }
-                    Text(
-                        "Войдите в Яндекс Плюс — музыка будет работать и с телефона, и голосом напрямую на колонке.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        textAlign = TextAlign.Center
-                    )
-                    Button(
-                        onClick = { showOAuthDialog = true },
-                        modifier = Modifier.fillMaxWidth().height(52.dp),
-                        shape = RoundedCornerShape(99.dp),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = YandexYellow,
-                            contentColor = Color.Black
-                        )
-                    ) {
-                        Icon(Icons.AutoMirrored.Rounded.Login, contentDescription = null)
-                        Spacer(Modifier.width(8.dp))
-                        Text("Войти через Яндекс", fontWeight = FontWeight.Bold, fontSize = 15.sp)
-                    }
-                    TextButton(onClick = { showManualToken = !showManualToken }) {
-                        Text(
-                            if (showManualToken) "Скрыть ручной ввод" else "Ввести OAuth-токен вручную",
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    if (showManualToken) {
-                        OutlinedButton(
-                            onClick = { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(YMUSIC_OAUTH_URL))) },
-                            modifier = Modifier.fillMaxWidth(),
-                            shape = RoundedCornerShape(14.dp)
-                        ) {
-                            Icon(Icons.Rounded.OpenInBrowser, contentDescription = null)
-                            Spacer(Modifier.width(8.dp))
-                            Text("Открыть OAuth в браузере")
-                        }
-                        OutlinedTextField(
-                            value = tokenInput,
-                            onValueChange = { tokenInput = it },
-                            label = { Text("OAuth-токен (y0_...)") },
-                            singleLine = true,
-                            modifier = Modifier.fillMaxWidth(),
-                            shape = RoundedCornerShape(14.dp),
-                            trailingIcon = {
-                                IconButton(onClick = {
-                                    val txt = clipboard.getText()?.text.orEmpty()
-                                    tokenInput = extractYMusicToken(txt) ?: txt.trim()
-                                }) {
-                                    Icon(Icons.Rounded.ContentPaste, contentDescription = "Вставить")
-                                }
-                            }
-                        )
-                        Button(
-                            onClick = {
-                                val tok = extractYMusicToken(tokenInput) ?: tokenInput.trim()
-                                if (tok.isNotBlank()) {
-                                    onLogin(tok)
-                                    tokenInput = ""
-                                }
-                            },
-                            enabled = tokenInput.trim().length >= 10,
-                            modifier = Modifier.fillMaxWidth(),
-                            shape = RoundedCornerShape(99.dp)
-                        ) {
-                            Text("Сохранить токен", fontWeight = FontWeight.Bold)
-                        }
-                    }
-                }
-            }
-        } else {
-            // Expandable live search bar + results (Tracks + Albums with covers)
-            AnimatedVisibility(visible = searchOpen) {
-                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     OutlinedTextField(
                         value = searchQuery,
                         onValueChange = { searchQuery = it },
                         placeholder = { Text("Трек, альбом или исполнитель...") },
                         singleLine = true,
                         shape = RoundedCornerShape(99.dp),
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier.weight(1f),
                         colors = OutlinedTextFieldDefaults.colors(
                             focusedContainerColor = OledCardHigh,
                             unfocusedContainerColor = OledCard,
-                            focusedBorderColor = YandexYellow,
+                            focusedBorderColor = palette.accent,
                             unfocusedBorderColor = Color(0xFF28282E)
                         ),
-                        leadingIcon = { Icon(Icons.Rounded.Search, contentDescription = null, tint = YandexYellow) },
                         trailingIcon = {
                             if (searching) {
-                                CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp, color = YandexYellow)
+                                CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp, color = palette.accent)
                             } else if (searchQuery.isNotEmpty()) {
                                 IconButton(onClick = { searchQuery = ""; onSearch("") }) {
                                     Icon(Icons.Rounded.Clear, contentDescription = "Очистить")
@@ -421,339 +255,522 @@ fun YMusicCard(
                             }
                         }
                     )
+                }
 
+                LazyColumn(
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                    modifier = Modifier.fillMaxSize()
+                ) {
                     if (searchQuery.trim().length >= 2 && albumResults.isNotEmpty()) {
-                        Text("Альбомы", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 15.sp)
-                        LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                            items(albumResults, key = { it.id }) { album ->
-                                Surface(
-                                    shape = RoundedCornerShape(16.dp),
-                                    color = OledCard,
-                                    modifier = Modifier
-                                        .width(124.dp)
-                                        .clickable {
-                                            activePreset = album.title
-                                            onPlay("album", album.id)
-                                        }
-                                ) {
-                                    Column(
-                                        modifier = Modifier.padding(8.dp),
-                                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                        item {
+                            Text("Альбомы", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                        }
+                        item {
+                            LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                items(albumResults, key = { it.id }) { album ->
+                                    Surface(
+                                        shape = RoundedCornerShape(16.dp),
+                                        color = OledCard,
+                                        modifier = Modifier
+                                            .width(124.dp)
+                                            .clickable {
+                                                activePreset = album.title
+                                                onPlay("album", album.id)
+                                                searchOpen = false
+                                            }
                                     ) {
-                                        AsyncCoverArt(
-                                            url = album.coverUrl,
-                                            shape = RoundedCornerShape(12.dp),
-                                            modifier = Modifier.fillMaxWidth().aspectRatio(1f),
-                                            fallbackIcon = Icons.Rounded.Album
-                                        )
-                                        Text(album.title, color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                        Text(
-                                            buildString {
-                                                append(album.artist)
-                                                if (album.year > 0) {
-                                                    if (isNotEmpty()) append(" · ")
-                                                    append(album.year)
-                                                }
-                                            },
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            fontSize = 11.sp,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
+                                        Column(Modifier.padding(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                            AsyncCoverArt(
+                                                url = album.coverUrl,
+                                                shape = RoundedCornerShape(12.dp),
+                                                modifier = Modifier.fillMaxWidth().aspectRatio(1f),
+                                                fallbackIcon = Icons.Rounded.Album
+                                            )
+                                            Text(album.title, color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                            Text(
+                                                buildString {
+                                                    append(album.artist)
+                                                    if (album.year > 0) { if (isNotEmpty()) append(" · "); append(album.year) }
+                                                },
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                fontSize = 11.sp,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
                                     }
                                 }
                             }
                         }
                     }
-
                     if (searchQuery.trim().length >= 2 && searchResults.isNotEmpty()) {
-                        Text("Треки", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 15.sp)
-                        Surface(shape = RoundedCornerShape(20.dp), color = OledCard) {
-                            Column(modifier = Modifier.fillMaxWidth()) {
-                                searchResults.forEachIndexed { idx, track ->
-                                    if (idx > 0) {
-                                        HorizontalDivider(
-                                            modifier = Modifier.padding(horizontal = 14.dp),
-                                            color = Color(0xFF222228)
-                                        )
+                        item {
+                            Text("Треки", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                        }
+                        items(searchResults, key = { it.id }) { track ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(14.dp))
+                                    .background(OledCard)
+                                    .clickable {
+                                        activePreset = null
+                                        onPlay("track", track.id)
+                                        searchOpen = false
                                     }
-                                    Row(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .clickable {
-                                                activePreset = null
-                                                onPlay("track", track.id)
-                                            }
-                                            .padding(horizontal = 12.dp, vertical = 10.dp),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(12.dp)
-                                    ) {
-                                        AsyncCoverArt(
-                                            url = track.coverUrl,
-                                            shape = RoundedCornerShape(10.dp),
-                                            modifier = Modifier.size(46.dp),
-                                            fallbackIcon = Icons.Rounded.MusicNote
-                                        )
-                                        Column(modifier = Modifier.weight(1f)) {
-                                            Text(track.title, color = Color.White, fontWeight = FontWeight.Medium, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                            Text(
-                                                buildString {
-                                                    append(track.artist)
-                                                    if (track.album.isNotBlank()) {
-                                                        if (isNotEmpty()) append(" · ")
-                                                        append(track.album)
-                                                    }
-                                                },
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                                fontSize = 12.sp,
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis
-                                            )
-                                        }
-                                        if (track.durationMs > 0) {
-                                            Text(formatDurationMs(track.durationMs), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
-                                        }
-                                        Icon(Icons.Rounded.PlayArrow, contentDescription = "Играть", tint = YandexYellow, modifier = Modifier.size(22.dp))
-                                    }
+                                    .padding(horizontal = 12.dp, vertical = 9.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                AsyncCoverArt(
+                                    url = track.coverUrl,
+                                    shape = RoundedCornerShape(10.dp),
+                                    modifier = Modifier.size(48.dp),
+                                    fallbackIcon = Icons.Rounded.MusicNote
+                                )
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(track.title, color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    Text(
+                                        buildString {
+                                            append(track.artist)
+                                            if (track.album.isNotBlank()) { if (isNotEmpty()) append(" · "); append(track.album) }
+                                        },
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        fontSize = 12.sp,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
                                 }
+                                if (track.durationMs > 0) {
+                                    Text(formatDurationMs(track.durationMs), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
+                                }
+                                Icon(Icons.Rounded.PlayArrow, contentDescription = null, tint = palette.accent, modifier = Modifier.size(22.dp))
                             }
                         }
                     }
                 }
             }
-
-            // HERO: Animated Yellow-Orange-Magenta Fluid Wave + "Моя волна" + Big Yellow Play Button
-            Box(
+        } else {
+            // Main full-screen Yandex Music Wave layout (fills 100% height cleanly!)
+            Column(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .height(320.dp),
-                contentAlignment = Alignment.Center
+                    .fillMaxSize()
+                    .statusBarsPadding()
+                    .padding(top = 6.dp, bottom = 6.dp),
+                verticalArrangement = Arrangement.SpaceBetween,
+                horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                MyWaveAnimatedAura(
-                    isPlaying = ymusic.state == "playing",
-                    modifier = Modifier.fillMaxSize()
-                )
+                // Top Header: Avatar | Яндекс * Музыка | Search
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    if (ymusic.loggedIn) {
+                        AsyncCoverArt(
+                            url = ymusic.avatarUrl,
+                            shape = CircleShape,
+                            modifier = Modifier
+                                .size(36.dp)
+                                .clickable { onOpenAccountSettings() },
+                            fallbackIcon = Icons.Rounded.Person
+                        )
+                    } else {
+                        Box(
+                            modifier = Modifier
+                                .size(36.dp)
+                                .clip(CircleShape)
+                                .background(Color.White.copy(alpha = 0.14f))
+                                .clickable { showOAuthDialog = true },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(Icons.Rounded.Person, contentDescription = null, tint = Color.White, modifier = Modifier.size(20.dp))
+                        }
+                    }
 
+                    if (activePreset != null && ymusic.loggedIn) {
+                        Surface(
+                            shape = RoundedCornerShape(99.dp),
+                            color = Color.Black.copy(alpha = 0.55f),
+                            modifier = Modifier.clickable {
+                                activePreset = null
+                                onPlay("wave", null)
+                            }
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Text(activePreset!!, color = palette.accent, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                                Icon(Icons.Rounded.Cancel, contentDescription = "Сбросить", tint = palette.accent, modifier = Modifier.size(18.dp))
+                            }
+                        }
+                    } else {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            modifier = Modifier.clickable { onRefresh() }
+                        ) {
+                            Text("Яндекс", color = palette.accent, fontWeight = FontWeight.SemiBold, fontSize = 18.sp)
+                            Icon(Icons.Rounded.AutoAwesome, contentDescription = null, tint = palette.accent, modifier = Modifier.size(19.dp))
+                            Text("Музыка", color = palette.accent, fontWeight = FontWeight.ExtraBold, fontSize = 18.sp)
+                        }
+                    }
+
+                    IconButton(
+                        onClick = { if (ymusic.loggedIn) searchOpen = true else showOAuthDialog = true }
+                    ) {
+                        Icon(Icons.Rounded.Search, contentDescription = "Поиск", tint = Color.White, modifier = Modifier.size(26.dp))
+                    }
+                }
+
+                // Center Hero: "Моя волна" + Big Accent Play Circle + Frosted Track Pill + AI Subtitle
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.spacedBy(16.dp),
-                    modifier = Modifier.padding(horizontal = 12.dp)
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 18.dp)
                 ) {
                     Text(
                         "Моя волна",
                         color = Color.White,
-                        fontSize = 40.sp,
+                        fontSize = 44.sp,
                         fontWeight = FontWeight.Black,
-                        letterSpacing = (-1.0).sp
+                        letterSpacing = (-1.2).sp
                     )
 
-                    // Big yellow circular Play/Pause button + Prev/Next flanking
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(22.dp)
-                    ) {
-                        IconButton(
-                            onClick = { onControl("prev") },
-                            modifier = Modifier
-                                .size(44.dp)
-                                .clip(CircleShape)
-                                .background(Color.Black.copy(alpha = 0.35f))
+                    if (!ymusic.loggedIn) {
+                        Button(
+                            onClick = { showOAuthDialog = true },
+                            shape = RoundedCornerShape(99.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = palette.accent, contentColor = palette.onAccent),
+                            modifier = Modifier.height(54.dp).padding(horizontal = 16.dp)
                         ) {
-                            Icon(Icons.Rounded.SkipPrevious, contentDescription = "Предыдущий", tint = Color.White, modifier = Modifier.size(26.dp))
+                            Icon(Icons.AutoMirrored.Rounded.Login, contentDescription = null)
+                            Spacer(Modifier.width(8.dp))
+                            Text("Войти в Яндекс Музыку", fontWeight = FontWeight.Bold, fontSize = 15.sp)
                         }
-
-                        Box(
-                            modifier = Modifier
-                                .size(78.dp)
-                                .clip(CircleShape)
-                                .background(YandexYellow)
-                                .clickable {
-                                    when (ymusic.state) {
-                                        "playing" -> onControl("pause")
-                                        "paused" -> onControl("play")
-                                        else -> onPlay("wave", null)
-                                    }
-                                },
-                            contentAlignment = Alignment.Center
-                        ) {
-                            if (ymusic.state == "loading") {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.size(30.dp),
-                                    color = Color.Black,
-                                    strokeWidth = 3.dp
-                                )
-                            } else {
-                                Icon(
-                                    if (ymusic.state == "playing") Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
-                                    contentDescription = "Воспроизвести / Пауза",
-                                    tint = Color.Black,
-                                    modifier = Modifier.size(40.dp)
-                                )
-                            }
-                        }
-
-                        IconButton(
-                            onClick = { onControl("next") },
-                            modifier = Modifier
-                                .size(44.dp)
-                                .clip(CircleShape)
-                                .background(Color.Black.copy(alpha = 0.35f))
-                        ) {
-                            Icon(Icons.Rounded.SkipNext, contentDescription = "Следующий", tint = Color.White, modifier = Modifier.size(26.dp))
-                        }
-                    }
-
-                    // Translucent track pill (just like Yandex Music screenshot!)
-                    Surface(
-                        shape = RoundedCornerShape(99.dp),
-                        color = Color(0xAA1C1C20),
-                        modifier = Modifier.fillMaxWidth(0.92f)
-                    ) {
+                    } else {
                         Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 10.dp, vertical = 8.dp),
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            horizontalArrangement = Arrangement.spacedBy(26.dp)
                         ) {
-                            if (ymusic.coverUrl.isNotBlank()) {
-                                AsyncCoverArt(
-                                    url = ymusic.coverUrl,
-                                    shape = CircleShape,
-                                    modifier = Modifier.size(34.dp),
-                                    fallbackIcon = Icons.Rounded.MusicNote
-                                )
-                            }
-                            Column(
-                                modifier = Modifier.weight(1f),
-                                horizontalAlignment = if (ymusic.coverUrl.isBlank()) Alignment.CenterHorizontally else Alignment.Start
+                            IconButton(
+                                onClick = { onControl("prev") },
+                                modifier = Modifier
+                                    .size(46.dp)
+                                    .clip(CircleShape)
+                                    .background(Color.Black.copy(alpha = 0.34f))
                             ) {
+                                Icon(Icons.Rounded.SkipPrevious, contentDescription = "Назад", tint = Color.White, modifier = Modifier.size(28.dp))
+                            }
+
+                            Box(
+                                modifier = Modifier
+                                    .size(86.dp)
+                                    .clip(CircleShape)
+                                    .background(palette.accent)
+                                    .clickable {
+                                        when (ymusic.state) {
+                                            "playing" -> onControl("pause")
+                                            "paused" -> onControl("play")
+                                            else -> onPlay("wave", null)
+                                        }
+                                    },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                if (ymusic.state == "loading") {
+                                    CircularProgressIndicator(modifier = Modifier.size(32.dp), color = palette.onAccent, strokeWidth = 3.dp)
+                                } else {
+                                    Icon(
+                                        if (ymusic.state == "playing") Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
+                                        contentDescription = "Играть / Пауза",
+                                        tint = palette.onAccent,
+                                        modifier = Modifier.size(44.dp)
+                                    )
+                                }
+                            }
+
+                            IconButton(
+                                onClick = { onControl("next") },
+                                modifier = Modifier
+                                    .size(46.dp)
+                                    .clip(CircleShape)
+                                    .background(Color.Black.copy(alpha = 0.34f))
+                            ) {
+                                Icon(Icons.Rounded.SkipNext, contentDescription = "Вперёд", tint = Color.White, modifier = Modifier.size(28.dp))
+                            }
+                        }
+
+                        // Frosted track pill (like Yandex Music screenshot!)
+                        Surface(
+                            shape = RoundedCornerShape(99.dp),
+                            color = Color(0x991C1C22),
+                            modifier = Modifier.fillMaxWidth(0.92f)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                if (ymusic.coverUrl.isNotBlank()) {
+                                    AsyncCoverArt(
+                                        url = ymusic.coverUrl,
+                                        shape = CircleShape,
+                                        modifier = Modifier.size(34.dp),
+                                        fallbackIcon = Icons.Rounded.MusicNote
+                                    )
+                                }
                                 Text(
                                     if (ymusic.title.isNotBlank()) {
                                         if (ymusic.artist.isNotBlank()) "${ymusic.artist} — ${ymusic.title}" else ymusic.title
                                     } else "Нажмите ▶ для запуска на колонке",
                                     color = Color.White,
                                     fontWeight = FontWeight.SemiBold,
-                                    fontSize = 13.sp,
+                                    fontSize = 14.sp,
                                     maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
+                                    overflow = TextOverflow.Ellipsis,
+                                    textAlign = if (ymusic.coverUrl.isBlank()) TextAlign.Center else TextAlign.Start,
+                                    modifier = Modifier.weight(1f)
                                 )
-                                if (ymusic.album.isNotBlank()) {
-                                    Text(
-                                        ymusic.album,
-                                        color = Color.White.copy(alpha = 0.65f),
-                                        fontSize = 11.sp,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
+                                IconButton(
+                                    onClick = { onControl("like") },
+                                    modifier = Modifier.size(30.dp)
+                                ) {
+                                    Icon(
+                                        if (ymusic.liked) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
+                                        contentDescription = "Нравится",
+                                        tint = if (ymusic.liked) Color(0xFFFF2E7A) else Color.White,
+                                        modifier = Modifier.size(22.dp)
                                     )
                                 }
                             }
-                            IconButton(
-                                onClick = { onControl("like") },
-                                modifier = Modifier.size(32.dp)
-                            ) {
-                                Icon(
-                                    if (ymusic.liked) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
-                                    contentDescription = "Нравится",
-                                    tint = if (ymusic.liked) Color(0xFFFF3366) else Color.White,
-                                    modifier = Modifier.size(20.dp)
-                                )
-                            }
                         }
-                    }
-                }
-            }
 
-            // Glowing mood & station bubbles carousel (like bottom of Yandex Music screenshots!)
-            LazyRow(
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
-                contentPadding = PaddingValues(horizontal = 2.dp),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                items(WAVE_PRESETS) { preset ->
-                    Box(
-                        modifier = Modifier
-                            .width(122.dp)
-                            .height(126.dp)
-                            .clip(RoundedCornerShape(28.dp))
-                            .background(
-                                Brush.verticalGradient(
-                                    listOf(preset.colorTop.copy(alpha = 0.42f), preset.colorBottom.copy(alpha = 0.9f), OledBlack)
-                                )
-                            )
-                            .clickable {
-                                activePreset = if (preset.mode == "wave") null else preset.title
-                                onPlay(preset.mode, preset.query)
-                            }
-                            .padding(12.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Column(
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        // AI Caption line (like screenshot: "✨ AI  ...")
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.padding(horizontal = 16.dp)
                         ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(44.dp)
-                                    .clip(CircleShape)
-                                    .background(preset.colorTop.copy(alpha = 0.28f)),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Icon(preset.icon, contentDescription = null, tint = preset.colorTop, modifier = Modifier.size(24.dp))
-                            }
+                            Icon(Icons.Rounded.AutoAwesome, contentDescription = null, tint = Color.White.copy(alpha = 0.85f), modifier = Modifier.size(18.dp))
                             Text(
-                                preset.title,
-                                color = Color.White,
-                                fontWeight = FontWeight.SemiBold,
-                                fontSize = 12.sp,
+                                when {
+                                    ymusic.album.isNotBlank() -> "Альбом «${ymusic.album}» · играет на колонке AtriOS"
+                                    ymusic.state == "playing" -> "Персональный поток подобран по вашим лайкам"
+                                    else -> "Доступно и с телефона, и голосом на колонке"
+                                },
+                                color = Color.White.copy(alpha = 0.82f),
+                                fontSize = 13.sp,
                                 textAlign = TextAlign.Center,
                                 maxLines = 2,
-                                lineHeight = 15.sp,
-                                overflow = TextOverflow.Ellipsis
+                                lineHeight = 17.sp
                             )
                         }
                     }
                 }
-            }
 
-            // Compact account footer (account name + logout)
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 6.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    "Аккаунт: ${ymusic.displayName.ifBlank { ymusic.login }}",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    TextButton(onClick = { onControl("stop") }) {
-                        Text("Стоп", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
-                    }
-                    TextButton(onClick = onLogout) {
-                        Icon(Icons.AutoMirrored.Rounded.Logout, contentDescription = null, modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.error)
-                        Spacer(Modifier.width(4.dp))
-                        Text("Выйти", color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
+                // Bottom Dynamic Yandex Music Orbs (Curved glowing domes + circular artist avatars!)
+                LazyRow(
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    contentPadding = PaddingValues(horizontal = 14.dp),
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp)
+                ) {
+                    items(displayOrbs, key = { it.id }) { orb ->
+                        val orbColor = parseHexColor(orb.colorHex, palette.aura2)
+                        Box(
+                            modifier = Modifier
+                                .width(126.dp)
+                                .height(146.dp)
+                                .clickable {
+                                    activePreset = orb.title
+                                    onPlay(orb.mode, orb.query.ifBlank { null })
+                                },
+                            contentAlignment = Alignment.BottomCenter
+                        ) {
+                            // Glowing rounded dome base (just like Yandex Music screenshots!)
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(114.dp)
+                                    .clip(RoundedCornerShape(topStart = 58.dp, topEnd = 58.dp, bottomStart = 20.dp, bottomEnd = 20.dp))
+                                    .background(
+                                        Brush.verticalGradient(
+                                            listOf(
+                                                orbColor.copy(alpha = 0.78f),
+                                                orbColor.copy(alpha = 0.30f),
+                                                Color.Transparent
+                                            )
+                                        )
+                                    )
+                            )
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(4.dp),
+                                modifier = Modifier.fillMaxSize().padding(horizontal = 8.dp, vertical = 4.dp)
+                            ) {
+                                AsyncCoverArt(
+                                    url = orb.coverUrl,
+                                    shape = CircleShape,
+                                    modifier = Modifier.size(64.dp),
+                                    fallbackIcon = when (orb.mode) {
+                                        "likes" -> Icons.Rounded.Favorite
+                                        "chart" -> Icons.Rounded.Bolt
+                                        else -> Icons.Rounded.GraphicEq
+                                    }
+                                )
+                                if (orb.subtitle.isNotBlank()) {
+                                    Text(
+                                        orb.subtitle,
+                                        color = Color.White.copy(alpha = 0.72f),
+                                        fontSize = 11.sp,
+                                        maxLines = 1
+                                    )
+                                }
+                                Text(
+                                    orb.title,
+                                    color = Color.White,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 13.sp,
+                                    textAlign = TextAlign.Center,
+                                    maxLines = 2,
+                                    lineHeight = 15.sp,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
                     }
                 }
             }
         }
+    }
 
-        if (!ymusic.error.isNullOrBlank()) {
-            Surface(
-                shape = RoundedCornerShape(14.dp),
-                color = Color(0xFF2B121A)
+    if (showOAuthDialog) {
+        YandexOAuthWebViewDialog(
+            onTokenCaptured = { tok ->
+                showOAuthDialog = false
+                onLogin(tok)
+            },
+            onDismiss = { showOAuthDialog = false }
+        )
+    }
+}
+
+@Composable
+fun YandexAccountCard(
+    ymusic: YMusicStatus,
+    onLogin: (String) -> Unit,
+    onLogout: () -> Unit,
+    onRefresh: () -> Unit
+) {
+    val context = LocalContext.current
+    val clipboard = LocalClipboardManager.current
+    var tokenInput by remember { mutableStateOf("") }
+    var showOAuthDialog by remember { mutableStateOf(false) }
+    var showManualToken by remember { mutableStateOf(false) }
+
+    Surface(shape = RoundedCornerShape(24.dp), color = OledCard) {
+        Column(
+            modifier = Modifier.fillMaxWidth().padding(20.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(14.dp),
+                modifier = Modifier.fillMaxWidth()
             ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                AsyncCoverArt(
+                    url = ymusic.avatarUrl,
+                    shape = CircleShape,
+                    modifier = Modifier.size(56.dp),
+                    fallbackIcon = Icons.Rounded.Person
+                )
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        if (ymusic.loggedIn) ymusic.displayName.ifBlank { ymusic.login.ifBlank { "Яндекс Аккаунт" } }
+                        else "Не выполнен вход",
+                        color = Color.White,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 17.sp
+                    )
+                    Text(
+                        if (ymusic.loggedIn) "Яндекс Плюс подключён · UID ${ymusic.uid}" else "Подключите Яндекс Музыку",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                IconButton(onClick = onRefresh) {
+                    Icon(Icons.Rounded.Refresh, contentDescription = "Обновить")
+                }
+            }
+
+            if (ymusic.loggedIn) {
+                OutlinedButton(
+                    onClick = onLogout,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(99.dp)
                 ) {
-                    Icon(Icons.Rounded.ErrorOutline, contentDescription = null, tint = Color(0xFFFF8A9B))
-                    Text(ymusic.error, style = MaterialTheme.typography.bodySmall, color = Color(0xFFFFD6DC))
+                    Icon(Icons.AutoMirrored.Rounded.Logout, contentDescription = null, tint = MaterialTheme.colorScheme.error)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Выйти из аккаунта", color = MaterialTheme.colorScheme.error)
+                }
+            } else {
+                Button(
+                    onClick = { showOAuthDialog = true },
+                    modifier = Modifier.fillMaxWidth().height(50.dp),
+                    shape = RoundedCornerShape(99.dp)
+                ) {
+                    Icon(Icons.AutoMirrored.Rounded.Login, contentDescription = null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Войти через Яндекс", fontWeight = FontWeight.Bold)
+                }
+                TextButton(onClick = { showManualToken = !showManualToken }) {
+                    Text(if (showManualToken) "Скрыть ручной ввод" else "Ввести OAuth-токен вручную")
+                }
+                if (showManualToken) {
+                    OutlinedButton(
+                        onClick = { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(YMUSIC_OAUTH_URL))) },
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(14.dp)
+                    ) {
+                        Icon(Icons.Rounded.OpenInBrowser, contentDescription = null)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Открыть OAuth в браузере")
+                    }
+                    OutlinedTextField(
+                        value = tokenInput,
+                        onValueChange = { tokenInput = it },
+                        label = { Text("OAuth-токен (y0_...)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(14.dp),
+                        trailingIcon = {
+                            IconButton(onClick = {
+                                val txt = clipboard.getText()?.text.orEmpty()
+                                tokenInput = extractYMusicToken(txt) ?: txt.trim()
+                            }) {
+                                Icon(Icons.Rounded.ContentPaste, contentDescription = "Вставить")
+                            }
+                        }
+                    )
+                    Button(
+                        onClick = {
+                            val tok = extractYMusicToken(tokenInput) ?: tokenInput.trim()
+                            if (tok.isNotBlank()) {
+                                onLogin(tok)
+                                tokenInput = ""
+                            }
+                        },
+                        enabled = tokenInput.trim().length >= 10,
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(99.dp)
+                    ) {
+                        Text("Сохранить токен")
+                    }
                 }
             }
         }
@@ -825,7 +842,7 @@ private fun YandexOAuthWebViewDialog(
                     IconButton(onClick = onDismiss) { Icon(Icons.Rounded.Close, contentDescription = "Закрыть") }
                 }
                 if (loading) {
-                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth(), color = YandexYellow)
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
                 }
                 AndroidView(
                     modifier = Modifier.fillMaxSize(),

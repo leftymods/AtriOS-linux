@@ -70,4 +70,10 @@ class SpeakerStorage(context: Context) {
         private const val KEY_RELAY_DID = "relay_device_id_v1"
         private const val KEY_RELAY_TOKEN = "relay_token_v1"
     }
+
+    fun loadPaletteId(): String = prefs.getString("app_palette", "yandex") ?: "yandex"
+
+    fun savePaletteId(id: String) {
+        prefs.edit().putString("app_palette", id).apply()
+    }
 }
