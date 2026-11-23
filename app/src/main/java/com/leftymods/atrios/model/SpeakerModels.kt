@@ -233,6 +233,46 @@ data class AiStatus(
     }
 }
 
+
+data class YMusicTrack(
+    val id: String,
+    val title: String,
+    val artist: String,
+    val album: String = "",
+    val durationMs: Long = 0L
+) {
+    fun durationFormatted(): String {
+        val totalSec = (durationMs / 1000L).coerceAtLeast(0L)
+        val m = totalSec / 60L
+        val s = totalSec % 60L
+        return "%d:%02d".format(m, s)
+    }
+
+    companion object {
+        fun fromJsonArray(arr: JSONArray?): List<YMusicTrack> {
+            if (arr == null) return emptyList()
+            return buildList {
+                for (i in 0 until arr.length()) {
+                    val o = arr.optJSONObject(i) ?: continue
+                    val id = o.optString("id", "").trim()
+                    val title = o.optString("title", "").trim()
+                    if (id.isNotEmpty() && title.isNotEmpty()) {
+                        add(
+                            YMusicTrack(
+                                id = id,
+                                title = title,
+                                artist = o.optString("artist", ""),
+                                album = o.optString("album", ""),
+                                durationMs = o.optLong("duration_ms", 0L)
+                            )
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
 data class YMusicStatus(
     val loggedIn: Boolean = false,
     val login: String = "",

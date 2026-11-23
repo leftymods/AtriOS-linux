@@ -13,6 +13,13 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.draw.clip
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.background
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -32,6 +39,7 @@ import com.leftymods.atrios.model.AlarmItem
 import com.leftymods.atrios.model.SavedSpeaker
 import com.leftymods.atrios.model.SpeakerStatus
 import com.leftymods.atrios.model.TimerItem
+import com.leftymods.atrios.model.YMusicTrack
 import com.leftymods.atrios.ui.AiAssistantCard
 import com.leftymods.atrios.ui.AudioCard
 import com.leftymods.atrios.ui.BluetoothCard
@@ -94,6 +102,7 @@ fun AtriOSApp() {
     var sliderVol by remember { mutableFloatStateOf(60f) }
     var timers by remember { mutableStateOf<List<TimerItem>>(emptyList()) }
     var alarms by remember { mutableStateOf<List<AlarmItem>>(emptyList()) }
+    var ymSearchResults by remember { mutableStateOf<List<YMusicTrack>>(emptyList()) }
     var savedSpeakers by remember { mutableStateOf(storage.loadSpeakers()) }
     var relayConfig by remember { mutableStateOf(storage.loadRelayConfig()) }
     var selectedTab by remember { mutableStateOf(AppTab.OVERVIEW) }
@@ -134,6 +143,7 @@ fun AtriOSApp() {
             onOtaUpdate = { ota ->
                 status = status.copy(ota = ota)
             },
+            onYMusicSearchResults = { list -> ymSearchResults = list },
             onYMusicUpdate = { ym ->
                 status = status.copy(ymusic = ym)
             },
@@ -177,56 +187,204 @@ fun AtriOSApp() {
         if (hasPerms && adapter != null) adapter.bondedDevices.toList() else emptyList()
     }
 
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(
+                Brush.verticalGradient(
+                    listOf(Color(0xFF090E1C), Color(0xFF070B14), Color(0xFF0B1122))
+                )
+            )
+    ) {
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
+        containerColor = Color.Transparent,
         topBar = {
             TopAppBar(
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = Color(0xFF090E1B).copy(alpha = 0.94f)
+                ),
                 title = {
-                    Column {
-                        Text(
-                            if (connected) status.model else "AtriOS Control",
-                            fontWeight = FontWeight.SemiBold
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(11.dp)
+                                .clip(CircleShape)
+                                .background(
+                                    if (connected) Color(0xFF34D399) else Color(0xFF64748B)
+                                )
                         )
-                        Text(
-                            connText,
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                        Column {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Text(
+                                    if (connected) status.model else "AtriOS Control",
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                if (connected && status.fwVersion.isNotBlank()) {
+                                    Surface(
+                                        shape = RoundedCornerShape(99.dp),
+                                        color = MaterialTheme.colorScheme.primaryContainer
+                                    ) {
+                                        Text(
+                                            "v${status.fwVersion}",
+                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.primary,
+                                            fontWeight = FontWeight.SemiBold
+                                        )
+                                    }
+                                }
+                            }
+                            Text(
+                                connText,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
                     }
                 },
                 actions = {
                     if (connected) {
-                        IconButton(onClick = { client.requestStatus() }) {
-                            Icon(Icons.Rounded.Refresh, contentDescription = "Обновить статус")
+                        FilledTonalIconButton(
+                            onClick = { client.requestStatus() },
+                            modifier = Modifier.size(36.dp)
+                        ) {
+                            Icon(Icons.Rounded.Refresh, contentDescription = "Обновить статус", modifier = Modifier.size(18.dp))
                         }
-                        IconButton(onClick = { client.disconnect() }) {
-                            Icon(Icons.Rounded.BluetoothDisabled, contentDescription = "Сменить колонку")
+                        Spacer(Modifier.width(6.dp))
+                        FilledTonalIconButton(
+                            onClick = { client.disconnect() },
+                            modifier = Modifier.size(36.dp)
+                        ) {
+                            Icon(Icons.Rounded.BluetoothDisabled, contentDescription = "Сменить колонку", modifier = Modifier.size(18.dp))
                         }
+                        Spacer(Modifier.width(8.dp))
                     }
                 }
             )
         },
         bottomBar = {
             if (connected) {
-                NavigationBar {
-                    AppTab.entries.forEach { tab ->
-                        NavigationBarItem(
-                            selected = selectedTab == tab,
-                            onClick = {
-                                selectedTab = tab
-                                when (tab) {
-                                    AppTab.ASSISTANT -> {
-                                        client.ymusicStatus()
-                                        client.getTimers()
-                                        client.getAlarms()
-                                    }
-                                    AppTab.SYSTEM -> client.otaStatus()
-                                    else -> Unit
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(Color(0xFF0A101E))
+                ) {
+                    val ym = status.ymusic
+                    if (selectedTab != AppTab.ASSISTANT && (ym.playing || ym.paused || ym.title.isNotBlank())) {
+                        Surface(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 6.dp)
+                                .clickable {
+                                    selectedTab = AppTab.ASSISTANT
+                                    client.ymusicStatus()
+                                },
+                            shape = RoundedCornerShape(18.dp),
+                            color = Color.Transparent
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(
+                                        Brush.horizontalGradient(
+                                            listOf(Color(0xFF172642), Color(0xFF231942))
+                                        ),
+                                        RoundedCornerShape(18.dp)
+                                    )
+                                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(34.dp)
+                                        .clip(CircleShape)
+                                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.2f)),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        Icons.Rounded.MusicNote,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(18.dp)
+                                    )
                                 }
-                            },
-                            icon = { Icon(tab.icon, contentDescription = tab.label) },
-                            label = { Text(tab.label) }
-                        )
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        ym.title.ifBlank { "Яндекс Музыка" },
+                                        style = MaterialTheme.typography.labelLarge,
+                                        fontWeight = FontWeight.SemiBold,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    if (ym.artist.isNotBlank()) {
+                                        Text(
+                                            ym.artist,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                }
+                                IconButton(
+                                    onClick = { client.ymusicControl("toggle") },
+                                    modifier = Modifier.size(36.dp)
+                                ) {
+                                    Icon(
+                                        if (ym.playing) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
+                                        contentDescription = "Пауза / Плей",
+                                        tint = MaterialTheme.colorScheme.primary
+                                    )
+                                }
+                                IconButton(
+                                    onClick = { client.ymusicControl("next") },
+                                    modifier = Modifier.size(36.dp)
+                                ) {
+                                    Icon(
+                                        Icons.Rounded.SkipNext,
+                                        contentDescription = "Следующий",
+                                        tint = MaterialTheme.colorScheme.onSurface
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    NavigationBar(
+                        containerColor = Color(0xFF0A101E),
+                        tonalElevation = 0.dp
+                    ) {
+                        AppTab.entries.forEach { tab ->
+                            NavigationBarItem(
+                                selected = selectedTab == tab,
+                                onClick = {
+                                    selectedTab = tab
+                                    when (tab) {
+                                        AppTab.ASSISTANT -> {
+                                            client.ymusicStatus()
+                                            client.getTimers()
+                                            client.getAlarms()
+                                        }
+                                        AppTab.SYSTEM -> client.otaStatus()
+                                        else -> Unit
+                                    }
+                                },
+                                icon = { Icon(tab.icon, contentDescription = tab.label) },
+                                label = { Text(tab.label, fontWeight = if (selectedTab == tab) FontWeight.SemiBold else FontWeight.Normal) }
+                            )
+                        }
                     }
                 }
             }
@@ -362,10 +520,12 @@ fun AtriOSApp() {
                         item {
                             YMusicCard(
                                 ymusic = status.ymusic,
+                                searchResults = ymSearchResults,
                                 onRefresh = { client.ymusicStatus() },
                                 onLogin = { token -> client.ymusicLogin(token) },
                                 onLogout = { client.ymusicLogout() },
                                 onPlay = { mode, query -> client.ymusicPlay(mode, query) },
+                                onSearch = { q -> client.ymusicSearch(q) },
                                 onControl = { action -> client.ymusicControl(action) }
                             )
                         }
@@ -564,5 +724,6 @@ fun AtriOSApp() {
                 TextButton(onClick = { showRebootDialog = false }) { Text("Отмена") }
             }
         )
+    }
     }
 }
