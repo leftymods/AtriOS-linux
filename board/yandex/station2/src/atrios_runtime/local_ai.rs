@@ -606,6 +606,30 @@ fn format_time_ru(hour: u8, minute: u8) -> String {
     }
 }
 
+fn show_timer_popup_async(cmd: &'static str, arg: Option<String>) {
+    thread::spawn(move || {
+        let _ = fs::create_dir_all("/var/run/atrios");
+        let _ = fs::write(SCREEN_MODE_FILE, "timer_popup");
+        let _ = Command::new("pkill")
+            .args(["-f", "/usr/lib/atrios/light screen"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        let mut c = Command::new("/usr/lib/atrios/light");
+        c.args(["screen", cmd]);
+        if let Some(a) = arg {
+            c.arg(a);
+        }
+        let _ = c.stdout(Stdio::null()).stderr(Stdio::null()).status();
+        if fs::read_to_string(SCREEN_MODE_FILE)
+            .map(|s| s.trim() == "timer_popup")
+            .unwrap_or(false)
+        {
+            let _ = fs::write(SCREEN_MODE_FILE, "clock");
+        }
+    });
+}
+
 fn show_ticker_briefly(text: &str) {
     let _ = fs::create_dir_all("/var/run/atrios");
     let _ = fs::write(SCREEN_MODE_FILE, "ticker");
@@ -640,10 +664,10 @@ pub fn execute_local_intent(intent: LocalIntent) {
             }
             let lbl = format!("TMR {}", format_duration_short(secs));
             println!("[local-ai] timer set: {secs}s ({lbl})");
+            show_timer_popup_async("timer_set", Some(secs.to_string()));
             let spoken = format!("Поставила таймер на {}!", format_duration_ru(secs));
             if !speak_via_remote_tts(&spoken, "happy", false) {
                 play_command_chime("timer_set");
-                show_ticker_briefly(&lbl);
             }
         }
         LocalIntent::CancelTimers => {
@@ -654,9 +678,9 @@ pub fn execute_local_intent(intent: LocalIntent) {
             }
             stop_ringing();
             println!("[local-ai] all timers cancelled");
+            show_timer_popup_async("timer_off", None);
             if !speak_via_remote_tts("Хорошо, все таймеры отменены.", "neutral", false) {
                 play_command_chime("cancel");
-                show_ticker_briefly("TMR OFF");
             }
         }
         LocalIntent::QueryTimers => {
@@ -677,9 +701,14 @@ pub fn execute_local_intent(intent: LocalIntent) {
                 None => ("NO TMR".into(), "Активных таймеров сейчас нет.".into()),
             };
             println!("[local-ai] query timers -> {lbl}");
+            if let Some(r) = rem {
+                show_timer_popup_async("timer_set", Some(r.to_string()));
+            }
             if !speak_via_remote_tts(&spoken, "neutral", false) {
                 play_command_chime("tick");
-                show_ticker_briefly(&lbl);
+                if rem.is_none() {
+                    show_ticker_briefly(&lbl);
+                }
             }
         }
         LocalIntent::SetAlarm { hour, minute } => {

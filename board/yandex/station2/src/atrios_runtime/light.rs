@@ -146,6 +146,148 @@ pub fn render_clock_frame(now_hm: &str, bt: bool, brightness: u8) -> Vec<u8> {
     buf
 }
 
+
+pub fn render_timer_frame(
+    rem_secs: u64,
+    total_secs: u64,
+    colon_on: bool,
+    bt: bool,
+    brightness: u8,
+    y_offset: isize,
+    bar_fill_override: Option<f64>,
+) -> Vec<u8> {
+    let mut buf = vec![0u8; SCR_SIZE];
+    let text = if rem_secs >= 3600 {
+        let h = (rem_secs / 3600).min(99);
+        let m = (rem_secs % 3600) / 60;
+        format!("{:02}{}{:02}", h, if colon_on { ':' } else { ' ' }, m)
+    } else {
+        let m = rem_secs / 60;
+        let s = rem_secs % 60;
+        format!("{:02}{}{:02}", m, if colon_on { ':' } else { ' ' }, s)
+    };
+    let x_pos = [0isize, 6, 12, 14, 20];
+    for (ch, &xs) in text.chars().zip(x_pos.iter()) {
+        let glyph = clock_glyph(ch);
+        let width: isize = if ch == ':' || ch == ' ' { 1 } else { 5 };
+        for (row_idx, &bits) in glyph.iter().enumerate() {
+            let y = y_offset + row_idx as isize;
+            for col in 0..width {
+                if ((bits >> ((width - 1 - col) as u8)) & 1) != 0 {
+                    screen_set_pixel(&mut buf, xs + col, y, brightness);
+                }
+            }
+        }
+    }
+    // Small animated hourglass / active indicator dot at top center (y = 0)
+    if y_offset <= 3 {
+        let dot_b = if colon_on { brightness } else { brightness / 3 };
+        screen_set_pixel(&mut buf, 12, 0, dot_b);
+        if rem_secs >= 3600 {
+            // Extra pixel for hours mode
+            screen_set_pixel(&mut buf, 11, 0, dot_b / 2);
+            screen_set_pixel(&mut buf, 13, 0, dot_b / 2);
+        }
+    }
+    if bt && y_offset <= 3 {
+        let bt_glyph = [0b010u8, 0b110, 0b010, 0b110, 0b010];
+        for (r, &bits) in bt_glyph.iter().enumerate() {
+            for c in 0..3isize {
+                if ((bits >> (2 - c)) & 1) != 0 {
+                    screen_set_pixel(&mut buf, 21 + c, r as isize, brightness / 2);
+                }
+            }
+        }
+    }
+    // Bottom progress bar on y = 14 (23 px wide: x = 1..=23)
+    let ratio = bar_fill_override.unwrap_or_else(|| {
+        if total_secs == 0 {
+            0.0
+        } else {
+            (rem_secs as f64 / total_secs as f64).clamp(0.0, 1.0)
+        }
+    });
+    let bar_w = 23isize;
+    let filled = (ratio * bar_w as f64).round() as isize;
+    let track_b = (brightness / 7).max(16);
+    for i in 0..bar_w {
+        let x = 1 + i;
+        let b = if i < filled { brightness } else { track_b };
+        screen_set_pixel(&mut buf, x, 14, b);
+    }
+    buf
+}
+
+pub fn render_clock_with_timer_bar(
+    now_hm: &str,
+    bt: bool,
+    brightness: u8,
+    rem_secs: u64,
+    total_secs: u64,
+) -> Vec<u8> {
+    let mut buf = render_clock_frame(now_hm, bt, brightness);
+    let ratio = if total_secs == 0 {
+        0.0
+    } else {
+        (rem_secs as f64 / total_secs as f64).clamp(0.0, 1.0)
+    };
+    let bar_w = 23isize;
+    let filled = (ratio * bar_w as f64).round() as isize;
+    let track_b = (brightness / 8).max(14);
+    for i in 0..bar_w {
+        let b = if i < filled { brightness } else { track_b };
+        screen_set_pixel(&mut buf, 1 + i, 15, b);
+    }
+    buf
+}
+
+fn screen_timer_popup(secs: u64, brightness: u8) {
+    // 1. Smooth slide-in from bottom (10 frames @ 25 FPS = 0.4s)
+    for step in 0..=10 {
+        let p = step as f64 / 10.0;
+        let ease = 1.0 - (1.0 - p).powi(3);
+        let y_off = 12 - (10.0 * ease).round() as isize;
+        let buf = render_timer_frame(secs, secs.max(1), true, is_bt_active(), brightness, y_off, Some(ease));
+        screen_send_frame_raw(&buf);
+        thread::sleep(Duration::from_millis(40));
+    }
+    // 2. Hold cleanly at y = 2 so handoff to screend live countdown is seamless (1.6s)
+    for tick in 0..4 {
+        let buf = render_timer_frame(secs, secs.max(1), tick % 2 == 0, is_bt_active(), brightness, 2, Some(1.0));
+        screen_send_frame_raw(&buf);
+        thread::sleep(Duration::from_millis(400));
+    }
+}
+
+fn screen_timer_off(brightness: u8) {
+    let word = "OFF";
+    for step in 0..=12 {
+        let p = step as f64 / 12.0;
+        let mut buf = vec![0u8; SCR_SIZE];
+        let b_txt = ((1.0 - (p - 0.65).max(0.0) / 0.35).clamp(0.0, 1.0) * brightness as f64) as u8;
+        if b_txt > 8 {
+            for (ci, ch) in word.chars().enumerate() {
+                let g = font_5x7(ch);
+                let x0 = 4 + (ci as isize) * 6;
+                for (r, &bits) in g.iter().enumerate() {
+                    for c in 0..5isize {
+                        if ((bits >> (4 - c)) & 1) != 0 {
+                            screen_set_pixel(&mut buf, x0 + c, 3 + r as isize, b_txt);
+                        }
+                    }
+                }
+            }
+        }
+        // Collapsing progress bar from full to 0
+        let rem_w = ((1.0 - p) * 23.0).round() as isize;
+        for i in 0..rem_w {
+            screen_set_pixel(&mut buf, 1 + i, 14, brightness);
+        }
+        screen_send_frame_raw(&buf);
+        thread::sleep(Duration::from_millis(85));
+    }
+}
+
 fn font_5x7(ch: char) -> [u8; 7] {
     match ch {
         '0' => [0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110],
@@ -1729,6 +1871,11 @@ fn run_screen_action(act: &str, vals: &[&str], b: u8) -> i32 {
         }
         "error" => screen_error(vals.first().copied().unwrap_or("default"), b),
         "ticker" => screen_ticker(&if vals.is_empty() { "ATRIOS".into() } else { vals.join(" ") }, b),
+        "timer_set" => {
+            let secs = vals.first().and_then(|s| s.parse::<u64>().ok()).unwrap_or(60);
+            screen_timer_popup(secs, b);
+        }
+        "timer_off" => screen_timer_off(b),
         "pixel" => {
             if vals.len() >= 2 {
                 let x: isize = vals[0].parse().unwrap_or(0);

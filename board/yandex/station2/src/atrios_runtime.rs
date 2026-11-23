@@ -390,4 +390,20 @@ mod tests {
         assert_eq!(entry.get("pid").and_then(|v| v.as_i64()), Some(1234));
         assert_eq!(entry.get("restarts").and_then(|v| v.as_i64()), Some(2));
     }
+
+    #[test]
+    fn timer_display_renders_digits_and_progress_bar() {
+        // 50% remaining on a 5-minute timer -> digits visible + half-lit bottom bar on row 14
+        let half = light::render_timer_frame(150, 300, true, false, 200, 2, None);
+        let full = light::render_timer_frame(300, 300, true, false, 200, 2, None);
+        assert_eq!(half.len(), full.len());
+        let bright_half = (1..=23).filter(|&x| half[(14 * 25 + x) * 3] >= 180).count();
+        let bright_full = (1..=23).filter(|&x| full[(14 * 25 + x) * 3] >= 180).count();
+        assert_eq!(bright_full, 23);
+        assert!((10..=13).contains(&bright_half), "expected ~12 bright bar pixels, got {bright_half}");
+        // Clock with bottom timer bar on row 15
+        let clk = light::render_clock_with_timer_bar("14:25", false, 200, 150, 300);
+        let clk_bar = (1..=23).filter(|&x| clk[(15 * 25 + x) * 3] >= 180).count();
+        assert!((10..=13).contains(&clk_bar));
+    }
 }
