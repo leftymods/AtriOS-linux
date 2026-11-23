@@ -129,55 +129,39 @@ fun BigPlayerOverlay(
                 }
             }
 
-            // Swipeable Large Cover Art (swipes all the way off, then next/prev slides cleanly in!)
-            Box(
+            // Synchronous 2-Card Ribbon Cover Art (next/prev cover slides in right behind your finger!)
+            SwipeableTwoCardRibbon(
+                trackKey = ymusic.trackId,
+                onSwipeNext = { coverDir = 1; elapsedSec = 0; onControl("next") },
+                onSwipePrev = { coverDir = -1; elapsedSec = 0; onControl("prev") },
                 modifier = Modifier
                     .fillMaxWidth(0.88f)
-                    .aspectRatio(1f)
-                    .pointerInput(ymusic.trackId) {
-                        detectHorizontalDragGestures(
-                            onDragEnd = {
-                                if (coverDragX < -95f) {
-                                    coverDir = 1
-                                    elapsedSec = 0
-                                    onControl("next")
-                                } else if (coverDragX > 95f) {
-                                    coverDir = -1
-                                    elapsedSec = 0
-                                    onControl("prev")
-                                }
-                                coverDragX = 0f
-                            },
-                            onDragCancel = { coverDragX = 0f },
-                            onHorizontalDrag = { _, amt ->
-                                coverDragX = (coverDragX + amt).coerceIn(-360f, 360f)
-                            }
-                        )
-                    }
-            ) {
-                AnimatedContent(
-                    targetState = ymusic.trackId to ymusic.coverUrl,
-                    transitionSpec = {
-                        (slideInHorizontally(spring(dampingRatio = 0.86f, stiffness = 300f)) { it * coverDir } + fadeIn(tween(220)))
-                            .togetherWith(
-                                slideOutHorizontally(spring(dampingRatio = 0.86f, stiffness = 300f)) { -it * coverDir } + fadeOut(tween(180))
-                            )
-                    },
-                    label = "bigCoverCarousel"
-                ) { (_, covUrl) ->
+                    .aspectRatio(1f),
+                currentCard = {
                     AsyncCoverArt(
-                        url = covUrl,
+                        url = ymusic.coverUrl,
                         shape = RoundedCornerShape(22.dp),
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .graphicsLayer {
-                                translationX = animCoverX
-                                alpha = (1f - kotlin.math.abs(animCoverX) / 520f).coerceIn(0.35f, 1f)
-                            },
+                        modifier = Modifier.fillMaxSize(),
+                        fallbackIcon = Icons.Rounded.Album
+                    )
+                },
+                nextCard = {
+                    AsyncCoverArt(
+                        url = ymusic.nextCoverUrl.ifBlank { ymusic.coverUrl },
+                        shape = RoundedCornerShape(22.dp),
+                        modifier = Modifier.fillMaxSize(),
+                        fallbackIcon = Icons.Rounded.Album
+                    )
+                },
+                prevCard = {
+                    AsyncCoverArt(
+                        url = ymusic.prevCoverUrl.ifBlank { ymusic.coverUrl },
+                        shape = RoundedCornerShape(22.dp),
+                        modifier = Modifier.fillMaxSize(),
                         fallbackIcon = Icons.Rounded.Album
                     )
                 }
-            }
+            )
 
             // Track info + Progress + Controls
             Column(

@@ -72,6 +72,7 @@ import com.leftymods.atrios.ui.AiAssistantCard
 import com.leftymods.atrios.ui.AsyncCoverArt
 import com.leftymods.atrios.ui.AudioCard
 import com.leftymods.atrios.ui.BigPlayerOverlay
+import com.leftymods.atrios.ui.SwipeableTwoCardRibbon
 import com.leftymods.atrios.ui.BluetoothCard
 import com.leftymods.atrios.ui.DevicePickerSection
 import com.leftymods.atrios.ui.LedAndScreenCard
@@ -497,91 +498,86 @@ fun AtriOSApp(
                             .padding(bottom = 12.dp),
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
-                        // Smooth scrolling swipeable dark mini-player (swipe left -> next, swipe right -> prev, tap -> Big Player!)
+                        // Synchronous 2-card ribbon bottom mini-player (entire card + cover + text + heart + pause drags, with next/prev card right behind!)
                         val ym = status.ymusic
                         if (selectedTab != AppTab.WAVE && (ym.isActive || ym.title.isNotBlank())) {
-                            var dragOffset by remember { mutableFloatStateOf(0f) }
-                            var miniDir by remember { mutableIntStateOf(1) }
-                            val animatedOffset by animateFloatAsState(
-                                targetValue = dragOffset,
-                                animationSpec = spring(dampingRatio = 0.78f, stiffness = 420f),
-                                label = "miniDrag"
-                            )
-                            Surface(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 16.dp, vertical = 6.dp)
-                                    .graphicsLayer { translationX = animatedOffset; alpha = (1f - kotlin.math.abs(animatedOffset) / 420f).coerceIn(0.35f, 1f) }
-                                    .pointerInput(ym.trackId) {
-                                        detectHorizontalDragGestures(
-                                            onDragEnd = {
-                                                if (dragOffset < -65f) {
-                                                    miniDir = 1
-                                                    client.ymusicControl("next")
-                                                    scope.launch { delay(350); client.ymusicStatus() }
-                                                } else if (dragOffset > 65f) {
-                                                    miniDir = -1
-                                                    client.ymusicControl("prev")
-                                                    scope.launch { delay(350); client.ymusicStatus() }
-                                                }
-                                                dragOffset = 0f
-                                            },
-                                            onDragCancel = { dragOffset = 0f },
-                                            onHorizontalDrag = { _, amt ->
-                                                dragOffset = (dragOffset + amt).coerceIn(-340f, 340f)
-                                            }
-                                        )
-                                    }
-                                    .clickable { showBigPlayer = true },
-                                shape = RoundedCornerShape(22.dp),
-                                color = Color(0xFF1A1A1F)
-                            ) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            @Composable
+                            fun MiniPlayerCard(title: String, artist: String, coverUrl: String, liked: Boolean, playing: Boolean, interactive: Boolean) {
+                                Surface(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .then(if (interactive) Modifier.clickable { showBigPlayer = true } else Modifier),
+                                    shape = RoundedCornerShape(22.dp),
+                                    color = Color(0xFF1A1A1F)
                                 ) {
-                                    AnimatedContent(
-                                        targetState = Triple(ym.trackId, ym.title, ym.artist to ym.coverUrl),
-                                        modifier = Modifier.weight(1f),
-                                        transitionSpec = {
-                                            (slideInHorizontally(spring(dampingRatio = 0.84f, stiffness = 360f)) { it * miniDir } + fadeIn(tween(200)))
-                                                .togetherWith(
-                                                    slideOutHorizontally(spring(dampingRatio = 0.84f, stiffness = 360f)) { -it * miniDir } + fadeOut(tween(160))
-                                                )
-                                        },
-                                        label = "miniTrackSlide"
-                                    ) { (_, title, artistCover) ->
-                                        val (artist, coverUrl) = artistCover
-                                        Row(
-                                            verticalAlignment = Alignment.CenterVertically,
-                                            horizontalArrangement = Arrangement.spacedBy(10.dp),
-                                            modifier = Modifier.fillMaxWidth()
-                                        ) {
-                                            AsyncCoverArt(url = coverUrl, shape = RoundedCornerShape(10.dp), modifier = Modifier.size(42.dp))
-                                            Column(modifier = Modifier.weight(1f)) {
-                                                Text(title.ifBlank { "Моя волна" }, color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                                if (artist.isNotBlank()) {
-                                                    Text(artist, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                                }
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                    ) {
+                                        AsyncCoverArt(url = coverUrl, shape = RoundedCornerShape(10.dp), modifier = Modifier.size(42.dp))
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(title.ifBlank { "Моя волна" }, color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                            if (artist.isNotBlank()) {
+                                                Text(artist, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                             }
                                         }
-                                    }
-                                    IconButton(onClick = { client.ymusicControl("like") }, modifier = Modifier.size(32.dp)) {
-                                        Icon(if (ym.liked) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder, contentDescription = null, tint = if (ym.liked) Color(0xFFFF2E7A) else Color.White, modifier = Modifier.size(20.dp))
-                                    }
-                                    IconButton(
-                                        onClick = {
-                                            val nxt = if (ym.state == "playing") "paused" else "playing"
-                                            status = status.copy(ymusic = ym.copy(state = nxt))
-                                            client.ymusicControl(if (ym.state == "playing") "pause" else "play")
-                                        },
-                                        modifier = Modifier.size(34.dp)
-                                    ) {
-                                        Icon(if (ym.state == "playing") Icons.Rounded.Pause else Icons.Rounded.PlayArrow, contentDescription = null, tint = Color.White, modifier = Modifier.size(26.dp))
+                                        IconButton(onClick = { if (interactive) client.ymusicControl("like") }, modifier = Modifier.size(32.dp)) {
+                                            Icon(if (liked) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder, contentDescription = null, tint = if (liked) Color(0xFFFF2E7A) else Color.White, modifier = Modifier.size(20.dp))
+                                        }
+                                        IconButton(
+                                            onClick = {
+                                                if (interactive) {
+                                                    val nxt = if (playing) "paused" else "playing"
+                                                    status = status.copy(ymusic = ym.copy(state = nxt))
+                                                    client.ymusicControl(if (playing) "pause" else "play")
+                                                }
+                                            },
+                                            modifier = Modifier.size(34.dp)
+                                        ) {
+                                            Icon(if (playing) Icons.Rounded.Pause else Icons.Rounded.PlayArrow, contentDescription = null, tint = Color.White, modifier = Modifier.size(26.dp))
+                                        }
                                     }
                                 }
                             }
+
+                            SwipeableTwoCardRibbon(
+                                trackKey = ym.trackId,
+                                onSwipeNext = {
+                                    client.ymusicControl("next")
+                                    scope.launch { delay(350); client.ymusicStatus() }
+                                },
+                                onSwipePrev = {
+                                    client.ymusicControl("prev")
+                                    scope.launch { delay(350); client.ymusicStatus() }
+                                },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 6.dp),
+                                currentCard = {
+                                    MiniPlayerCard(ym.title, ym.artist, ym.coverUrl, ym.liked, ym.state == "playing", interactive = true)
+                                },
+                                nextCard = {
+                                    MiniPlayerCard(
+                                        ym.nextTitle.ifBlank { "Следующий трек" },
+                                        ym.nextArtist,
+                                        ym.nextCoverUrl,
+                                        false,
+                                        ym.state == "playing",
+                                        interactive = false
+                                    )
+                                },
+                                prevCard = {
+                                    MiniPlayerCard(
+                                        ym.prevTitle.ifBlank { "Предыдущий трек" },
+                                        ym.prevArtist,
+                                        ym.prevCoverUrl,
+                                        false,
+                                        ym.state == "playing",
+                                        interactive = false
+                                    )
+                                }
+                            )
                         }
 
                         // Floating Rounded Capsule Bottom Navigation Bar!

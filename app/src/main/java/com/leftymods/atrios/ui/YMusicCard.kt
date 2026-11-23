@@ -16,6 +16,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.rememberLazyListState
 import kotlin.math.absoluteValue
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.foundation.pager.rememberPagerState
@@ -110,108 +111,15 @@ fun MyWaveAnimatedAura(
     audioEnergy: Float = 0f,
     modifier: Modifier = Modifier
 ) {
-    var extracted by remember(coverUrl) { mutableStateOf(CoverArtCache.getColors(coverUrl)) }
-    LaunchedEffect(coverUrl) {
-        if (coverUrl.isNotBlank()) {
-            CoverArtCache.load(coverUrl)
-            extracted = CoverArtCache.getColors(coverUrl)
-        } else {
-            extracted = null
-        }
-    }
-    val col1 by animateColorAsState(extracted?.c1 ?: palette.aura1, tween(900), label = "ac1")
-    val col2 by animateColorAsState(extracted?.c2 ?: palette.aura2, tween(900), label = "ac2")
-    val col3 by animateColorAsState(extracted?.c3 ?: palette.aura3, tween(900), label = "ac3")
-    val bassSmooth by animateFloatAsState(if (isPlaying) audioBass else 0f, spring(dampingRatio = 0.7f, stiffness = 240f), label = "bs")
-    val midSmooth by animateFloatAsState(if (isPlaying) audioMid else 0f, spring(dampingRatio = 0.7f, stiffness = 240f), label = "ms")
-    val engSmooth by animateFloatAsState(if (isPlaying) audioEnergy else 0f, spring(dampingRatio = 0.7f, stiffness = 240f), label = "es")
-    val inf = rememberInfiniteTransition(label = "waveAura")
-    // Single master phase 0..2*PI with integer harmonics -> mathematically 100% seamless loop!
-    val t by inf.animateFloat(
-        initialValue = 0f,
-        targetValue = (2f * PI).toFloat(),
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = if (isPlaying) 9000 else 15000, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "masterPhase"
+    SingleLiquidBlobShaderAura(
+        isPlaying = isPlaying,
+        palette = palette,
+        coverUrl = coverUrl,
+        audioBass = audioBass,
+        audioMid = audioMid,
+        audioEnergy = audioEnergy,
+        modifier = modifier
     )
-
-    Canvas(modifier = modifier) {
-        val cx = size.width * 0.5f
-        val cy = size.height * 0.43f
-        val beatPulse = if (isPlaying) (0.06f * sin(t * 6f) + bassSmooth * 0.22f + engSmooth * 0.10f) else 0.05f * sin(t * 2f)
-        val voiceShimmer = if (isPlaying) (0.14f + midSmooth * 0.36f + 0.08f * kotlin.math.abs(sin(t * 9f))) else 0.18f
-        val r = size.minDimension * 0.64f * (1f + beatPulse)
-
-        // Layer 1: Wide soft ambient nebula (slow orbit, 1x harmonic)
-        val c1 = Offset(cx + cos(t) * size.width * 0.14f, cy + sin(t) * size.height * 0.08f)
-        drawCircle(
-            brush = Brush.radialGradient(
-                colorStops = arrayOf(
-                    0.0f to col2.copy(alpha = 0.72f),
-                    0.45f to col3.copy(alpha = 0.36f),
-                    0.82f to col2.copy(alpha = 0.10f),
-                    1.0f to Color.Transparent
-                ),
-                center = c1,
-                radius = r * 1.48f
-            ),
-            radius = r * 1.48f,
-            center = c1
-        )
-
-        // Layer 2: Organic figure-8 magenta lobe (1x / 2x Lissajous -> smooth & seamless)
-        val c2 = Offset(cx + sin(t) * size.width * 0.22f, cy + sin(t * 2f) * size.height * 0.11f)
-        drawCircle(
-            brush = Brush.radialGradient(
-                colorStops = arrayOf(
-                    0.0f to col3.copy(alpha = 0.90f),
-                    0.42f to col3.copy(alpha = 0.48f),
-                    0.78f to col3.copy(alpha = 0.12f),
-                    1.0f to Color.Transparent
-                ),
-                center = c2,
-                radius = r * 1.12f
-            ),
-            radius = r * 1.12f,
-            center = c2
-        )
-
-        // Layer 3: Swirling golden-yellow solar plasma (counter-phase 1x / 2x)
-        val c3 = Offset(cx - cos(t) * size.width * 0.19f, cy - sin(t * 2f + 0.8f) * size.height * 0.10f)
-        drawCircle(
-            brush = Brush.radialGradient(
-                colorStops = arrayOf(
-                    0.0f to col1.copy(alpha = 0.96f),
-                    0.40f to col2.copy(alpha = 0.62f),
-                    0.76f to col1.copy(alpha = 0.14f),
-                    1.0f to Color.Transparent
-                ),
-                center = c3,
-                radius = r * 1.05f
-            ),
-            radius = r * 1.05f,
-            center = c3
-        )
-
-        // Layer 4: Luminous inner core (2x / 1x gentle shimmer)
-        val c4 = Offset(cx + cos(t * 2f) * size.width * 0.09f, cy - sin(t) * size.height * 0.08f)
-        drawCircle(
-            brush = Brush.radialGradient(
-                colorStops = arrayOf(
-                    0.0f to Color.White.copy(alpha = (voiceShimmer + bassSmooth * 0.25f).coerceIn(0.18f, 0.72f)),
-                    0.35f to col1.copy(alpha = 0.68f),
-                    0.75f to col2.copy(alpha = 0.15f),
-                    1.0f to Color.Transparent
-                ),
-                center = c4,
-                radius = r * 0.68f
-            ),
-            radius = r * 0.68f,
-            center = c4
-        )
-    }
 }
 
 @Composable
@@ -582,97 +490,83 @@ fun YandexWaveFullScreen(
                             }
                         }
 
-                        // Smooth swipeable frosted track pill (swipe left -> next, swipe right -> prev, smoothly scrolls & settles!)
-                        var pillDrag by remember { mutableFloatStateOf(0f) }
-                        var pillDir by remember { mutableIntStateOf(1) }
-                        val pillAnimX by animateFloatAsState(
-                            targetValue = pillDrag,
-                            animationSpec = spring(dampingRatio = 0.78f, stiffness = 420f),
-                            label = "pillDragX"
-                        )
-                        Surface(
-                            shape = RoundedCornerShape(99.dp),
-                            color = Color(0x991C1C22),
-                            modifier = Modifier
-                                .fillMaxWidth(0.92f)
-                                .graphicsLayer { translationX = pillAnimX; alpha = (1f - kotlin.math.abs(pillAnimX) / 420f).coerceIn(0.35f, 1f) }
-                                .pointerInput(ymusic.trackId) {
-                                    detectHorizontalDragGestures(
-                                        onDragEnd = {
-                                            if (pillDrag < -65f) {
-                                                pillDir = 1
-                                                onControl("next")
-                                            } else if (pillDrag > 65f) {
-                                                pillDir = -1
-                                                onControl("prev")
-                                            }
-                                            pillDrag = 0f
-                                        },
-                                        onDragCancel = { pillDrag = 0f },
-                                        onHorizontalDrag = { _, amt ->
-                                            pillDrag = (pillDrag + amt).coerceIn(-340f, 340f)
-                                        }
-                                    )
-                                }
-                                .clickable { onOpenBigPlayer() }
-                        ) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        // Synchronous 2-card ribbon track pill (entire pill + cover + text + heart drags, with next/prev pill right behind it!)
+                        @Composable
+                        fun WavePillCard(title: String, artist: String, coverUrl: String, liked: Boolean, interactive: Boolean) {
+                            Surface(
+                                shape = RoundedCornerShape(99.dp),
+                                color = Color(0xAA1C1C22),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .then(if (interactive) Modifier.clickable { onOpenBigPlayer() } else Modifier)
                             ) {
-                                AnimatedContent(
-                                    targetState = Triple(ymusic.trackId, ymusic.title, ymusic.artist to ymusic.coverUrl),
-                                    modifier = Modifier.weight(1f),
-                                    transitionSpec = {
-                                        (slideInHorizontally(spring(dampingRatio = 0.85f, stiffness = 360f)) { it * pillDir } + fadeIn(tween(200)))
-                                            .togetherWith(
-                                                slideOutHorizontally(spring(dampingRatio = 0.85f, stiffness = 360f)) { -it * pillDir } + fadeOut(tween(160))
-                                            )
-                                    },
-                                    label = "wavePillTrack"
-                                ) { (_, title, artistCover) ->
-                                    val (artist, coverUrl) = artistCover
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(10.dp),
-                                        modifier = Modifier.fillMaxWidth()
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    if (coverUrl.isNotBlank()) {
+                                        AsyncCoverArt(
+                                            url = coverUrl,
+                                            shape = CircleShape,
+                                            modifier = Modifier.size(34.dp),
+                                            fallbackIcon = Icons.Rounded.MusicNote
+                                        )
+                                    }
+                                    Text(
+                                        if (title.isNotBlank()) {
+                                            if (artist.isNotBlank()) "$artist — $title" else title
+                                        } else "Нажмите ▶ или свайпните для выбора",
+                                        color = Color.White,
+                                        fontWeight = FontWeight.SemiBold,
+                                        fontSize = 14.sp,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        textAlign = if (coverUrl.isBlank()) TextAlign.Center else TextAlign.Start,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    IconButton(
+                                        onClick = { if (interactive) onControl("like") },
+                                        modifier = Modifier.size(30.dp)
                                     ) {
-                                        if (coverUrl.isNotBlank()) {
-                                            AsyncCoverArt(
-                                                url = coverUrl,
-                                                shape = CircleShape,
-                                                modifier = Modifier.size(34.dp),
-                                                fallbackIcon = Icons.Rounded.MusicNote
-                                            )
-                                        }
-                                        Text(
-                                            if (title.isNotBlank()) {
-                                                if (artist.isNotBlank()) "$artist — $title" else title
-                                            } else "Нажмите ▶ или свайпните для выбора",
-                                            color = Color.White,
-                                            fontWeight = FontWeight.SemiBold,
-                                            fontSize = 14.sp,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
-                                            textAlign = if (coverUrl.isBlank()) TextAlign.Center else TextAlign.Start,
-                                            modifier = Modifier.weight(1f)
+                                        Icon(
+                                            if (liked) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
+                                            contentDescription = "Нравится",
+                                            tint = if (liked) Color(0xFFFF2E7A) else Color.White,
+                                            modifier = Modifier.size(22.dp)
                                         )
                                     }
                                 }
-                                IconButton(
-                                    onClick = { onControl("like") },
-                                    modifier = Modifier.size(30.dp)
-                                ) {
-                                    Icon(
-                                        if (ymusic.liked) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
-                                        contentDescription = "Нравится",
-                                        tint = if (ymusic.liked) Color(0xFFFF2E7A) else Color.White,
-                                        modifier = Modifier.size(22.dp)
-                                    )
-                                }
                             }
                         }
+
+                        SwipeableTwoCardRibbon(
+                            trackKey = ymusic.trackId,
+                            onSwipeNext = { onControl("next") },
+                            onSwipePrev = { onControl("prev") },
+                            modifier = Modifier.fillMaxWidth(0.92f),
+                            currentCard = {
+                                WavePillCard(ymusic.title, ymusic.artist, ymusic.coverUrl, ymusic.liked, interactive = true)
+                            },
+                            nextCard = {
+                                WavePillCard(
+                                    ymusic.nextTitle.ifBlank { "Следующий трек" },
+                                    ymusic.nextArtist,
+                                    ymusic.nextCoverUrl,
+                                    false,
+                                    interactive = false
+                                )
+                            },
+                            prevCard = {
+                                WavePillCard(
+                                    ymusic.prevTitle.ifBlank { "Предыдущий трек" },
+                                    ymusic.prevArtist,
+                                    ymusic.prevCoverUrl,
+                                    false,
+                                    interactive = false
+                                )
+                            }
+                        )
 
                         // AI Caption line (like screenshot: "✨ AI  ...")
                         Row(
@@ -697,89 +591,93 @@ fun YandexWaveFullScreen(
                     }
                 }
 
-                // Infinite Circular Carousel of Artist & Genre Orbs (loops endlessly with curved arc!)
+                // Infinite Circular Carousel of Artist & Genre Orbs with TRUE native fling inertia!
                 val orbCount = displayOrbs.size.coerceAtLeast(1)
-                val startPage = remember(orbCount) { (Int.MAX_VALUE / 2) - ((Int.MAX_VALUE / 2) % orbCount) }
-                val orbPagerState = rememberPagerState(initialPage = startPage, pageCount = { Int.MAX_VALUE })
-                HorizontalPager(
-                    state = orbPagerState,
-                    pageSize = PageSize.Fixed(128.dp),
-                    pageSpacing = 12.dp,
-                    contentPadding = PaddingValues(horizontal = 112.dp),
-                    flingBehavior = PagerDefaults.flingBehavior(
-                        state = orbPagerState,
-                        pagerSnapDistance = PagerSnapDistance.atMost(5)
-                    ),
+                val startIdx = remember(orbCount) { 5000 - (5000 % orbCount) }
+                val orbListState = rememberLazyListState(initialFirstVisibleItemIndex = startIdx)
+                LazyRow(
+                    state = orbListState,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    contentPadding = PaddingValues(horizontal = 36.dp),
                     modifier = Modifier.fillMaxWidth().height(156.dp)
-                ) { page ->
-                    val orb = displayOrbs[((page % orbCount) + orbCount) % orbCount]
-                    val pageOffset = ((orbPagerState.currentPage - page) + orbPagerState.currentPageOffsetFraction).absoluteValue.coerceIn(0f, 1.5f)
-                    val scale = 1.06f - 0.14f * pageOffset.coerceIn(0f, 1f)
-                    val arcDropPx = 22f * pageOffset * pageOffset
-                    val alphaVal = (1f - 0.28f * pageOffset).coerceIn(0.60f, 1f)
-                    val orbColor = parseHexColor(orb.colorHex, palette.aura2)
+                ) {
+                    items(count = 10000, key = { it }) { index ->
+                        val orb = displayOrbs[((index % orbCount) + orbCount) % orbCount]
+                        val layoutInfo = orbListState.layoutInfo
+                        val itemInfo = layoutInfo.visibleItemsInfo.firstOrNull { it.index == index }
+                        val distFromCenter = if (itemInfo != null && layoutInfo.viewportEndOffset > 0) {
+                            val vpCenter = (layoutInfo.viewportStartOffset + layoutInfo.viewportEndOffset) * 0.5f
+                            val itemCenter = itemInfo.offset + itemInfo.size * 0.5f
+                            ((itemCenter - vpCenter) / (itemInfo.size.coerceAtLeast(1) * 1.15f)).coerceIn(-1.5f, 1.5f)
+                        } else 0f
+                        val absDist = distFromCenter.absoluteValue
+                        val scale = 1.05f - 0.12f * absDist.coerceIn(0f, 1f)
+                        val arcDropPx = 18f * absDist * absDist
+                        val alphaVal = (1f - 0.22f * absDist).coerceIn(0.65f, 1f)
+                        val orbColor = parseHexColor(orb.colorHex, palette.aura2)
 
-                    Box(
-                        modifier = Modifier
-                            .width(128.dp)
-                            .height(148.dp)
-                            .graphicsLayer {
-                                scaleX = scale
-                                scaleY = scale
-                                translationY = arcDropPx
-                                alpha = alphaVal
-                            }
-                            .clickable {
-                                activePreset = orb.title
-                                onPlay(orb.mode, orb.query.ifBlank { null })
-                            },
-                        contentAlignment = Alignment.BottomCenter
-                    ) {
                         Box(
                             modifier = Modifier
-                                .fillMaxWidth()
-                                .height(114.dp)
-                                .clip(RoundedCornerShape(topStart = 60.dp, topEnd = 60.dp, bottomStart = 20.dp, bottomEnd = 20.dp))
-                                .background(
-                                    Brush.verticalGradient(
-                                        listOf(
-                                            orbColor.copy(alpha = 0.80f),
-                                            orbColor.copy(alpha = 0.28f),
-                                            Color.Transparent
+                                .width(126.dp)
+                                .height(148.dp)
+                                .graphicsLayer {
+                                    scaleX = scale
+                                    scaleY = scale
+                                    translationY = arcDropPx
+                                    alpha = alphaVal
+                                }
+                                .clickable {
+                                    activePreset = orb.title
+                                    onPlay(orb.mode, orb.query.ifBlank { null })
+                                },
+                            contentAlignment = Alignment.BottomCenter
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(114.dp)
+                                    .clip(RoundedCornerShape(topStart = 60.dp, topEnd = 60.dp, bottomStart = 20.dp, bottomEnd = 20.dp))
+                                    .background(
+                                        Brush.verticalGradient(
+                                            listOf(
+                                                orbColor.copy(alpha = 0.80f),
+                                                orbColor.copy(alpha = 0.28f),
+                                                Color.Transparent
+                                            )
                                         )
                                     )
-                                )
-                        )
-                        Column(
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.spacedBy(4.dp),
-                            modifier = Modifier.fillMaxSize().padding(horizontal = 8.dp, vertical = 4.dp)
-                        ) {
-                            AsyncCoverArt(
-                                url = if (orb.subtitle == "Артист") orb.coverUrl else "",
-                                shape = CircleShape,
-                                modifier = Modifier.size(64.dp),
-                                fallbackIcon = orbFallbackIcon(orb),
-                                monochromeIcon = orb.subtitle != "Артист"
                             )
-                            if (orb.subtitle.isNotBlank()) {
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(4.dp),
+                                modifier = Modifier.fillMaxSize().padding(horizontal = 8.dp, vertical = 4.dp)
+                            ) {
+                                AsyncCoverArt(
+                                    url = if (orb.subtitle == "Артист") orb.coverUrl else "",
+                                    shape = CircleShape,
+                                    modifier = Modifier.size(64.dp),
+                                    fallbackIcon = orbFallbackIcon(orb),
+                                    monochromeIcon = orb.subtitle != "Артист"
+                                )
+                                if (orb.subtitle.isNotBlank()) {
+                                    Text(
+                                        orb.subtitle,
+                                        color = Color.White.copy(alpha = 0.72f),
+                                        fontSize = 11.sp,
+                                        maxLines = 1
+                                    )
+                                }
                                 Text(
-                                    orb.subtitle,
-                                    color = Color.White.copy(alpha = 0.72f),
-                                    fontSize = 11.sp,
-                                    maxLines = 1
+                                    orb.title,
+                                    color = Color.White,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 13.sp,
+                                    textAlign = TextAlign.Center,
+                                    maxLines = 2,
+                                    lineHeight = 15.sp,
+                                    overflow = TextOverflow.Ellipsis
                                 )
                             }
-                            Text(
-                                orb.title,
-                                color = Color.White,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 13.sp,
-                                textAlign = TextAlign.Center,
-                                maxLines = 2,
-                                lineHeight = 15.sp,
-                                overflow = TextOverflow.Ellipsis
-                            )
                         }
                     }
                 }
