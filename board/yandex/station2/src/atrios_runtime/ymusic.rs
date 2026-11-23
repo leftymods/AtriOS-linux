@@ -329,6 +329,9 @@ impl YMusicStatus {
                 "error",
                 self.error.as_ref().map(|s| Json::Str(s.clone())).unwrap_or(Json::Null),
             ),
+            ("audio_bass", Json::Num(if self.state == "playing" { read_audio_envelope().0 } else { 0.0 })),
+            ("audio_mid", Json::Num(if self.state == "playing" { read_audio_envelope().1 } else { 0.0 })),
+            ("audio_energy", Json::Num(if self.state == "playing" { read_audio_envelope().2 } else { 0.0 })),
             ("updated_ts", Json::Num(self.updated_ts as f64)),
         ])
     }
@@ -379,7 +382,15 @@ pub fn read_status() -> YMusicStatus {
 }
 
 pub fn read_status_json() -> Json {
-    read_status().to_json()
+    let mut st = read_status();
+    if !st.track_id.is_empty() {
+        if let Some(auth) = load_auth() {
+            if let Some(live_liked) = is_track_liked_live(&auth, &st.track_id) {
+                st.liked = live_liked;
+            }
+        }
+    }
+    st.to_json()
 }
 
 fn write_status(st: &mut YMusicStatus) {
@@ -999,6 +1010,67 @@ fn resolve_track_stream_url(auth: &YMusicAuth, track_id: &str) -> Result<String,
     Ok(build_stream_url(&host, codec, &path, &ts, &s))
 }
 
+
+fn read_audio_envelope() -> (f64, f64, f64) {
+    let Ok(txt) = fs::read_to_string("/var/run/atrios/ymusic_audio.json") else {
+        return (0.0, 0.0, 0.0);
+    };
+    let Ok(j) = Json::parse(&txt) else {
+        return (0.0, 0.0, 0.0);
+    };
+    let b = j.get("b").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let v = j.get("v").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let e = j.get("e").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    (b, v, e)
+}
+
+fn is_track_liked_live(auth: &YMusicAuth, track_id: &str) -> Option<bool> {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+    if track_id.is_empty() {
+        return None;
+    }
+    static LIKES_CACHE: OnceLock<Mutex<(i64, HashSet<String>)>> = OnceLock::new();
+    let cache = LIKES_CACHE.get_or_init(|| Mutex::new((0, HashSet::new())));
+    let now = now_unix_i64();
+    if let Ok(g) = cache.lock() {
+        if now - g.0 < 8 && !g.1.is_empty() {
+            return Some(g.1.contains(track_id));
+        }
+    }
+    let ep = format!("/users/{}/likes/tracks", auth.uid);
+    let resp = api_get_json(&auth.token, &ep).ok()?;
+    let arr = resp
+        .get("result")
+        .and_then(|r| r.get("library"))
+        .and_then(|l| l.get("tracks"))
+        .and_then(|v| v.as_arr())?;
+    let mut set = HashSet::with_capacity(arr.len());
+    for item in arr {
+        match item.get("id") {
+            Some(Json::Str(s)) if !s.is_empty() => { set.insert(s.clone()); }
+            Some(Json::Num(n)) => { set.insert(format!("{}", *n as i64)); }
+            _ => {}
+        }
+    }
+    let found = set.contains(track_id);
+    if let Ok(mut g) = cache.lock() {
+        *g = (now, set);
+    }
+    Some(found)
+}
+
+fn invalidate_likes_cache() {
+    // Handled via short 8s TTL + immediate local toggle
+}
+
+fn api_unlike_track(auth: &YMusicAuth, track_id: &str) -> Result<(), String> {
+    let ep = format!("/users/{}/likes/tracks/remove", auth.uid);
+    let body = format!("track-ids={}", url_encode(track_id));
+    let _ = api_post_form_json(&auth.token, &ep, &body)?;
+    Ok(())
+}
+
 fn api_like_track(auth: &YMusicAuth, track_id: &str, dislike: bool) -> Result<(), String> {
     let ep = if dislike {
         format!("/users/{}/dislikes/tracks/add-multiple", auth.uid)
@@ -1232,6 +1304,7 @@ struct PlayerState {
     pipeline: Option<ActivePipeline>,
     prefetch: std::sync::Arc<std::sync::Mutex<Option<(String, String)>>>,
     pending_play_at: Option<std::time::Instant>,
+    last_skip_at: Option<std::time::Instant>,
     status: YMusicStatus,
 }
 
@@ -1245,6 +1318,7 @@ impl PlayerState {
             pipeline: None,
             prefetch: std::sync::Arc::new(std::sync::Mutex::new(None)),
             pending_play_at: None,
+            last_skip_at: None,
             status: YMusicStatus::default_idle(),
         }
     }
@@ -1597,14 +1671,28 @@ impl PlayerState {
                 self.handle_command("pause");
             }
         } else if cmd == "next" {
+            if self.last_skip_at.map(|t| t.elapsed() < Duration::from_millis(650)).unwrap_or(false) {
+                return;
+            }
+            self.last_skip_at = Some(std::time::Instant::now());
             self.next_track(true);
         } else if cmd == "prev" {
+            if self.last_skip_at.map(|t| t.elapsed() < Duration::from_millis(650)).unwrap_or(false) {
+                return;
+            }
+            self.last_skip_at = Some(std::time::Instant::now());
             self.prev_track();
         } else if cmd == "like" {
             if let (Some(auth), Some(cur)) = (load_auth(), self.queue.get_mut(self.index)) {
-                if api_like_track(&auth, &cur.id, false).is_ok() {
-                    cur.liked = true;
-                    self.status.liked = true;
+                let want_like = !self.status.liked;
+                let ok = if want_like {
+                    api_like_track(&auth, &cur.id, false).is_ok()
+                } else {
+                    api_unlike_track(&auth, &cur.id).is_ok()
+                };
+                if ok {
+                    cur.liked = want_like;
+                    self.status.liked = want_like;
                     write_status(&mut self.status);
                 }
             }
