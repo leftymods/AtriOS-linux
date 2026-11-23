@@ -66,8 +66,8 @@ impl Default for AiConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            server: String::new(),
-            ca_file: String::new(),
+            server: "https://ai.leftymods.tech".into(),
+            ca_file: "/etc/atrios/ca.crt".into(),
             token: String::new(),
             wake_word: "Atri".into(),
             vad_threshold: 320.0,
@@ -106,6 +106,19 @@ pub fn load_config() -> AiConfig {
                 cfg.min_speech_ms = n;
             }
         }
+    }
+    if cfg.ca_file.is_empty() && Path::new("/etc/atrios/ca.crt").exists() {
+        cfg.ca_file = "/etc/atrios/ca.crt".into();
+    }
+    let srv_lc = cfg.server.trim().to_ascii_lowercase();
+    if srv_lc.starts_with("http://")
+        || srv_lc.contains("://192.168.")
+        || srv_lc.contains("://10.")
+        || srv_lc.contains("://127.")
+        || srv_lc.contains("://localhost")
+    {
+        eprintln!("[atriai] direct LAN/HTTP server rejected ({}); forcing encrypted gateway https://ai.leftymods.tech", cfg.server);
+        cfg.server = "https://ai.leftymods.tech".into();
     }
     if cfg.vad_threshold >= 600.0 {
         cfg.vad_threshold = 320.0;

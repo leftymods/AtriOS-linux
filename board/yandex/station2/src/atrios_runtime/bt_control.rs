@@ -524,6 +524,15 @@ pub(crate) fn process_command(cmd_obj: &Json) -> Result<Json, String> {
         .unwrap_or("");
     match cmd {
         "get_status" | "status" => Ok(build_status_payload()),
+        "get_relay_info" => {
+            let cfg = crate::atriai::load_config();
+            Ok(obj(vec![
+                ("type", Json::Str("relay_info".into())),
+                ("device_id", Json::Str(device_relay_id())),
+                ("gateway", Json::Str(cfg.server)),
+                ("has_token", Json::Bool(!cfg.token.is_empty())),
+            ]))
+        }
         "set_volume" | "volume" => {
             if let Some(v) = map.get("value").or_else(|| map.get("volume")).and_then(|x| x.as_i64()) {
                 set_system_volume(v as i32);
@@ -1207,7 +1216,85 @@ fn handle_client(fd: c_int, mac: String) {
     println!("[bt-control] Client disconnected: {mac}");
 }
 
+
+fn device_relay_id() -> String {
+    if let Ok(mid) = fs::read_to_string("/etc/machine-id") {
+        let m = mid.trim();
+        if m.len() >= 12 {
+            return format!("atri-{}", &m[..12]);
+        }
+    }
+    if let Ok(mac) = fs::read_to_string("/sys/class/net/wlan0/address") {
+        let clean: String = mac.trim().chars().filter(|c| c.is_ascii_hexdigit()).collect();
+        if !clean.is_empty() {
+            return format!("atri-{clean}");
+        }
+    }
+    "atri-station".into()
+}
+
+fn spawn_wifi_relay_worker() {
+    thread::spawn(|| {
+        let did = device_relay_id();
+        println!("[wifi-relay] worker started (device_id={did})");
+        loop {
+            let cfg = crate::atriai::load_config();
+            let base = cfg.server.trim().trim_end_matches('/').to_string();
+            let token = cfg.token.trim().to_string();
+            let ca = if cfg.ca_file.is_empty() {
+                None
+            } else {
+                Some(cfg.ca_file.as_str())
+            };
+            if !base.starts_with("https://") || token.is_empty() {
+                thread::sleep(Duration::from_secs(10));
+                continue;
+            }
+            let auth = format!("Bearer {token}");
+            let hdrs = [("Authorization", auth.as_str())];
+            let poll_url = format!("{base}/relay/v1/device/{did}/poll");
+            let payload = obj(vec![
+                ("device_id", Json::Str(did.clone())),
+                ("status", build_status_payload()),
+            ]);
+            match crate::https::request_json(&poll_url, Some(&payload), &hdrs, ca, 30, 512 * 1024, None) {
+                Ok(resp) => {
+                    if let Some(cmd_id) = resp.get_str("cmd_id").filter(|s| !s.is_empty()) {
+                        if let Some(cmd_payload) = resp.get("payload") {
+                            let reply = match process_command(cmd_payload) {
+                                Ok(r) => r,
+                                Err(e) => obj(vec![
+                                    ("type", Json::Str("error".into())),
+                                    ("error", Json::Str(e)),
+                                ]),
+                            };
+                            let reply_url = format!("{base}/relay/v1/device/{did}/reply");
+                            let reply_body = obj(vec![
+                                ("cmd_id", Json::Str(cmd_id.to_string())),
+                                ("reply", reply),
+                            ]);
+                            let _ = crate::https::request_json(
+                                &reply_url,
+                                Some(&reply_body),
+                                &hdrs,
+                                ca,
+                                10,
+                                65536,
+                                None,
+                            );
+                        }
+                    }
+                }
+                Err(_) => {
+                    thread::sleep(Duration::from_secs(5));
+                }
+            }
+        }
+    });
+}
+
 pub fn run(_args: &[String]) -> i32 {
+    spawn_wifi_relay_worker();
     let server_fd = unsafe { socket(AF_BLUETOOTH, SOCK_STREAM, BTPROTO_RFCOMM) };
     if server_fd < 0 {
         eprintln!("[bt-control] RFCOMM socket failed: {}", std::io::Error::last_os_error());

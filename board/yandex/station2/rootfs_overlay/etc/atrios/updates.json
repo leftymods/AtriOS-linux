@@ -1,6 +1,7 @@
 {
-  "repository": "leftymods/AtriOS-linux",
   "enabled": true,
-  "interval_seconds": 21600,
-  "public_key": "/etc/atrios/ota-public.pem"
+  "manifest_url": "https://ai.leftymods.tech/ota/manifest.json",
+  "ca_file": "/etc/atrios/ca.crt",
+  "channel": "stable",
+  "auto_install": true
 }
