@@ -1,62 +1,47 @@
 package com.leftymods.atrios.ui.theme
 
 import android.app.Activity
-import android.os.Build
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.dynamicDarkColorScheme
-import androidx.compose.material3.dynamicLightColorScheme
-import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.SideEffect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.core.view.WindowCompat
 
-private val AtriDarkColors = darkColorScheme(
-    primary = Color(0xFF4CEEFF),
-    onPrimary = Color(0xFF00242E),
-    primaryContainer = Color(0xFF152844),
-    onPrimaryContainer = Color(0xFFCFF7FF),
-    secondary = Color(0xFFA78BFA),
-    onSecondary = Color(0xFF1F0B52),
-    secondaryContainer = Color(0xFF261E47),
-    onSecondaryContainer = Color(0xFFEBE4FF),
-    tertiary = Color(0xFFF472B6),
-    onTertiary = Color(0xFF3B0724),
-    background = Color(0xFF070B14),
-    onBackground = Color(0xFFEDF2FA),
-    surface = Color(0xFF0E1525),
-    onSurface = Color(0xFFEDF2FA),
-    surfaceVariant = Color(0xFF18223A),
-    onSurfaceVariant = Color(0xFF9FB0CE),
-    surfaceContainerLowest = Color(0xFF060911),
-    surfaceContainerLow = Color(0xFF0C1220),
-    surfaceContainer = Color(0xFF11192B),
-    surfaceContainerHigh = Color(0xFF172136),
-    surfaceContainerHighest = Color(0xFF1F2B45),
-    outline = Color(0xFF2D3C5E),
-    outlineVariant = Color(0xFF1E2942)
-)
+val YandexYellow = Color(0xFFFFEE00)
+val YandexAmber = Color(0xFFFFB800)
+val YandexOrangeRed = Color(0xFFFF3D00)
+val YandexMagenta = Color(0xFFFF1F8E)
+val OledBlack = Color(0xFF000000)
+val OledCard = Color(0xFF141416)
+val OledCardHigh = Color(0xFF1E1E22)
 
-private val AtriLightColors = lightColorScheme(
-    primary = Color(0xFF006780),
-    onPrimary = Color(0xFFFFFFFF),
-    primaryContainer = Color(0xFFB9EAFF),
-    onPrimaryContainer = Color(0xFF001F29),
-    secondary = Color(0xFF5E42B8),
-    onSecondary = Color(0xFFFFFFFF),
-    secondaryContainer = Color(0xFFE7DEFF),
-    onSecondaryContainer = Color(0xFF1B0062),
-    background = Color(0xFFF4F7FC),
-    onBackground = Color(0xFF101828),
-    surface = Color(0xFFFFFFFF),
-    onSurface = Color(0xFF101828),
-    surfaceVariant = Color(0xFFE6EDF8),
-    onSurfaceVariant = Color(0xFF44516A)
+private val AtriYandexDarkColors = darkColorScheme(
+    primary = YandexYellow,
+    onPrimary = Color(0xFF0D0D0D),
+    primaryContainer = Color(0xFF2B2700),
+    onPrimaryContainer = Color(0xFFFFF59D),
+    secondary = Color(0xFFFF5C8A),
+    onSecondary = Color(0xFF1A000C),
+    secondaryContainer = Color(0xFF2B1220),
+    onSecondaryContainer = Color(0xFFFFD8E4),
+    tertiary = Color(0xFFFF8A00),
+    onTertiary = Color(0xFF1F0D00),
+    background = OledBlack,
+    onBackground = Color(0xFFFFFFFF),
+    surface = Color(0xFF0B0B0D),
+    onSurface = Color(0xFFFFFFFF),
+    surfaceVariant = Color(0xFF1B1B1F),
+    onSurfaceVariant = Color(0xFFA0A0A8),
+    surfaceContainerLowest = OledBlack,
+    surfaceContainerLow = OledCard,
+    surfaceContainer = Color(0xFF18181B),
+    surfaceContainerHigh = OledCardHigh,
+    surfaceContainerHighest = Color(0xFF28282E),
+    outline = Color(0xFF34343C),
+    outlineVariant = Color(0xFF222228)
 )
 
 @Composable
@@ -65,27 +50,19 @@ fun AtriOSTheme(
     dynamicColor: Boolean = false,
     content: @Composable () -> Unit
 ) {
-    val context = LocalContext.current
-    val colors = when {
-        dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
-            if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
-        }
-        darkTheme -> AtriDarkColors
-        else -> AtriLightColors
-    }
     val view = LocalView.current
     if (!view.isInEditMode) {
         SideEffect {
             val window = (view.context as? Activity)?.window
             if (window != null) {
-                window.statusBarColor = colors.background.toArgb()
-                window.navigationBarColor = colors.surface.toArgb()
-                WindowCompat.getInsetsController(window, view).isAppearanceLightStatusBars = !darkTheme
+                window.statusBarColor = Color.Transparent.toArgb()
+                window.navigationBarColor = Color.Transparent.toArgb()
+                WindowCompat.getInsetsController(window, view).isAppearanceLightStatusBars = false
             }
         }
     }
     MaterialTheme(
-        colorScheme = colors,
+        colorScheme = AtriYandexDarkColors,
         content = content
     )
 }

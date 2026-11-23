@@ -41,7 +41,7 @@ class BtControlClient(
     private val onTimersUpdate: (List<TimerItem>) -> Unit = {},
     private val onAlarmsUpdate: (List<AlarmItem>) -> Unit = {},
     private val onBtSpeakerPush: (Boolean) -> Unit = {},
-    private val onRelayInfo: (String, String) -> Unit = { _, _ -> },
+    private val onRelayInfo: (String, String, String) -> Unit = { _, _, _ -> },
     private val onMessage: (String, Boolean) -> Unit = { _, _ -> },
     private val onConnectionState: (Boolean, String, BluetoothDevice?) -> Unit
 ) {
@@ -60,10 +60,18 @@ class BtControlClient(
     @Volatile private var relayDeviceId: String = ""
     @Volatile private var relayToken: String = ""
     @Volatile private var relayActive: Boolean = false
+    @Volatile private var userDisconnected: Boolean = false
+
+    fun setSavedRelayConfig(gatewayUrl: String, deviceId: String, token: String) {
+        if (gatewayUrl.startsWith("https://")) relayGateway = gatewayUrl.trim().trimEnd('/')
+        if (deviceId.isNotBlank()) relayDeviceId = deviceId.trim()
+        if (token.isNotBlank()) relayToken = token.trim()
+    }
 
     @SuppressLint("MissingPermission")
     fun connect(device: BluetoothDevice) {
         disconnect(silent = true)
+        userDisconnected = false
         activeDevice = device
         readJob = scope.launch(Dispatchers.IO) {
             try {
@@ -96,12 +104,82 @@ class BtControlClient(
                         // Ignore malformed frames cleanly
                     }
                 }
+                closeQuietly()
+                if (!userDisconnected && trySeamlessRelayFailover()) return@launch
+                if (!userDisconnected) {
+                    withContext(Dispatchers.Main) {
+                        onConnectionState(false, "Bluetooth отключён", null)
+                    }
+                }
             } catch (e: Exception) {
-                withContext(Dispatchers.Main) {
-                    onConnectionState(false, "Отключено: ${e.message ?: "ошибка соединения"}", null)
+                closeQuietly()
+                if (!userDisconnected && trySeamlessRelayFailover()) return@launch
+                if (!userDisconnected) {
+                    withContext(Dispatchers.Main) {
+                        onConnectionState(false, "Отключено: ${e.message ?: "ошибка соединения"}", null)
+                    }
                 }
             } finally {
                 closeQuietly()
+            }
+        }
+    }
+
+    private suspend fun trySeamlessRelayFailover(): Boolean {
+        val gw = relayGateway.trim().trimEnd('/')
+        val did = relayDeviceId.trim()
+        val tok = relayToken.trim()
+        if (!gw.startsWith("https://") || !DEVICE_ID_RE.matches(did) || tok.isEmpty()) {
+            return false
+        }
+        relayActive = true
+        withContext(Dispatchers.Main) {
+            onConnectionState(true, "Интернет (авто): $did", null)
+        }
+        startRelayLoop(gw, did, tok, keepConnectedOnStart = true)
+        return true
+    }
+
+    private fun startRelayLoop(cleanUrl: String, cleanDid: String, cleanTok: String, keepConnectedOnStart: Boolean) {
+        relayJob?.cancel()
+        relayJob = scope.launch(Dispatchers.IO) {
+            try {
+                if (!keepConnectedOnStart) {
+                    withContext(Dispatchers.Main) {
+                        onConnectionState(false, "Интернет подключение к $cleanDid...", null)
+                    }
+                }
+                val first = relayHttpGet("$cleanUrl/relay/v1/app/$cleanDid/status", cleanTok)
+                val firstStatus = first.optJSONObject("status")
+                val online = first.optBoolean("online", false)
+                withContext(Dispatchers.Main) {
+                    val label = if (online) "Интернет (TLS): $cleanDid" else "Интернет (ожидание): $cleanDid"
+                    onConnectionState(true, label, null)
+                }
+                if (firstStatus != null && firstStatus.length() > 0) {
+                    handlePacket(firstStatus)
+                }
+                sendCommand(JSONObject().put("cmd", "get_timers"))
+                sendCommand(JSONObject().put("cmd", "get_alarms"))
+                sendCommand(JSONObject().put("cmd", "ymusic_status"))
+
+                while (isActive && relayActive) {
+                    delay(4000)
+                    try {
+                        val resp = relayHttpGet("$cleanUrl/relay/v1/app/$cleanDid/status", cleanTok)
+                        val st = resp.optJSONObject("status")
+                        if (st != null && st.length() > 0) {
+                            handlePacket(st)
+                        }
+                    } catch (_: Exception) {
+                        // Transient network hiccup; keep retrying
+                    }
+                }
+            } catch (e: Exception) {
+                relayActive = false
+                withContext(Dispatchers.Main) {
+                    onConnectionState(false, "Интернет релей: ${e.message ?: "ошибка"}", null)
+                }
             }
         }
     }
@@ -124,49 +202,12 @@ class BtControlClient(
             return
         }
         disconnect(silent = true)
+        userDisconnected = false
         relayGateway = cleanUrl
         relayDeviceId = cleanDid
         relayToken = cleanTok
         relayActive = true
-        relayJob = scope.launch(Dispatchers.IO) {
-            try {
-                withContext(Dispatchers.Main) {
-                    onConnectionState(false, "Wi-Fi подключение к $cleanDid...", null)
-                }
-                val first = relayHttpGet("$cleanUrl/relay/v1/app/$cleanDid/status", cleanTok)
-                val firstStatus = first.optJSONObject("status")
-                val online = first.optBoolean("online", false)
-                withContext(Dispatchers.Main) {
-                    val label = if (online) "Wi-Fi (TLS): $cleanDid" else "Wi-Fi (ожидание колонки): $cleanDid"
-                    onConnectionState(true, label, null)
-                }
-                if (firstStatus != null && firstStatus.length() > 0) {
-                    handlePacket(firstStatus)
-                }
-                // Sync timers/alarms/ymusic over encrypted relay
-                sendCommand(JSONObject().put("cmd", "get_timers"))
-                sendCommand(JSONObject().put("cmd", "get_alarms"))
-                sendCommand(JSONObject().put("cmd", "ymusic_status"))
-
-                while (isActive && relayActive) {
-                    delay(4000)
-                    try {
-                        val resp = relayHttpGet("$cleanUrl/relay/v1/app/$cleanDid/status", cleanTok)
-                        val st = resp.optJSONObject("status")
-                        if (st != null && st.length() > 0) {
-                            handlePacket(st)
-                        }
-                    } catch (_: Exception) {
-                        // Transient network hiccup; keep retrying
-                    }
-                }
-            } catch (e: Exception) {
-                relayActive = false
-                withContext(Dispatchers.Main) {
-                    onConnectionState(false, "Wi-Fi релей: ${e.message ?: "ошибка"}", null)
-                }
-            }
-        }
+        startRelayLoop(cleanUrl, cleanDid, cleanTok, keepConnectedOnStart = false)
     }
 
     private fun relayHttpGet(urlStr: String, token: String): JSONObject {
@@ -385,6 +426,7 @@ class BtControlClient(
     fun reboot() = sendCommand(JSONObject().put("cmd", "reboot"))
 
     fun disconnect(silent: Boolean = false) {
+        userDisconnected = true
         relayActive = false
         relayJob?.cancel()
         relayJob = null
@@ -537,9 +579,15 @@ class BtControlClient(
             }
             "relay_info" -> {
                 val did = json.optString("device_id", "").trim()
-                val gw = json.optString("gateway", "").trim()
-                if (did.isNotBlank()) {
-                    withContext(Dispatchers.Main) { onRelayInfo(did, gw) }
+                val gw = json.optString("gateway", "").trim().trimEnd('/')
+                val tok = json.optString("token", "").trim()
+                if (did.isNotEmpty()) {
+                    if (gw.startsWith("https://")) relayGateway = gw
+                    relayDeviceId = did
+                    if (tok.isNotEmpty()) relayToken = tok
+                    withContext(Dispatchers.Main) {
+                        onRelayInfo(did, gw, tok)
+                    }
                 }
             }
             "error" -> {
