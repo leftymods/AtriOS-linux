@@ -119,9 +119,9 @@ fun MyWaveAnimatedAura(
             extracted = null
         }
     }
-    val col1 by animateColorAsState(extracted?.c1 ?: col1, tween(900), label = "ac1")
-    val col2 by animateColorAsState(extracted?.c2 ?: col2, tween(900), label = "ac2")
-    val col3 by animateColorAsState(extracted?.c3 ?: col3, tween(900), label = "ac3")
+    val col1 by animateColorAsState(extracted?.c1 ?: palette.aura1, tween(900), label = "ac1")
+    val col2 by animateColorAsState(extracted?.c2 ?: palette.aura2, tween(900), label = "ac2")
+    val col3 by animateColorAsState(extracted?.c3 ?: palette.aura3, tween(900), label = "ac3")
     val bassSmooth by animateFloatAsState(if (isPlaying) audioBass else 0f, spring(dampingRatio = 0.7f, stiffness = 240f), label = "bs")
     val midSmooth by animateFloatAsState(if (isPlaying) audioMid else 0f, spring(dampingRatio = 0.7f, stiffness = 240f), label = "ms")
     val engSmooth by animateFloatAsState(if (isPlaying) audioEnergy else 0f, spring(dampingRatio = 0.7f, stiffness = 240f), label = "es")
