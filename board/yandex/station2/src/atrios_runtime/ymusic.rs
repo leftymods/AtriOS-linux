@@ -710,6 +710,12 @@ struct ActivePipeline {
 
 impl ActivePipeline {
     fn spawn(url: &str) -> Result<Self, String> {
+        // Ensure zero overlapping decoders from any previous track
+        let _ = Command::new("pkill")
+            .args(["-9", "-x", "atri-mp3dec"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
         if bin_exists("ffmpeg") {
             let mut dec = Command::new("ffmpeg")
                 .args([
@@ -863,6 +869,11 @@ impl ActivePipeline {
         if self.paused {
             self.set_paused(false);
         }
+        let _ = Command::new("pkill")
+            .args(["-9", "-x", "atri-mp3dec"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
         unsafe {
             kill(self.decoder.id() as i32, SIGKILL_NUM);
             if let Some(ref s) = self.sink {
@@ -1114,6 +1125,25 @@ impl PlayerState {
 }
 
 fn run_daemon() -> i32 {
+    let _ = fs::create_dir_all("/var/run/atrios");
+    let _lock_file = match fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open("/var/run/atrios/ymusic.lock")
+    {
+        Ok(f) => {
+            use std::os::unix::io::AsRawFd;
+            if unsafe { crate::sys::flock(f.as_raw_fd(), crate::sys::LOCK_EX | crate::sys::LOCK_NB) } != 0 {
+                eprintln!("[ymusic] daemon already running, exiting duplicate");
+                return 0;
+            }
+            f
+        }
+        Err(e) => {
+            eprintln!("[ymusic] lock open failed: {e}");
+            return 1;
+        }
+    };
     unsafe {
         signal(SIGTERM, on_stop as *const () as usize);
         signal(SIGINT, on_stop as *const () as usize);
