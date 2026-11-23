@@ -709,7 +709,7 @@ fun YandexWaveFullScreen(
                     flingBehavior = PagerDefaults.flingBehavior(
                         state = orbPagerState,
                         pagerSnapDistance = PagerSnapDistance.atMost(5),
-                        snapAnimationSpec = spring(dampingRatio = 0.92f, stiffness = 175f)
+                        snapAnimationSpec = spring<Float>(dampingRatio = 0.92f, stiffness = 175f)
                     ),
                     modifier = Modifier.fillMaxWidth().height(156.dp)
                 ) { page ->
@@ -757,14 +757,11 @@ fun YandexWaveFullScreen(
                             modifier = Modifier.fillMaxSize().padding(horizontal = 8.dp, vertical = 4.dp)
                         ) {
                             AsyncCoverArt(
-                                url = orb.coverUrl,
+                                url = if (orb.subtitle == "Артист") orb.coverUrl else "",
                                 shape = CircleShape,
                                 modifier = Modifier.size(64.dp),
-                                fallbackIcon = when (orb.mode) {
-                                    "likes" -> Icons.Rounded.Favorite
-                                    "chart" -> Icons.Rounded.Bolt
-                                    else -> Icons.Rounded.GraphicEq
-                                }
+                                fallbackIcon = orbFallbackIcon(orb),
+                                monochromeIcon = orb.subtitle != "Артист"
                             )
                             if (orb.subtitle.isNotBlank()) {
                                 Text(
