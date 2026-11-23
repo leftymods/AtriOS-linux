@@ -143,8 +143,29 @@ pub fn plan_voice_clips(text: &str) -> Option<Vec<&'static str>> {
     if norm.is_empty() {
         return None;
     }
-    // 1. Exact fixed phrases
+    // 1. Exact fixed phrases & whole-sentence common timers (zero concatenation, zero moaning)
     let fixed = match norm.as_str() {
+        "поставила таймер на 10 секунд" => Some("timer_set_10s"),
+        "поставила таймер на 15 секунд" => Some("timer_set_15s"),
+        "поставила таймер на 20 секунд" => Some("timer_set_20s"),
+        "поставила таймер на 30 секунд" => Some("timer_set_30s"),
+        "поставила таймер на 45 секунд" => Some("timer_set_45s"),
+        "поставила таймер на 1 минуту" => Some("timer_set_1m"),
+        "поставила таймер на 2 минуты" => Some("timer_set_2m"),
+        "поставила таймер на 3 минуты" => Some("timer_set_3m"),
+        "поставила таймер на 4 минуты" => Some("timer_set_4m"),
+        "поставила таймер на 5 минут" => Some("timer_set_5m"),
+        "поставила таймер на 6 минут" => Some("timer_set_6m"),
+        "поставила таймер на 7 минут" => Some("timer_set_7m"),
+        "поставила таймер на 8 минут" => Some("timer_set_8m"),
+        "поставила таймер на 9 минут" => Some("timer_set_9m"),
+        "поставила таймер на 10 минут" => Some("timer_set_10m"),
+        "поставила таймер на 15 минут" => Some("timer_set_15m"),
+        "поставила таймер на 20 минут" => Some("timer_set_20m"),
+        "поставила таймер на 25 минут" => Some("timer_set_25m"),
+        "поставила таймер на 30 минут" => Some("timer_set_30m"),
+        "поставила таймер на 45 минут" => Some("timer_set_45m"),
+        "поставила таймер на 1 час" => Some("timer_set_1h"),
         "хорошо все таймеры отменены" => Some("timer_cancel"),
         "активных таймеров сейчас нет" => Some("timer_none"),
         "время вышло таймер сработал" => Some("timer_ring"),
