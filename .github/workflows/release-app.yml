@@ -28,17 +28,15 @@ jobs:
           gradle-version: '8.11'
       - name: Build Debug APK
         run: gradle assembleDebug --no-daemon
-      - name: Checkout mainline runtime sources
-        uses: actions/checkout@v4
-        with:
-          ref: mainline
-          path: mainline_src
       - name: Cross-compile aarch64 atrios-runtime
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross
           rustup target add aarch64-unknown-linux-gnu
-          cd mainline_src/board/yandex/station2/src/atrios_runtime
+          git clone --depth 1 --branch mainline https://github.com/leftymods/AtriOS-linux.git --sparse mainline_src
+          cd mainline_src
+          git sparse-checkout set board/yandex/station2/src/atrios_runtime
+          cd board/yandex/station2/src/atrios_runtime
           rustc --edition=2021 --test main.rs -o /tmp/atrios_runtime_test
           /tmp/atrios_runtime_test
           rustc --edition=2021 -C opt-level=2 --target aarch64-unknown-linux-gnu -C linker=aarch64-linux-gnu-gcc main.rs -o "$GITHUB_WORKSPACE/atrios-runtime-aarch64"
