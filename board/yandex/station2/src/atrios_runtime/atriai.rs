@@ -1910,6 +1910,29 @@ fn play_volume_chime(cur: i32, nxt: i32) {
     play_pcm_48k(&pcm);
 }
 
+pub fn show_music_icon_async(kind: &'static str) {
+    thread::spawn(move || {
+        let _ = fs::create_dir_all("/var/run/atrios");
+        let _ = fs::write(SCREEN_MODE_FILE, "music_icon");
+        let _ = Command::new("pkill")
+            .args(["-f", "/usr/lib/atrios/light screen"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        let _ = Command::new("/usr/lib/atrios/light")
+            .args(["screen", "music", kind])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        if fs::read_to_string(SCREEN_MODE_FILE)
+            .map(|s| s.trim() == "music_icon")
+            .unwrap_or(false)
+        {
+            let _ = fs::write(SCREEN_MODE_FILE, "clock");
+        }
+    });
+}
+
 fn execute_device_command(cmd: DeviceCommand) {
     match cmd {
         DeviceCommand::NextTrack | DeviceCommand::PrevTrack | DeviceCommand::Pause | DeviceCommand::Play => {
@@ -1927,6 +1950,14 @@ fn execute_device_command(cmd: DeviceCommand) {
                     let _ = sock.send_to(sock_cmd.as_bytes(), BT_CMD_SOCK);
                 }
             }
+            let icon = match cmd {
+                DeviceCommand::NextTrack => "next",
+                DeviceCommand::PrevTrack => "prev",
+                DeviceCommand::Pause => "pause",
+                DeviceCommand::Play => "play",
+                _ => "play",
+            };
+            show_music_icon_async(icon);
             play_command_chime(ch);
         }
         DeviceCommand::VolumeUp(step) => {
