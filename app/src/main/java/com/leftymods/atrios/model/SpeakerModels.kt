@@ -110,9 +110,6 @@ data class OtaStatus(
                 downloadedBytes = obj.optLong("downloaded_bytes", 0L),
                 rollbackAvailable = obj.optBoolean("rollback_available", false),
                 lastCheckTs = obj.optLong("last_check_ts", 0L),
-                audioBass = obj.optDouble("audio_bass", 0.0).toFloat().coerceIn(0f, 1f),
-                audioMid = obj.optDouble("audio_mid", 0.0).toFloat().coerceIn(0f, 1f),
-                audioEnergy = obj.optDouble("audio_energy", 0.0).toFloat().coerceIn(0f, 1f),
                 updatedTs = obj.optLong("updated_ts", 0L),
                 rebootRequired = obj.optBoolean("reboot_required", false)
             )
@@ -398,6 +395,9 @@ data class YMusicStatus(
                 durationMs = obj.optLong("duration_ms", 0L),
                 liked = obj.optBoolean("liked", false),
                 error = if (obj.isNull("error")) null else obj.optString("error").ifBlank { null },
+                audioBass = obj.optDouble("audio_bass", 0.0).toFloat().coerceIn(0f, 1f),
+                audioMid = obj.optDouble("audio_mid", 0.0).toFloat().coerceIn(0f, 1f),
+                audioEnergy = obj.optDouble("audio_energy", 0.0).toFloat().coerceIn(0f, 1f),
                 updatedTs = obj.optLong("updated_ts", 0L)
             )
         }
