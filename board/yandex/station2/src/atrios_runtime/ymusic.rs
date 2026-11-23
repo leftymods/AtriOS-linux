@@ -650,6 +650,45 @@ fn fetch_search(auth: &YMusicAuth, query: &str) -> Result<Vec<TrackInfo>, String
     Ok(tracks)
 }
 
+fn fetch_single_track(auth: &YMusicAuth, track_id: &str) -> Result<Vec<TrackInfo>, String> {
+    let tid = track_id.trim();
+    if tid.is_empty() {
+        return Err("Empty track_id".into());
+    }
+    let body = format!("track-ids={}", url_encode(tid));
+    let detail = api_post_form_json(&auth.token, "/tracks", &body)?;
+    let arr = detail
+        .get("result")
+        .and_then(|v| v.as_arr())
+        .ok_or("Track not found")?;
+    let tracks: Vec<TrackInfo> = arr
+        .iter()
+        .filter_map(|t| parse_track_json(t, false))
+        .collect();
+    if tracks.is_empty() {
+        return Err("Track not playable".into());
+    }
+    Ok(tracks)
+}
+
+pub fn search_tracks_json(query: &str) -> Result<Vec<Json>, String> {
+    let auth = load_auth().ok_or("Not logged in to Yandex Music")?;
+    let tracks = fetch_search(&auth, query)?;
+    Ok(tracks
+        .into_iter()
+        .take(12)
+        .map(|t| {
+            obj(vec![
+                ("id", Json::Str(t.id)),
+                ("title", Json::Str(t.title)),
+                ("artist", Json::Str(t.artist)),
+                ("album", Json::Str(t.album)),
+                ("duration_ms", Json::Num(t.duration_ms as f64)),
+            ])
+        })
+        .collect())
+}
+
 fn resolve_track_stream_url(auth: &YMusicAuth, track_id: &str) -> Result<String, String> {
     let ep = format!("/tracks/{}/download-info", url_encode(track_id));
     let resp = api_get_json(&auth.token, &ep)?;
@@ -765,7 +804,7 @@ impl ActivePipeline {
                 .map_err(|e| format!("mpg123 spawn failed: {e}"))?;
             let dec_out = dec.stdout.take().ok_or("Missing mpg123 stdout")?;
             let sink = Command::new("aplay")
-                .args(["-q", "-t", "raw", "-f", "S16_LE", "-r", "44100", "-c", "2"])
+                .args(["-q", "-B", "150000", "-t", "raw", "-f", "S16_LE", "-r", "44100", "-c", "2"])
                 .stdin(Stdio::from(dec_out))
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
@@ -810,7 +849,7 @@ impl ActivePipeline {
             let dec_in = dec.stdin.take().ok_or("Missing atri-mp3dec stdin")?;
             let dec_out = dec.stdout.take().ok_or("Missing atri-mp3dec stdout")?;
             let sink = Command::new("aplay")
-                .args(["-q", "-t", "raw", "-f", "S16_LE", "-r", "44100", "-c", "2"])
+                .args(["-q", "-B", "150000", "-t", "raw", "-f", "S16_LE", "-r", "44100", "-c", "2"])
                 .stdin(Stdio::from(dec_out))
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
@@ -1004,6 +1043,7 @@ impl PlayerState {
             }
             "playlist" => fetch_user_playlist(&auth, query.unwrap_or("")),
             "search" => fetch_search(&auth, query.unwrap_or("")),
+            "track" => fetch_single_track(&auth, query.unwrap_or("")),
             _ => Err(format!("Unsupported mode: {mode}")),
         };
         match res {
@@ -1226,6 +1266,13 @@ pub fn trigger_play(mode: &str, query: Option<&str>) -> Result<YMusicStatus, Str
         "chart" => "play:chart".to_string(),
         "station" => format!("play:station:{}", query.unwrap_or("user:onyourwave").trim()),
         "playlist" => format!("play:playlist:{}", query.unwrap_or("").trim()),
+        "track" => {
+            let tid = query.unwrap_or("").trim();
+            if tid.is_empty() {
+                return Err("Missing track_id".into());
+            }
+            format!("play:track:{tid}")
+        }
         "search" => {
             let q = query.unwrap_or("").trim();
             if q.is_empty() {

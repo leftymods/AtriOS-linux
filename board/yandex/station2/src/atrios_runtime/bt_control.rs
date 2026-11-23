@@ -814,6 +814,31 @@ pub(crate) fn process_command(cmd_obj: &Json) -> Result<Json, String> {
                 ("ymusic", st.to_json()),
             ]))
         }
+        "ymusic_search" => {
+            let q = map.get("query").and_then(|v| v.as_str()).unwrap_or("").trim();
+            if q.is_empty() {
+                Ok(obj(vec![
+                    ("type", Json::Str("ymusic_search_response".into())),
+                    ("success", Json::Bool(true)),
+                    ("tracks", Json::Arr(Vec::new())),
+                ]))
+            } else {
+                match crate::ymusic::search_tracks_json(q) {
+                    Ok(tracks) => Ok(obj(vec![
+                        ("type", Json::Str("ymusic_search_response".into())),
+                        ("success", Json::Bool(true)),
+                        ("query", Json::Str(q.into())),
+                        ("tracks", Json::Arr(tracks)),
+                    ])),
+                    Err(e) => Ok(obj(vec![
+                        ("type", Json::Str("ymusic_search_response".into())),
+                        ("success", Json::Bool(false)),
+                        ("message", Json::Str(e)),
+                        ("tracks", Json::Arr(Vec::new())),
+                    ])),
+                }
+            }
+        }
         "ymusic_play" => {
             let mode = map.get("mode").and_then(|v| v.as_str()).unwrap_or("wave");
             let query = map.get("query").and_then(|v| v.as_str());
