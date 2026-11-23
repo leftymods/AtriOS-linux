@@ -530,6 +530,7 @@ pub(crate) fn process_command(cmd_obj: &Json) -> Result<Json, String> {
                 ("type", Json::Str("relay_info".into())),
                 ("device_id", Json::Str(device_relay_id())),
                 ("gateway", Json::Str(cfg.server)),
+                ("token", Json::Str(cfg.token.clone())),
                 ("has_token", Json::Bool(!cfg.token.is_empty())),
             ]))
         }
