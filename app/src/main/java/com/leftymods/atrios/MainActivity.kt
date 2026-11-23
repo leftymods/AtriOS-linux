@@ -193,7 +193,7 @@ fun AtriOSApp(
     var selectedTab by remember { mutableStateOf(AppTab.WAVE) }
     var settingsPage by remember { mutableStateOf(SettingsPage.ROOT) }
     var showBigPlayer by remember { mutableStateOf(false) }
-    var lastUserActionMs by remember { mutableLongStateOf(0L) }
+    val lastUserActionRef = remember { java.util.concurrent.atomic.AtomicLong(0L) }
     var showVolumeSheet by remember { mutableStateOf(false) }
     var showRebootDialog by remember { mutableStateOf(false) }
     var availableAppUpdate by remember { mutableStateOf<AppReleaseInfo?>(null) }
@@ -207,7 +207,7 @@ fun AtriOSApp(
         BtControlClient(
             scope = scope,
             onStatus = { s ->
-                val locked = System.currentTimeMillis() - lastUserActionMs < 1600L
+                val locked = System.currentTimeMillis() - lastUserActionRef.get() < 1600L
                 status = if (locked) s.copy(ymusic = status.ymusic) else s
                 sliderVol = s.volume.toFloat()
                 activeDevice?.let { dev ->
@@ -237,7 +237,7 @@ fun AtriOSApp(
             },
             onYMusicOrbsUpdate = { orbs -> ymOrbs = orbs },
             onYMusicUpdate = { ym ->
-                val locked = System.currentTimeMillis() - lastUserActionMs < 1600L
+                val locked = System.currentTimeMillis() - lastUserActionRef.get() < 1600L
                 if (!locked || (ym.title.isNotBlank() && ym.title != status.ymusic.title)) {
                     status = status.copy(ymusic = ym)
                 }
@@ -280,7 +280,8 @@ fun AtriOSApp(
     }
 
     fun dispatchYMusicControl(action: String) {
-        lastUserActionMs = System.currentTimeMillis()
+        val nowMs = System.currentTimeMillis()
+        lastUserActionRef.set(nowMs)
         val cur = status.ymusic
         when (action) {
             "pause" -> status = status.copy(ymusic = cur.copy(state = "paused"))
@@ -291,7 +292,7 @@ fun AtriOSApp(
                 if (cur.nextTitle.isNotBlank()) {
                     status = status.copy(
                         ymusic = cur.copy(
-                            trackId = "opt_next_${lastUserActionMs}",
+                            trackId = "opt_next_${nowMs}",
                             title = cur.nextTitle,
                             artist = cur.nextArtist,
                             coverUrl = cur.nextCoverUrl.ifBlank { cur.coverUrl },
@@ -306,7 +307,7 @@ fun AtriOSApp(
                 if (cur.prevTitle.isNotBlank()) {
                     status = status.copy(
                         ymusic = cur.copy(
-                            trackId = "opt_prev_${lastUserActionMs}",
+                            trackId = "opt_prev_${nowMs}",
                             title = cur.prevTitle,
                             artist = cur.prevArtist,
                             coverUrl = cur.prevCoverUrl.ifBlank { cur.coverUrl },
