@@ -13,7 +13,7 @@ use crate::sys::{atomic_write_bytes, format_local, kill, now_unix_i64};
 
 const TIMERS_FILE: &str = "/var/run/atrios/timers.json";
 const TIMER_DISPLAY_FILE: &str = "/var/run/atrios/timer_display.json";
-const TIMER_DISPLAY_DEFAULT_SECS: i64 = 15;
+const TIMER_DISPLAY_DEFAULT_SECS: i64 = 10;
 const ALARMS_FILE: &str = "/var/lib/atrios/alarms.json";
 
 static ALERT_RINGING: AtomicBool = AtomicBool::new(false);
@@ -538,7 +538,13 @@ pub fn parse_local_intent(text: &str, wake_word: &str) -> Option<LocalIntent> {
                 all: cancel_all,
             });
         }
+        let asks_all_timers = words.iter().any(|&w| {
+            matches!(w, "таймеры" | "таймеров" | "какие" | "все" | "список" | "активные" | "установленные")
+        });
         if (has_show || has_pin) && !has_set_verb {
+            if !has_pin && asks_all_timers && dur.is_none() && ordinal_idx.is_none() {
+                return Some(LocalIntent::QueryTimers);
+            }
             return Some(LocalIntent::ShowTimer {
                 target_secs: dur,
                 index: ordinal_idx,
@@ -739,7 +745,7 @@ pub fn execute_local_intent(intent: LocalIntent) {
             println!("[local-ai] timer set: id={new_id} {secs}s ({lbl}) [auto-hide 15s]");
             show_timer_popup_async("timer_set", Some(secs.to_string()));
             let spoken = format!("Поставила таймер на {}!", format_duration_ru(secs));
-            if !speak_via_remote_tts(&spoken, "happy", false) {
+            if !speak_via_remote_tts(&spoken, "happy", true) {
                 play_command_chime("timer_set");
             }
         }
@@ -791,9 +797,9 @@ pub fn execute_local_intent(intent: LocalIntent) {
             } else {
                 format!("До конца таймера осталось {}.", format_duration_ru(rem))
             };
-            if !speak_via_remote_tts(&spoken, "neutral", false) {
+            if !speak_via_remote_tts(&spoken, "neutral", true) {
                 let fallback = format!("До конца таймера осталось {}.", format_duration_ru(rem));
-                if !speak_via_remote_tts(&fallback, "neutral", false) {
+                if !speak_via_remote_tts(&fallback, "neutral", true) {
                     play_command_chime("tick");
                 }
             }
@@ -817,7 +823,7 @@ pub fn execute_local_intent(intent: LocalIntent) {
                 stop_ringing();
                 println!("[local-ai] all timers cancelled");
                 show_timer_popup_async("timer_off", None);
-                if !speak_via_remote_tts("Хорошо, все таймеры отменены.", "neutral", false) {
+                if !speak_via_remote_tts("Хорошо, все таймеры отменены.", "neutral", true) {
                     play_command_chime("cancel");
                 }
             } else {
@@ -871,7 +877,7 @@ pub fn execute_local_intent(intent: LocalIntent) {
                     println!("[local-ai] cancelled single timer id={} total={}s", t.id, t.total_secs);
                     show_timer_popup_async("timer_off", None);
                     let spoken = format!("Хорошо, таймер на {} отменён.", format_duration_ru(t.total_secs));
-                    if !speak_via_remote_tts(&spoken, "neutral", false) {
+                    if !speak_via_remote_tts(&spoken, "neutral", true) {
                         if !speak_via_remote_tts("Готово.", "neutral", false) {
                             play_command_chime("cancel");
                         }
@@ -906,7 +912,7 @@ pub fn execute_local_intent(intent: LocalIntent) {
             if active.len() == 1 {
                 let spoken = format!("До конца таймера осталось {}.", format_duration_ru(first_rem));
                 println!("[local-ai] query timers (1) -> {spoken}");
-                if !speak_via_remote_tts(&spoken, "neutral", false) {
+                if !speak_via_remote_tts(&spoken, "neutral", true) {
                     play_command_chime("tick");
                 }
             } else {
@@ -925,11 +931,11 @@ pub fn execute_local_intent(intent: LocalIntent) {
                 }
                 let spoken = parts.join(" ");
                 println!("[local-ai] query timers ({}) -> {spoken}", active.len());
-                if !speak_via_remote_tts(&spoken, "neutral", false) {
+                if !speak_via_remote_tts(&spoken, "neutral", true) {
                     for t in &active {
                         let r = (t.fire_at - now).max(1) as u64;
                         let s_one = format!("До конца таймера осталось {}.", format_duration_ru(r));
-                        let _ = speak_via_remote_tts(&s_one, "neutral", false);
+                        let _ = speak_via_remote_tts(&s_one, "neutral", true);
                     }
                 }
             }
@@ -952,7 +958,7 @@ pub fn execute_local_intent(intent: LocalIntent) {
             let lbl = format!("ALM {:02}:{:02}", hour, minute);
             println!("[local-ai] alarm set: {lbl}");
             let spoken = format!("Будильник на {} установлен!", format_time_ru(hour, minute));
-            if !speak_via_remote_tts(&spoken, "happy", false) {
+            if !speak_via_remote_tts(&spoken, "happy", true) {
                 play_command_chime("alarm_set");
                 show_ticker_briefly(&lbl);
             }
@@ -983,7 +989,7 @@ pub fn execute_local_intent(intent: LocalIntent) {
                 }
             };
             println!("[local-ai] query alarms -> {lbl}");
-            if !speak_via_remote_tts(&spoken, "neutral", false) {
+            if !speak_via_remote_tts(&spoken, "neutral", true) {
                 play_command_chime("tick");
                 show_ticker_briefly(&lbl);
             }
@@ -1000,7 +1006,7 @@ pub fn execute_local_intent(intent: LocalIntent) {
             } else {
                 format!("Сейчас {hm}.")
             };
-            if !speak_via_remote_tts(&spoken, "neutral", false) {
+            if !speak_via_remote_tts(&spoken, "neutral", true) {
                 play_command_chime("tick");
                 show_ticker_briefly(&hm);
             }

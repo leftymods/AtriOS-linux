@@ -1662,6 +1662,7 @@ fn stream_tts_and_play(
     text: &str,
     emotion: &str,
     keep_visual: bool,
+    timeout_secs: u64,
 ) -> Result<bool, String> {
     let auth = format!("Bearer {token}");
     let ident = crate::hardware::device_identity();
@@ -1696,7 +1697,7 @@ fn stream_tts_and_play(
         Some(payload.as_bytes()),
         &h,
         ca_opt,
-        30,
+        timeout_secs,
         16 * 1024 * 1024,
         Some(&cancel_cb),
         |chunk| {
@@ -1810,10 +1811,15 @@ pub fn speak_via_remote_tts(text: &str, emotion: &str, keep_visual: bool) -> boo
     let remote_ok = has_remote && now_unix >= REMOTE_DOWN_UNTIL.load(Ordering::Relaxed);
 
     if remote_ok {
-        if stream_tts_and_play(&base, &cfg.token, &cfg.ca_file, text, emotion, keep_visual).is_ok() {
-            return true;
-        }
-        let tok = cfg.token.clone();
+        match stream_tts_and_play(&base, &cfg.token, &cfg.ca_file, text, emotion, keep_visual, 3) {
+            Ok(_) => return true,
+            Err(e) if !e.contains("404") => {
+                REMOTE_DOWN_UNTIL.store(now_unix_i64() + 45, Ordering::Relaxed);
+                println!("[local-ai] GPU TTS unreachable ({e}); instant offline fallback 45s");
+            }
+            Err(_) => {
+                // Only fall back to legacy /tts WAV when server returned 404 (older server)
+                let tok = cfg.token.clone();
         let ca = cfg.ca_file.clone();
         let auth = format!("Bearer {tok}");
         let mut h = vec![("Content-Type", "application/json"), ("Accept", "audio/wav")];
@@ -1844,6 +1850,8 @@ pub fn speak_via_remote_tts(text: &str, emotion: &str, keep_visual: bool) -> boo
             Err(e) => {
                 REMOTE_DOWN_UNTIL.store(now_unix_i64() + 45, Ordering::Relaxed);
                 println!("[local-ai] GPU TTS unreachable ({e}); offline fallback 45s");
+            }
+        }
             }
         }
     }
@@ -2348,7 +2356,7 @@ fn send_phrase_to_server(
         println!("[chat] answer={answer:?} emotion={emotion}");
 
         write_status("speaking", &text, &answer, "");
-        let completed = match stream_tts_and_play(&base, &cfg.token, &cfg.ca_file, &answer, &emotion, false) {
+        let completed = match stream_tts_and_play(&base, &cfg.token, &cfg.ca_file, &answer, &emotion, false, 25) {
             Ok(done) => done,
             Err(stream_err) => {
                 println!("[tts-stream] fallback to /tts WAV ({stream_err})");
