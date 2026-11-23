@@ -10,6 +10,7 @@ import com.leftymods.atrios.model.OtaStatus
 import com.leftymods.atrios.model.SpeakerStatus
 import com.leftymods.atrios.model.TimerItem
 import com.leftymods.atrios.model.YMusicStatus
+import com.leftymods.atrios.model.YMusicAlbum
 import com.leftymods.atrios.model.YMusicTrack
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -36,7 +37,7 @@ class BtControlClient(
     private val onButtonsPush: (Boolean, Boolean) -> Unit = { _, _ -> },
     private val onOtaUpdate: (OtaStatus) -> Unit = {},
     private val onYMusicUpdate: (YMusicStatus) -> Unit = {},
-    private val onYMusicSearchResults: (List<YMusicTrack>) -> Unit = {},
+    private val onYMusicSearchResults: (List<YMusicTrack>, List<YMusicAlbum>) -> Unit = { _, _ -> },
     private val onTimersUpdate: (List<TimerItem>) -> Unit = {},
     private val onAlarmsUpdate: (List<AlarmItem>) -> Unit = {},
     private val onBtSpeakerPush: (Boolean) -> Unit = {},
@@ -489,8 +490,9 @@ class BtControlClient(
             }
             "ymusic_search_response" -> {
                 val tracks = YMusicTrack.fromJsonArray(json.optJSONArray("tracks"))
+                val albums = YMusicAlbum.fromJsonArray(json.optJSONArray("albums"))
                 withContext(Dispatchers.Main) {
-                    onYMusicSearchResults(tracks)
+                    onYMusicSearchResults(tracks, albums)
                 }
             }
             "ymusic_status", "ymusic_login_response", "ymusic_logout_response",

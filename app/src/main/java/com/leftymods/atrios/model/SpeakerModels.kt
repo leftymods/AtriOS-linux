@@ -237,17 +237,11 @@ data class AiStatus(
 data class YMusicTrack(
     val id: String,
     val title: String,
-    val artist: String,
+    val artist: String = "",
     val album: String = "",
+    val coverUrl: String = "",
     val durationMs: Long = 0L
 ) {
-    fun durationFormatted(): String {
-        val totalSec = (durationMs / 1000L).coerceAtLeast(0L)
-        val m = totalSec / 60L
-        val s = totalSec % 60L
-        return "%d:%02d".format(m, s)
-    }
-
     companion object {
         fun fromJsonArray(arr: JSONArray?): List<YMusicTrack> {
             if (arr == null) return emptyList()
@@ -263,7 +257,42 @@ data class YMusicTrack(
                                 title = title,
                                 artist = o.optString("artist", ""),
                                 album = o.optString("album", ""),
+                                coverUrl = o.optString("cover_url", ""),
                                 durationMs = o.optLong("duration_ms", 0L)
+                            )
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+data class YMusicAlbum(
+    val id: String,
+    val title: String,
+    val artist: String = "",
+    val year: Int = 0,
+    val trackCount: Int = 0,
+    val coverUrl: String = ""
+) {
+    companion object {
+        fun fromJsonArray(arr: JSONArray?): List<YMusicAlbum> {
+            if (arr == null) return emptyList()
+            return buildList {
+                for (i in 0 until arr.length()) {
+                    val o = arr.optJSONObject(i) ?: continue
+                    val id = o.optString("id", "").trim()
+                    val title = o.optString("title", "").trim()
+                    if (id.isNotEmpty() && title.isNotEmpty()) {
+                        add(
+                            YMusicAlbum(
+                                id = id,
+                                title = title,
+                                artist = o.optString("artist", ""),
+                                year = o.optInt("year", 0),
+                                trackCount = o.optInt("track_count", 0),
+                                coverUrl = o.optString("cover_url", "")
                             )
                         )
                     }
@@ -277,6 +306,7 @@ data class YMusicStatus(
     val loggedIn: Boolean = false,
     val login: String = "",
     val displayName: String = "",
+    val avatarUrl: String = "",
     val uid: Long = 0L,
     val state: String = "idle",
     val mode: String = "none",
@@ -284,6 +314,7 @@ data class YMusicStatus(
     val title: String = "",
     val artist: String = "",
     val album: String = "",
+    val coverUrl: String = "",
     val durationMs: Long = 0L,
     val liked: Boolean = false,
     val error: String? = null,
@@ -312,6 +343,7 @@ data class YMusicStatus(
                 loggedIn = obj.optBoolean("logged_in", false),
                 login = obj.optString("login", ""),
                 displayName = obj.optString("display_name", ""),
+            avatarUrl = obj.optString("avatar_url", ""),
                 uid = obj.optLong("uid", 0L),
                 state = obj.optString("state", "idle").ifBlank { "idle" },
                 mode = obj.optString("mode", "none").ifBlank { "none" },
@@ -319,6 +351,7 @@ data class YMusicStatus(
                 title = obj.optString("title", ""),
                 artist = obj.optString("artist", ""),
                 album = obj.optString("album", ""),
+            coverUrl = obj.optString("cover_url", ""),
                 durationMs = obj.optLong("duration_ms", 0L),
                 liked = obj.optBoolean("liked", false),
                 error = if (obj.isNull("error")) null else obj.optString("error").ifBlank { null },
