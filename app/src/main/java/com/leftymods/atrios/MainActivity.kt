@@ -9,12 +9,20 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.CircleShape
@@ -27,7 +35,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -50,6 +60,7 @@ import com.leftymods.atrios.model.YMusicTrack
 import com.leftymods.atrios.ui.AiAssistantCard
 import com.leftymods.atrios.ui.AsyncCoverArt
 import com.leftymods.atrios.ui.AudioCard
+import com.leftymods.atrios.ui.BigPlayerOverlay
 import com.leftymods.atrios.ui.BluetoothCard
 import com.leftymods.atrios.ui.DevicePickerSection
 import com.leftymods.atrios.ui.LedAndScreenCard
@@ -92,9 +103,8 @@ class MainActivity : ComponentActivity() {
 
 private enum class AppTab(val label: String, val icon: ImageVector) {
     WAVE("Волна", Icons.Rounded.AutoAwesome),
-    SPEAKER("Звук", Icons.Rounded.GraphicEq),
     TIMERS("Таймеры", Icons.Rounded.Timer),
-    SETTINGS("Меню", Icons.Rounded.Tune)
+    SETTINGS("Настройки", Icons.Rounded.Tune)
 }
 
 private enum class SettingsPage(val title: String, val subtitle: String, val icon: ImageVector) {
@@ -104,8 +114,8 @@ private enum class SettingsPage(val title: String, val subtitle: String, val ico
     BLUETOOTH("Bluetooth", "Режим BT-колонки и сопряжение", Icons.Rounded.Bluetooth),
     PALETTE("Оформление и палитра", "Цвет интерфейса и анимации волны", Icons.Rounded.Palette),
     TIME("Время и регион", "Синхронизация NTP и часовой пояс", Icons.Rounded.Schedule),
-    ABOUT("Об устройстве", "Прошивка, OTA и обновления приложения", Icons.Rounded.Info),
-    DEBUG("Debug-меню", "ИИ-сервер, Qwen3-TTS, анимации, RGB, телеметрия", Icons.Rounded.BugReport)
+    ABOUT("Об устройстве", "Кодовое имя, ревизия, прошивка и OTA", Icons.Rounded.Info),
+    DEBUG("Debug-меню", "ИИ-сервер, Qwen3-TTS, анимации, RGB, диагностика", Icons.Rounded.BugReport)
 }
 
 @Composable
@@ -155,7 +165,7 @@ fun AtriOSApp(
     var connected by remember { mutableStateOf(false) }
     var activeDevice by remember { mutableStateOf<BluetoothDevice?>(null) }
     var connText by remember { mutableStateOf("Подключение к колонке...") }
-    var autoConnectState by remember { mutableStateOf("trying") } // trying | failed | manual | connected
+    var autoConnectState by remember { mutableStateOf("trying") }
     var autoAttemptSeq by remember { mutableIntStateOf(0) }
 
     var status by remember { mutableStateOf(SpeakerStatus()) }
@@ -170,6 +180,8 @@ fun AtriOSApp(
 
     var selectedTab by remember { mutableStateOf(AppTab.WAVE) }
     var settingsPage by remember { mutableStateOf(SettingsPage.ROOT) }
+    var showBigPlayer by remember { mutableStateOf(false) }
+    var showVolumeSheet by remember { mutableStateOf(false) }
     var showRebootDialog by remember { mutableStateOf(false) }
     var availableAppUpdate by remember { mutableStateOf<AppReleaseInfo?>(null) }
     var appUpdateProgress by remember { mutableStateOf<Float?>(null) }
@@ -252,14 +264,23 @@ fun AtriOSApp(
         if (hasPerms && adapter != null) adapter.bondedDevices.toList() else emptyList()
     }
 
-    // Automatic connection to any available transport (BT first, then Wi-Fi Relay)
+    // System Back gesture navigates cleanly inside the app instead of closing it!
+    BackHandler(enabled = connected && (showBigPlayer || showVolumeSheet || settingsPage != SettingsPage.ROOT || selectedTab != AppTab.WAVE)) {
+        when {
+            showBigPlayer -> showBigPlayer = false
+            showVolumeSheet -> showVolumeSheet = false
+            selectedTab == AppTab.SETTINGS && settingsPage != SettingsPage.ROOT -> settingsPage = SettingsPage.ROOT
+            selectedTab != AppTab.WAVE -> selectedTab = AppTab.WAVE
+        }
+    }
+
+    // Auto-connect to any available transport (BT first, then Internet Relay)
     LaunchedEffect(autoAttemptSeq, hasPerms) {
         if (connected || autoConnectState == "manual") return@LaunchedEffect
         autoConnectState = "trying"
         val saved = storage.loadSpeakers()
         val relay = storage.loadRelayConfig()
 
-        // 1. Try saved Bluetooth speaker if BT is enabled & bonded
         val btTarget = if (hasPerms && adapter?.isEnabled == true) {
             val bonded = adapter.bondedDevices.orEmpty()
             saved.firstNotNullOfOrNull { s -> bonded.firstOrNull { it.address.equals(s.mac, ignoreCase = true) } }
@@ -269,28 +290,20 @@ fun AtriOSApp(
         if (btTarget != null) {
             client.connect(btTarget)
             val deadline = System.currentTimeMillis() + 5500L
-            while (!connected && System.currentTimeMillis() < deadline) {
-                delay(200)
-            }
+            while (!connected && System.currentTimeMillis() < deadline) delay(200)
             if (connected) return@LaunchedEffect
         }
 
-        // 2. Fallback to saved Wi-Fi / Internet Relay automatically
         if (relay.gatewayUrl.startsWith("https://") && relay.deviceId.isNotBlank() && relay.token.isNotBlank()) {
             client.connectRelay(relay.gatewayUrl, relay.deviceId, relay.token)
             val deadline = System.currentTimeMillis() + 6500L
-            while (!connected && System.currentTimeMillis() < deadline) {
-                delay(200)
-            }
+            while (!connected && System.currentTimeMillis() < deadline) delay(200)
             if (connected) return@LaunchedEffect
         }
 
-        if (!connected && autoConnectState != "manual") {
-            autoConnectState = "failed"
-        }
+        if (!connected && autoConnectState != "manual") autoConnectState = "failed"
     }
 
-    // Sync Yandex Music, Orbs, Timers & Alarms right after connecting
     LaunchedEffect(connected) {
         if (connected) {
             client.ymusicStatus()
@@ -300,7 +313,6 @@ fun AtriOSApp(
         }
     }
 
-    // Periodic Now-Playing sync while music is active
     LaunchedEffect(connected, status.ymusic.isActive) {
         while (connected && status.ymusic.isActive) {
             delay(4000)
@@ -312,7 +324,6 @@ fun AtriOSApp(
 
     Box(modifier = Modifier.fillMaxSize().background(OledBlack)) {
         if (!connected) {
-            // Disconnected / Auto-connecting / Error / Manual Connect Screen
             when (autoConnectState) {
                 "trying" -> {
                     Column(
@@ -382,7 +393,6 @@ fun AtriOSApp(
                     }
                 }
                 else -> {
-                    // Manual picker screen
                     LazyColumn(
                         modifier = Modifier.fillMaxSize().statusBarsPadding().padding(horizontal = 16.dp),
                         verticalArrangement = Arrangement.spacedBy(14.dp),
@@ -455,7 +465,6 @@ fun AtriOSApp(
                 }
             }
         } else {
-            // CONNECTED UI
             Scaffold(
                 containerColor = OledBlack,
                 contentWindowInsets = WindowInsets(0, 0, 0, 0),
@@ -470,24 +479,49 @@ fun AtriOSApp(
                     }
                 },
                 bottomBar = {
-                    Column(modifier = Modifier.fillMaxWidth().background(OledBlack)) {
-                        // Floating dark mini-player on non-Wave tabs
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(Color.Transparent)
+                            .padding(bottom = 12.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        // Swipeable dark mini-player (swipe left -> next, swipe right -> prev, tap -> Big Player!)
                         val ym = status.ymusic
                         if (selectedTab != AppTab.WAVE && (ym.isActive || ym.title.isNotBlank())) {
+                            var dragOffset by remember { mutableFloatStateOf(0f) }
+                            val animatedOffset by animateFloatAsState(targetValue = dragOffset, label = "miniDrag")
                             Surface(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(horizontal = 12.dp, vertical = 6.dp)
-                                    .clickable { selectedTab = AppTab.WAVE; client.ymusicStatus() },
-                                shape = RoundedCornerShape(16.dp),
-                                color = Color(0xFF1A1A1E)
+                                    .padding(horizontal = 16.dp, vertical = 6.dp)
+                                    .graphicsLayer { translationX = animatedOffset }
+                                    .pointerInput(ym.trackId) {
+                                        detectHorizontalDragGestures(
+                                            onDragEnd = {
+                                                if (dragOffset < -85f) {
+                                                    client.ymusicControl("next")
+                                                } else if (dragOffset > 85f) {
+                                                    client.ymusicControl("prev")
+                                                }
+                                                dragOffset = 0f
+                                            },
+                                            onDragCancel = { dragOffset = 0f },
+                                            onHorizontalDrag = { _, amt ->
+                                                dragOffset = (dragOffset + amt).coerceIn(-160f, 160f)
+                                            }
+                                        )
+                                    }
+                                    .clickable { showBigPlayer = true },
+                                shape = RoundedCornerShape(22.dp),
+                                color = Color(0xFF1A1A1F)
                             ) {
                                 Row(
                                     modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp),
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.spacedBy(10.dp)
                                 ) {
-                                    AsyncCoverArt(url = ym.coverUrl, shape = RoundedCornerShape(8.dp), modifier = Modifier.size(40.dp))
+                                    AsyncCoverArt(url = ym.coverUrl, shape = RoundedCornerShape(10.dp), modifier = Modifier.size(42.dp))
                                     Column(modifier = Modifier.weight(1f)) {
                                         Text(ym.title.ifBlank { "Моя волна" }, color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                         if (ym.artist.isNotBlank()) {
@@ -507,46 +541,57 @@ fun AtriOSApp(
                                     ) {
                                         Icon(if (ym.state == "playing") Icons.Rounded.Pause else Icons.Rounded.PlayArrow, contentDescription = null, tint = Color.White, modifier = Modifier.size(26.dp))
                                     }
-                                    IconButton(onClick = { client.ymusicControl("next") }, modifier = Modifier.size(32.dp)) {
-                                        Icon(Icons.Rounded.SkipNext, contentDescription = null, tint = Color.White, modifier = Modifier.size(22.dp))
-                                    }
                                 }
                             }
                         }
 
-                        // Minimalist 4-icon OLED Bottom Bar (matching Yandex Music screenshot!)
-                        Row(
+                        // Floating Rounded Capsule Bottom Navigation Bar!
+                        Surface(
+                            shape = RoundedCornerShape(99.dp),
+                            color = Color(0xEE16161B),
                             modifier = Modifier
-                                .fillMaxWidth()
-                                .background(OledBlack)
-                                .padding(horizontal = 12.dp, vertical = 10.dp),
-                            horizontalArrangement = Arrangement.SpaceEvenly,
-                            verticalAlignment = Alignment.CenterVertically
+                                .padding(horizontal = 24.dp, vertical = 4.dp)
+                                .border(1.dp, Color.White.copy(alpha = 0.08f), RoundedCornerShape(99.dp))
                         ) {
-                            AppTab.entries.forEach { tab ->
-                                val sel = selectedTab == tab
-                                Box(
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(14.dp))
-                                        .clickable {
-                                            selectedTab = tab
-                                            if (tab == AppTab.SETTINGS) settingsPage = SettingsPage.ROOT
-                                            when (tab) {
-                                                AppTab.WAVE -> { client.ymusicStatus(); if (ymOrbs.isEmpty()) client.ymusicOrbs() }
-                                                AppTab.TIMERS -> { client.getTimers(); client.getAlarms() }
-                                                AppTab.SETTINGS -> client.otaStatus()
-                                                else -> Unit
+                            Row(
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                AppTab.entries.forEach { tab ->
+                                    val sel = selectedTab == tab
+                                    Row(
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(99.dp))
+                                            .background(if (sel) palette.accent.copy(alpha = 0.16f) else Color.Transparent)
+                                            .clickable {
+                                                selectedTab = tab
+                                                if (tab == AppTab.SETTINGS) settingsPage = SettingsPage.ROOT
+                                                when (tab) {
+                                                    AppTab.WAVE -> { client.ymusicStatus(); if (ymOrbs.isEmpty()) client.ymusicOrbs() }
+                                                    AppTab.TIMERS -> { client.getTimers(); client.getAlarms() }
+                                                    AppTab.SETTINGS -> client.otaStatus()
+                                                }
                                             }
+                                            .padding(horizontal = 16.dp, vertical = 10.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        Icon(
+                                            tab.icon,
+                                            contentDescription = tab.label,
+                                            tint = if (sel) palette.accent else Color(0xFF7A7A86),
+                                            modifier = Modifier.size(22.dp)
+                                        )
+                                        if (sel) {
+                                            Text(
+                                                tab.label,
+                                                color = palette.accent,
+                                                fontSize = 13.sp,
+                                                fontWeight = FontWeight.Bold
+                                            )
                                         }
-                                        .padding(horizontal = 18.dp, vertical = 8.dp),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Icon(
-                                        tab.icon,
-                                        contentDescription = tab.label,
-                                        tint = if (sel) palette.accent else Color(0xFF6B6B75),
-                                        modifier = Modifier.size(27.dp)
-                                    )
+                                    }
                                 }
                             }
                         }
@@ -578,32 +623,10 @@ fun AtriOSApp(
                                 onOpenAccountSettings = {
                                     selectedTab = AppTab.SETTINGS
                                     settingsPage = SettingsPage.ACCOUNT
-                                }
+                                },
+                                onOpenBigPlayer = { showBigPlayer = true },
+                                onOpenVolumeSheet = { showVolumeSheet = true }
                             )
-                        }
-
-                        AppTab.SPEAKER -> {
-                            LazyColumn(
-                                modifier = Modifier.fillMaxSize().statusBarsPadding().padding(horizontal = 16.dp),
-                                verticalArrangement = Arrangement.spacedBy(14.dp),
-                                contentPadding = PaddingValues(vertical = 14.dp)
-                            ) {
-                                item {
-                                    Text("Звук и колонка", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 24.sp)
-                                    Text(connText, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
-                                }
-                                item {
-                                    AudioCard(
-                                        volume = sliderVol,
-                                        mute = status.mute,
-                                        speakersDesc = status.speakersDesc,
-                                        onVolumeChange = { sliderVol = it },
-                                        onVolumeCommit = { client.setVolume(it) },
-                                        onToggleMute = { client.setMute(!status.mute) },
-                                        onAudioTest = { client.audioTest() }
-                                    )
-                                }
-                            }
                         }
 
                         AppTab.TIMERS -> {
@@ -695,7 +718,6 @@ fun AtriOSApp(
                                         }
                                     }
                                 } else {
-                                    // Submenu header with Back button
                                     item {
                                         Row(
                                             verticalAlignment = Alignment.CenterVertically,
@@ -816,13 +838,16 @@ fun AtriOSApp(
                                         SettingsPage.ABOUT -> {
                                             item {
                                                 Surface(shape = RoundedCornerShape(22.dp), color = OledCard) {
-                                                    Column(Modifier.fillMaxWidth().padding(18.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                                        Text("Колонка", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
-                                                        Text("Модель: ${status.model}", color = Color.White)
-                                                        Text("Прошивка: v${status.fwVersion}", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                                        if (status.codename.isNotBlank()) Text("Кодовое имя: ${status.codename} ${status.rev}".trim(), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
-                                                        if (status.soc.isNotBlank()) Text("SoC: ${status.soc}", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
-                                                        if (relayConfig.deviceId.isNotBlank()) Text("Device ID: ${relayConfig.deviceId}", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
+                                                    Column(Modifier.fillMaxWidth().padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                                        Text("Информация об устройстве", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                                                        InfoRow("Модель", status.model)
+                                                        InfoRow("Кодовое имя", status.codename.ifBlank { "—" })
+                                                        InfoRow("Ревизия", status.rev.ifBlank { "—" })
+                                                        InfoRow("Платформа (SoC)", status.soc.ifBlank { "—" })
+                                                        InfoRow("Прошивка", "v${status.fwVersion}")
+                                                        if (relayConfig.deviceId.isNotBlank()) {
+                                                            InfoRow("Device ID", relayConfig.deviceId)
+                                                        }
                                                     }
                                                 }
                                             }
@@ -907,6 +932,50 @@ fun AtriOSApp(
                     }
                 }
             }
+
+            // Volume quick-sheet overlay accessible right from the main Wave screen!
+            if (showVolumeSheet) {
+                ModalBottomSheet(
+                    onDismissRequest = { showVolumeSheet = false },
+                    containerColor = Color(0xFF141418)
+                ) {
+                    Box(modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp).padding(bottom = 24.dp)) {
+                        AudioCard(
+                            volume = sliderVol,
+                            mute = status.mute,
+                            speakersDesc = status.speakersDesc,
+                            onVolumeChange = { sliderVol = it },
+                            onVolumeCommit = { client.setVolume(it) },
+                            onToggleMute = { client.setMute(!status.mute) },
+                            onAudioTest = { client.audioTest() }
+                        )
+                    }
+                }
+            }
+
+            // Full-screen Big Player overlay!
+            AnimatedVisibility(
+                visible = showBigPlayer,
+                enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
+                exit = slideOutVertically(targetOffsetY = { it }) + fadeOut()
+            ) {
+                BigPlayerOverlay(
+                    ymusic = status.ymusic,
+                    palette = palette,
+                    volume = sliderVol,
+                    mute = status.mute,
+                    onVolumeChange = { sliderVol = it },
+                    onVolumeCommit = { client.setVolume(it) },
+                    onControl = { action ->
+                        if (action == "pause" || action == "play") {
+                            status = status.copy(ymusic = status.ymusic.copy(state = if (action == "pause") "paused" else "playing"))
+                        }
+                        client.ymusicControl(action)
+                    },
+                    onPlayWave = { client.ymusicPlay("wave", null) },
+                    onDismiss = { showBigPlayer = false }
+                )
+            }
         }
 
         if (showRebootDialog) {
@@ -922,5 +991,17 @@ fun AtriOSApp(
                 }
             )
         }
+    }
+}
+
+@Composable
+private fun InfoRow(label: String, value: String) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(label, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 14.sp)
+        Text(value, color = Color.White, fontWeight = FontWeight.Medium, fontSize = 14.sp)
     }
 }

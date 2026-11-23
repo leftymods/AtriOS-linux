@@ -1,6 +1,7 @@
 package com.leftymods.atrios.ui
 
 import android.annotation.SuppressLint
+import androidx.activity.compose.BackHandler
 import android.content.Intent
 import android.graphics.Bitmap
 import android.net.Uri
@@ -69,84 +70,88 @@ fun MyWaveAnimatedAura(
     modifier: Modifier = Modifier
 ) {
     val inf = rememberInfiniteTransition(label = "waveAura")
-    val p1 by inf.animateFloat(
+    // Single master phase 0..2*PI with integer harmonics -> mathematically 100% seamless loop!
+    val t by inf.animateFloat(
         initialValue = 0f,
         targetValue = (2f * PI).toFloat(),
         animationSpec = infiniteRepeatable(
-            animation = tween(if (isPlaying) 4600 else 8600, easing = LinearEasing),
+            animation = tween(durationMillis = if (isPlaying) 9000 else 15000, easing = LinearEasing),
             repeatMode = RepeatMode.Restart
         ),
-        label = "p1"
-    )
-    val p2 by inf.animateFloat(
-        initialValue = 0f,
-        targetValue = (2f * PI).toFloat(),
-        animationSpec = infiniteRepeatable(
-            animation = tween(if (isPlaying) 6800 else 12000, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "p2"
-    )
-    val pulse by inf.animateFloat(
-        initialValue = 0.90f,
-        targetValue = 1.15f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(if (isPlaying) 1700 else 3400, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "pulse"
+        label = "masterPhase"
     )
 
     Canvas(modifier = modifier) {
         val cx = size.width * 0.5f
-        val cy = size.height * 0.42f
-        val r = size.minDimension * 0.68f * pulse
+        val cy = size.height * 0.43f
+        val breathe = 1f + 0.08f * sin(t * 2f)
+        val r = size.minDimension * 0.64f * breathe
 
-        // Outer wide fiery red-orange / tertiary nebula
-        val c1 = Offset(cx + cos(p2 * 0.7f) * size.width * 0.16f, cy + sin(p1 * 0.6f) * size.height * 0.08f)
+        // Layer 1: Wide soft ambient nebula (slow orbit, 1x harmonic)
+        val c1 = Offset(cx + cos(t) * size.width * 0.14f, cy + sin(t) * size.height * 0.08f)
         drawCircle(
             brush = Brush.radialGradient(
-                listOf(palette.aura2.copy(alpha = 0.88f), palette.aura3.copy(alpha = 0.42f), Color.Transparent),
+                colorStops = arrayOf(
+                    0.0f to palette.aura2.copy(alpha = 0.72f),
+                    0.45f to palette.aura3.copy(alpha = 0.36f),
+                    0.82f to palette.aura2.copy(alpha = 0.10f),
+                    1.0f to Color.Transparent
+                ),
                 center = c1,
-                radius = r * 1.35f
+                radius = r * 1.48f
             ),
-            radius = r * 1.35f,
+            radius = r * 1.48f,
             center = c1
         )
 
-        // Vivid magenta / right swirling lobe
-        val c2 = Offset(cx + cos(p1 + 0.5f) * size.width * 0.24f, cy + sin(p2 + 0.9f) * size.height * 0.13f)
+        // Layer 2: Organic figure-8 magenta lobe (1x / 2x Lissajous -> smooth & seamless)
+        val c2 = Offset(cx + sin(t) * size.width * 0.22f, cy + sin(t * 2f) * size.height * 0.11f)
         drawCircle(
             brush = Brush.radialGradient(
-                listOf(palette.aura3.copy(alpha = 0.95f), palette.aura3.copy(alpha = 0.45f), Color.Transparent),
+                colorStops = arrayOf(
+                    0.0f to palette.aura3.copy(alpha = 0.90f),
+                    0.42f to palette.aura3.copy(alpha = 0.48f),
+                    0.78f to palette.aura3.copy(alpha = 0.12f),
+                    1.0f to Color.Transparent
+                ),
                 center = c2,
-                radius = r * 1.02f
+                radius = r * 1.12f
             ),
-            radius = r * 1.02f,
+            radius = r * 1.12f,
             center = c2
         )
 
-        // Bright golden-yellow / primary plasma lobe
-        val c3 = Offset(cx - cos(p1 * 1.15f) * size.width * 0.20f, cy - sin(p2 * 0.85f) * size.height * 0.11f)
+        // Layer 3: Swirling golden-yellow solar plasma (counter-phase 1x / 2x)
+        val c3 = Offset(cx - cos(t) * size.width * 0.19f, cy - sin(t * 2f + 0.8f) * size.height * 0.10f)
         drawCircle(
             brush = Brush.radialGradient(
-                listOf(palette.aura1, palette.aura2.copy(alpha = 0.72f), Color.Transparent),
+                colorStops = arrayOf(
+                    0.0f to palette.aura1.copy(alpha = 0.96f),
+                    0.40f to palette.aura2.copy(alpha = 0.62f),
+                    0.76f to palette.aura1.copy(alpha = 0.14f),
+                    1.0f to Color.Transparent
+                ),
                 center = c3,
-                radius = r * 0.96f
+                radius = r * 1.05f
             ),
-            radius = r * 0.96f,
+            radius = r * 1.05f,
             center = c3
         )
 
-        // Hot luminous core highlight
-        val c4 = Offset(cx + sin(p2 * 1.3f) * size.width * 0.10f, cy - cos(p1 * 1.2f) * size.height * 0.09f)
+        // Layer 4: Luminous inner core (2x / 1x gentle shimmer)
+        val c4 = Offset(cx + cos(t * 2f) * size.width * 0.09f, cy - sin(t) * size.height * 0.08f)
         drawCircle(
             brush = Brush.radialGradient(
-                listOf(Color.White.copy(alpha = 0.35f), palette.aura1.copy(alpha = 0.78f), Color.Transparent),
+                colorStops = arrayOf(
+                    0.0f to Color.White.copy(alpha = 0.30f),
+                    0.35f to palette.aura1.copy(alpha = 0.68f),
+                    0.75f to palette.aura2.copy(alpha = 0.15f),
+                    1.0f to Color.Transparent
+                ),
                 center = c4,
-                radius = r * 0.56f
+                radius = r * 0.68f
             ),
-            radius = r * 0.56f,
+            radius = r * 0.68f,
             center = c4
         )
     }
@@ -164,7 +169,9 @@ fun YandexWaveFullScreen(
     onPlay: (String, String?) -> Unit,
     onSearch: (String) -> Unit,
     onControl: (String) -> Unit,
-    onOpenAccountSettings: () -> Unit
+    onOpenAccountSettings: () -> Unit,
+    onOpenBigPlayer: () -> Unit = {},
+    onOpenVolumeSheet: () -> Unit = {}
 ) {
     var searchOpen by remember { mutableStateOf(false) }
     var searchQuery by remember { mutableStateOf("") }
@@ -215,6 +222,7 @@ fun YandexWaveFullScreen(
         )
 
         if (searchOpen && ymusic.loggedIn) {
+            BackHandler { searchOpen = false; searchQuery = ""; onSearch("") }
             // Clean full-screen Search Overlay (Tracks + Albums with cover art)
             Column(
                 modifier = Modifier
@@ -420,10 +428,15 @@ fun YandexWaveFullScreen(
                         }
                     }
 
-                    IconButton(
-                        onClick = { if (ymusic.loggedIn) searchOpen = true else showOAuthDialog = true }
-                    ) {
-                        Icon(Icons.Rounded.Search, contentDescription = "Поиск", tint = Color.White, modifier = Modifier.size(26.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(onClick = onOpenVolumeSheet) {
+                            Icon(Icons.Rounded.VolumeUp, contentDescription = "Громкость колонки", tint = Color.White, modifier = Modifier.size(24.dp))
+                        }
+                        IconButton(
+                            onClick = { if (ymusic.loggedIn) searchOpen = true else showOAuthDialog = true }
+                        ) {
+                            Icon(Icons.Rounded.Search, contentDescription = "Поиск", tint = Color.White, modifier = Modifier.size(26.dp))
+                        }
                     }
                 }
 
@@ -510,7 +523,9 @@ fun YandexWaveFullScreen(
                         Surface(
                             shape = RoundedCornerShape(99.dp),
                             color = Color(0x991C1C22),
-                            modifier = Modifier.fillMaxWidth(0.92f)
+                            modifier = Modifier
+                                .fillMaxWidth(0.92f)
+                                .clickable { onOpenBigPlayer() }
                         ) {
                             Row(
                                 modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),

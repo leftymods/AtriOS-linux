@@ -63,6 +63,7 @@ class BtControlClient(
     @Volatile private var relayToken: String = ""
     @Volatile private var relayActive: Boolean = false
     @Volatile private var userDisconnected: Boolean = false
+    @Volatile private var lastYmTs: Long = 0L
 
     fun setSavedRelayConfig(gatewayUrl: String, deviceId: String, token: String) {
         if (gatewayUrl.startsWith("https://")) relayGateway = gatewayUrl.trim().trimEnd('/')
