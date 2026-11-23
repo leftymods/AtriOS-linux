@@ -447,4 +447,21 @@ mod tests {
             Some(LocalIntent::CancelTimers { target_secs: None, index: None, all: true })
         );
     }
+
+    #[test]
+    fn hardware_identity_deterministic_and_unique_across_macs() {
+        let a1 = hardware::compute_hardware_identity("AA:BB:CC:11:22:33", "11:22:33:44:55:66", "", "sn01");
+        let a2 = hardware::compute_hardware_identity("aa:bb:cc:11:22:33", "11:22:33:44:55:66", "", "SN01");
+        let b1 = hardware::compute_hardware_identity("AA:BB:CC:11:22:34", "11:22:33:44:55:66", "", "sn01");
+        assert_eq!(a1.device_id, a2.device_id);
+        assert_eq!(a1.device_key, a2.device_key);
+        assert_eq!(a1.hw_hash, a2.hw_hash);
+        assert!(a1.device_id.starts_with("atri-"));
+        assert_eq!(a1.device_key.len(), 64);
+        assert_ne!(a1.device_id, b1.device_id);
+        assert_ne!(a1.device_key, b1.device_key);
+        // Music icon renders lit pixels
+        let heart = light::render_music_icon_frame("like", 200);
+        assert!(heart.iter().filter(|&&v| v >= 180).count() > 30);
+    }
 }

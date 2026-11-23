@@ -259,6 +259,92 @@ fn screen_timer_popup(secs: u64, brightness: u8) {
     }
 }
 
+
+pub fn render_music_icon_frame(kind: &str, brightness: u8) -> Vec<u8> {
+    let mut buf = vec![0u8; SCR_SIZE];
+    let bmp: &[&str] = match kind {
+        "play" => &[
+            "#........",
+            "###......",
+            "#####....",
+            "#######..",
+            "#########",
+            "#######..",
+            "#####....",
+            "###......",
+            "#........",
+        ],
+        "pause" => &[
+            "###...###",
+            "###...###",
+            "###...###",
+            "###...###",
+            "###...###",
+            "###...###",
+            "###...###",
+            "###...###",
+            "###...###",
+        ],
+        "next" => &[
+            "#.....##.",
+            "###...##.",
+            "#####.##.",
+            "########.",
+            "########.",
+            "#####.##.",
+            "###...##.",
+            "#.....##.",
+        ],
+        "prev" => &[
+            ".##.....#",
+            ".##...###",
+            ".##.#####",
+            ".########",
+            ".########",
+            ".##.#####",
+            ".##...###",
+            ".##.....#",
+        ],
+        "like" => &[
+            ".###.###.",
+            "#########",
+            "#########",
+            "#########",
+            ".#######.",
+            "..#####..",
+            "...###...",
+            "....#....",
+        ],
+        _ => return buf,
+    };
+    let h = bmp.len() as isize;
+    let w = bmp[0].len() as isize;
+    let x0 = (SCR_W as isize - w) / 2;
+    let y0 = (SCR_H as isize - h) / 2;
+    for (r, row) in bmp.iter().enumerate() {
+        for (c, ch) in row.chars().enumerate() {
+            if ch == '#' {
+                screen_set_pixel(&mut buf, x0 + c as isize, y0 + r as isize, brightness);
+            }
+        }
+    }
+    buf
+}
+
+fn screen_music_icon(kind: &str, brightness: u8) {
+    let steps = if kind == "like" { 6 } else { 4 };
+    for i in 0..steps {
+        let b = if kind == "like" && i % 2 == 1 {
+            (brightness as u16 * 65 / 100) as u8
+        } else {
+            brightness
+        };
+        let buf = render_music_icon_frame(kind, b);
+        screen_send_frame_raw(&buf);
+        thread::sleep(Duration::from_millis(220));
+    }
+}
+
 fn screen_timer_off(brightness: u8) {
     let word = "OFF";
     for step in 0..=12 {
@@ -1876,6 +1962,7 @@ fn run_screen_action(act: &str, vals: &[&str], b: u8) -> i32 {
             screen_timer_popup(secs, b);
         }
         "timer_off" => screen_timer_off(b),
+        "music" => screen_music_icon(vals.first().copied().unwrap_or("play"), b),
         "pixel" => {
             if vals.len() >= 2 {
                 let x: isize = vals[0].parse().unwrap_or(0);

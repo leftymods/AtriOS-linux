@@ -1218,19 +1218,7 @@ fn handle_client(fd: c_int, mac: String) {
 
 
 fn device_relay_id() -> String {
-    if let Ok(mid) = fs::read_to_string("/etc/machine-id") {
-        let m = mid.trim();
-        if m.len() >= 12 {
-            return format!("atri-{}", &m[..12]);
-        }
-    }
-    if let Ok(mac) = fs::read_to_string("/sys/class/net/wlan0/address") {
-        let clean: String = mac.trim().chars().filter(|c| c.is_ascii_hexdigit()).collect();
-        if !clean.is_empty() {
-            return format!("atri-{clean}");
-        }
-    }
-    "atri-station".into()
+    crate::hardware::device_identity().device_id
 }
 
 fn spawn_wifi_relay_worker() {
@@ -1250,11 +1238,19 @@ fn spawn_wifi_relay_worker() {
                 thread::sleep(Duration::from_secs(10));
                 continue;
             }
+            let ident = crate::hardware::device_identity();
             let auth = format!("Bearer {token}");
-            let hdrs = [("Authorization", auth.as_str())];
-            let poll_url = format!("{base}/relay/v1/device/{did}/poll");
+            let hdrs = [
+                ("Authorization", auth.as_str()),
+                ("X-Atri-Device-Id", ident.device_id.as_str()),
+                ("X-Atri-Device-Key", ident.device_key.as_str()),
+                ("X-Atri-Hw-Hash", ident.hw_hash.as_str()),
+            ];
+            let poll_url = format!("{base}/relay/v1/device/{}/poll", ident.device_id);
             let payload = obj(vec![
-                ("device_id", Json::Str(did.clone())),
+                ("device_id", Json::Str(ident.device_id.clone())),
+                ("device_key", Json::Str(ident.device_key.clone())),
+                ("hw_hash", Json::Str(ident.hw_hash.clone())),
                 ("status", build_status_payload()),
             ]);
             match crate::https::request_json(&poll_url, Some(&payload), &hdrs, ca, 30, 512 * 1024, None) {
@@ -1268,7 +1264,7 @@ fn spawn_wifi_relay_worker() {
                                     ("error", Json::Str(e)),
                                 ]),
                             };
-                            let reply_url = format!("{base}/relay/v1/device/{did}/reply");
+                            let reply_url = format!("{base}/relay/v1/device/{}/reply", ident.device_id);
                             let reply_body = obj(vec![
                                 ("cmd_id", Json::Str(cmd_id.to_string())),
                                 ("reply", reply),

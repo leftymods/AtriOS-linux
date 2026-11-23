@@ -253,3 +253,117 @@ pub fn run(args: &[String]) -> i32 {
     println!("{}", manifest.to_json().to_string_pretty());
     0
 }
+
+
+pub const DEVICE_IDENTITY_FILE: &str = "/var/lib/atrios/device_identity.json";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeviceIdentity {
+    pub device_id: String,
+    pub device_key: String,
+    pub hw_hash: String,
+    pub wifi_mac: String,
+    pub bt_mac: String,
+    pub eth_mac: String,
+}
+
+fn norm_mac(raw: &str) -> String {
+    raw.trim()
+        .to_ascii_lowercase()
+        .chars()
+        .filter(|c| c.is_ascii_hexdigit() || *c == ':')
+        .collect()
+}
+
+fn read_first_bt_mac() -> String {
+    if let Ok(entries) = fs::read_dir("/sys/class/bluetooth") {
+        let mut names: Vec<String> = entries
+            .flatten()
+            .filter_map(|e| e.file_name().into_string().ok())
+            .collect();
+        names.sort();
+        for name in names {
+            let p = format!("/sys/class/bluetooth/{name}/address");
+            if let Ok(s) = fs::read_to_string(&p) {
+                let m = norm_mac(&s);
+                if m.len() >= 12 && m != "00:00:00:00:00:00" {
+                    return m;
+                }
+            }
+        }
+    }
+    String::new()
+}
+
+pub fn compute_hardware_identity(wifi_mac: &str, bt_mac: &str, eth_mac: &str, serial: &str) -> DeviceIdentity {
+    use crate::sys::{hex_lower, Sha256};
+    let w = norm_mac(wifi_mac);
+    let b = norm_mac(bt_mac);
+    let e = norm_mac(eth_mac);
+    let s = serial.trim().to_ascii_lowercase();
+
+    let mut h1 = Sha256::new();
+    h1.update(format!("atrios-hw-v1|{w}|{b}|{e}|{s}").as_bytes());
+    let hw_full = hex_lower(&h1.finalize());
+
+    let mut h2 = Sha256::new();
+    h2.update(format!("atrios-key-v1|{hw_full}").as_bytes());
+    let device_key = hex_lower(&h2.finalize());
+
+    DeviceIdentity {
+        device_id: format!("atri-{}", &hw_full[..12]),
+        device_key,
+        hw_hash: hw_full[..32].to_string(),
+        wifi_mac: w,
+        bt_mac: b,
+        eth_mac: e,
+    }
+}
+
+pub fn live_hardware_identity() -> DeviceIdentity {
+    let wifi = fs::read_to_string("/sys/class/net/wlan0/address").unwrap_or_default();
+    let eth = fs::read_to_string("/sys/class/net/eth0/address").unwrap_or_default();
+    let bt = read_first_bt_mac();
+    let serial = fs::read_to_string("/proc/device-tree/serial-number")
+        .or_else(|_| fs::read_to_string("/etc/machine-id"))
+        .unwrap_or_default();
+    compute_hardware_identity(&wifi, &bt, &eth, &serial)
+}
+
+/// Returns the permanent device identity persisted on disk (0600), while always
+/// attaching the live recomputed hw_hash so the gateway can detect cloned SD/eMMC images.
+pub fn device_identity() -> DeviceIdentity {
+    let live = live_hardware_identity();
+    if let Ok(raw) = fs::read_to_string(DEVICE_IDENTITY_FILE) {
+        if let Ok(j) = Json::parse(&raw) {
+            let did = j.get_str("device_id").unwrap_or("").trim().to_string();
+            let key = j.get_str("device_key").unwrap_or("").trim().to_string();
+            if did.starts_with("atri-") && key.len() == 64 {
+                return DeviceIdentity {
+                    device_id: did,
+                    device_key: key,
+                    hw_hash: live.hw_hash,
+                    wifi_mac: live.wifi_mac,
+                    bt_mac: live.bt_mac,
+                    eth_mac: live.eth_mac,
+                };
+            }
+        }
+    }
+    let obj_j = crate::json::obj(vec![
+        ("device_id", Json::Str(live.device_id.clone())),
+        ("device_key", Json::Str(live.device_key.clone())),
+        ("hw_hash", Json::Str(live.hw_hash.clone())),
+        ("wifi_mac", Json::Str(live.wifi_mac.clone())),
+        ("bt_mac", Json::Str(live.bt_mac.clone())),
+        ("eth_mac", Json::Str(live.eth_mac.clone())),
+    ]);
+    let _ = fs::create_dir_all("/var/lib/atrios");
+    let _ = crate::sys::atomic_write_bytes(
+        Path::new(DEVICE_IDENTITY_FILE),
+        obj_j.to_string_compact().as_bytes(),
+        0o600,
+        false,
+    );
+    live
+}

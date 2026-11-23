@@ -1664,7 +1664,14 @@ fn stream_tts_and_play(
     keep_visual: bool,
 ) -> Result<bool, String> {
     let auth = format!("Bearer {token}");
-    let mut h = vec![("Content-Type", "application/json"), ("Accept", "audio/pcm")];
+    let ident = crate::hardware::device_identity();
+    let mut h = vec![
+        ("Content-Type", "application/json"),
+        ("Accept", "audio/pcm"),
+        ("X-Atri-Device-Id", ident.device_id.as_str()),
+        ("X-Atri-Device-Key", ident.device_key.as_str()),
+        ("X-Atri-Hw-Hash", ident.hw_hash.as_str()),
+    ];
     if !token.is_empty() {
         h.push(("Authorization", auth.as_str()));
     }
