@@ -10,6 +10,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import java.io.File
+import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
@@ -19,7 +20,8 @@ data class AppReleaseInfo(
     val tagName: String,
     val notes: String,
     val apkUrl: String,
-    val apkName: String
+    val apkName: String,
+    val apkSize: Long = 0L
 )
 
 object AppUpdater {
@@ -32,6 +34,30 @@ object AppUpdater {
             "1.0"
         }
     }
+
+    private fun isValidApkFile(file: File, expectedSize: Long): Boolean {
+        if (!file.exists() || !file.isFile) return false
+        val len = file.length()
+        if (len < 100_000L) return false
+        if (expectedSize > 0L && len != expectedSize) return false
+        return try {
+            val hdr = ByteArray(4)
+            FileInputStream(file).use { it.read(hdr) } == 4 &&
+                hdr[0] == 0x50.toByte() && hdr[1] == 0x4B.toByte() &&
+                hdr[2] == 0x03.toByte() && hdr[3] == 0x04.toByte()
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    fun cachedApkFile(context: Context, release: AppReleaseInfo): File {
+        val dir = File(context.cacheDir, "updates").apply { mkdirs() }
+        val safeVer = release.version.replace(Regex("[^0-9A-Za-z._-]"), "_")
+        return File(dir, "AtriOS-Control-v$safeVer.apk")
+    }
+
+    fun hasCachedUpdate(context: Context, release: AppReleaseInfo): Boolean =
+        isValidApkFile(cachedApkFile(context, release), release.apkSize)
 
     suspend fun checkForUpdate(context: Context): AppReleaseInfo? = withContext(Dispatchers.IO) {
         try {
@@ -61,12 +87,14 @@ object AppUpdater {
                 val assets = rel.optJSONArray("assets") ?: continue
                 var apkUrl = ""
                 var apkName = ""
+                var apkSize = 0L
                 for (j in 0 until assets.length()) {
                     val a = assets.getJSONObject(j)
                     val name = a.optString("name", "")
                     if (name.endsWith(".apk")) {
                         apkUrl = a.optString("browser_download_url", "")
                         apkName = name
+                        apkSize = a.optLong("size", 0L)
                         break
                     }
                 }
@@ -78,7 +106,8 @@ object AppUpdater {
                         tagName = tag,
                         notes = rel.optString("body", ""),
                         apkUrl = apkUrl,
-                        apkName = apkName
+                        apkName = apkName,
+                        apkSize = apkSize
                     )
                 }
             }
@@ -94,10 +123,26 @@ object AppUpdater {
         onProgress: (Float) -> Unit
     ): Result<Unit> = withContext(Dispatchers.IO) {
         runCatching {
-            val dir = File(context.cacheDir, "updates").apply { mkdirs() }
-            val outFile = File(dir, "AtriOS-Control-update.apk")
-            if (outFile.exists()) outFile.delete()
+            val outFile = cachedApkFile(context, release)
+            val dir = outFile.parentFile!!
 
+            // Reuse already-downloaded APK from cache without re-downloading!
+            if (isValidApkFile(outFile, release.apkSize)) {
+                withContext(Dispatchers.Main) {
+                    onProgress(1f)
+                    installApk(context, outFile)
+                }
+                return@runCatching
+            }
+
+            // Clean old cached versions before downloading new one
+            dir.listFiles()?.forEach { f ->
+                if (f.name != outFile.name && f.name.endsWith(".apk") || f.name.endsWith(".part")) {
+                    f.delete()
+                }
+            }
+
+            val partFile = File(dir, "${outFile.name}.part")
             val conn = (URL(release.apkUrl).openConnection() as HttpURLConnection).apply {
                 instanceFollowRedirects = true
                 connectTimeout = 15000
@@ -107,10 +152,10 @@ object AppUpdater {
             if (conn.responseCode !in 200..299) {
                 error("HTTP ${conn.responseCode}")
             }
-            val total = conn.contentLengthLong.coerceAtLeast(1L)
+            val total = conn.contentLengthLong.coerceAtLeast(release.apkSize).coerceAtLeast(1L)
             var downloaded = 0L
             conn.inputStream.use { input ->
-                FileOutputStream(outFile).use { output ->
+                FileOutputStream(partFile).use { output ->
                     val buf = ByteArray(16 * 1024)
                     while (true) {
                         val read = input.read(buf)
@@ -123,6 +168,16 @@ object AppUpdater {
                 }
             }
             conn.disconnect()
+
+            if (!isValidApkFile(partFile, release.apkSize)) {
+                partFile.delete()
+                error("Повреждённый APK-файл, попробуйте снова")
+            }
+            if (outFile.exists()) outFile.delete()
+            if (!partFile.renameTo(outFile)) {
+                partFile.copyTo(outFile, overwrite = true)
+                partFile.delete()
+            }
 
             withContext(Dispatchers.Main) {
                 installApk(context, outFile)
