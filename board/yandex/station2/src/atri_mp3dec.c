@@ -3,8 +3,10 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
+#include <unistd.h>
 
 #define INBUF_SZ (64 * 1024)
+#define DUCK_FLAG_FILE "/var/run/atrios/ymusic_duck"
 
 int main(void) {
     static uint8_t buf[INBUF_SZ];
@@ -14,6 +16,10 @@ int main(void) {
 
     size_t filled = 0;
     int eof = 0;
+    float cur_gain = 1.0f;
+    unsigned int frame_cnt = 0;
+    int ducked = 0;
+
     while (!eof || filled > 0) {
         if (!eof && filled < INBUF_SZ / 2) {
             size_t n = fread(buf + filled, 1, INBUF_SZ - filled, stdin);
@@ -33,7 +39,6 @@ int main(void) {
         } else if (eof) {
             break;
         } else {
-            // Need more data or skip 1 garbage byte if buffer is full
             if (filled >= INBUF_SZ) {
                 memmove(buf, buf + 1, filled - 1);
                 filled--;
@@ -41,6 +46,23 @@ int main(void) {
             continue;
         }
         if (samples > 0) {
+            // Check ducking flag every 2 MP3 frames (~50ms) and smoothly ramp gain to 0.35 / 1.0
+            if ((frame_cnt++ & 1u) == 0u) {
+                ducked = (access(DUCK_FLAG_FILE, F_OK) == 0) ? 1 : 0;
+            }
+            float target = ducked ? 0.35f : 1.0f;
+            int total = samples * (info.channels == 1 ? 1 : info.channels);
+            if (cur_gain != target || cur_gain < 0.999f) {
+                float step = (target - cur_gain) / (float)(total > 0 ? total : 1);
+                for (int i = 0; i < total; i++) {
+                    cur_gain += step;
+                    int32_t v = (int32_t)((float)pcm[i] * cur_gain);
+                    if (v > 32767) v = 32767;
+                    else if (v < -32768) v = -32768;
+                    pcm[i] = (int16_t)v;
+                }
+                cur_gain = target;
+            }
             if (info.channels == 1) {
                 static int16_t stereo[MINIMP3_MAX_SAMPLES_PER_FRAME * 2];
                 for (int i = 0; i < samples; i++) {

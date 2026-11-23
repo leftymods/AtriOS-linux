@@ -1803,7 +1803,24 @@ fn play_spoken_wav(audio: &[u8], text: &str, emotion: &str, keep_visual: bool, b
     }
 }
 
+const YMUSIC_DUCK_FILE: &str = "/var/run/atrios/ymusic_duck";
+
+struct MusicDuckGuard;
+impl MusicDuckGuard {
+    fn acquire() -> Self {
+        let _ = fs::create_dir_all("/var/run/atrios");
+        let _ = fs::write(YMUSIC_DUCK_FILE, b"1");
+        Self
+    }
+}
+impl Drop for MusicDuckGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(YMUSIC_DUCK_FILE);
+    }
+}
+
 pub fn speak_via_remote_tts(text: &str, emotion: &str, keep_visual: bool) -> bool {
+    let _duck = MusicDuckGuard::acquire();
     let cfg = load_config();
     let base = cfg.server.trim_end_matches('/').to_string();
     let has_remote = require_https(&cfg.server).is_ok();

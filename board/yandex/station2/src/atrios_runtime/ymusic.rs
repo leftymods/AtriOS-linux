@@ -1023,6 +1023,7 @@ struct ActivePipeline {
     decoder: Child,
     sink: Option<Child>,
     paused: bool,
+    started_at: std::time::Instant,
 }
 
 impl ActivePipeline {
@@ -1071,7 +1072,7 @@ impl ActivePipeline {
                     let _ = dec.wait();
                     format!("aplay spawn failed: {e}")
                 })?;
-            return Ok(Self { decoder: dec, sink: Some(sink), paused: false });
+            return Ok(Self { decoder: dec, sink: Some(sink), paused: false, started_at: std::time::Instant::now() });
         }
         if bin_exists("mpg123") {
             let mut dec = Command::new("mpg123")
@@ -1092,7 +1093,7 @@ impl ActivePipeline {
                     let _ = dec.wait();
                     format!("aplay spawn failed: {e}")
                 })?;
-            return Ok(Self { decoder: dec, sink: Some(sink), paused: false });
+            return Ok(Self { decoder: dec, sink: Some(sink), paused: false, started_at: std::time::Instant::now() });
         }
         if bin_exists("gst-launch-1.0") {
             let dec = Command::new("gst-launch-1.0")
@@ -1101,7 +1102,7 @@ impl ActivePipeline {
                 .stderr(Stdio::null())
                 .spawn()
                 .map_err(|e| format!("gst-launch-1.0 spawn failed: {e}"))?;
-            return Ok(Self { decoder: dec, sink: None, paused: false });
+            return Ok(Self { decoder: dec, sink: None, paused: false, started_at: std::time::Instant::now() });
         }
         if bin_exists("madplay") && bin_exists("curl") {
             let dec = Command::new("sh")
@@ -1115,7 +1116,7 @@ impl ActivePipeline {
                 .stderr(Stdio::null())
                 .spawn()
                 .map_err(|e| format!("madplay pipeline failed: {e}"))?;
-            return Ok(Self { decoder: dec, sink: None, paused: false });
+            return Ok(Self { decoder: dec, sink: None, paused: false, started_at: std::time::Instant::now() });
         }
         if bin_exists("atri-mp3dec") {
             let mut dec = Command::new("atri-mp3dec")
@@ -1155,6 +1156,7 @@ impl ActivePipeline {
                 decoder: dec,
                 sink: Some(sink),
                 paused: false,
+                started_at: std::time::Instant::now(),
             });
         }
         Err("No audio stream decoder found (install ffmpeg, mpg123, madplay, or atri-mp3dec)".into())
@@ -1175,11 +1177,16 @@ impl ActivePipeline {
         if self.paused {
             return false;
         }
-        if let Some(ref mut s) = self.sink {
+        let exited = if let Some(ref mut s) = self.sink {
             matches!(s.try_wait(), Ok(Some(_)))
         } else {
             matches!(self.decoder.try_wait(), Ok(Some(_)))
+        };
+        if !exited {
+            return false;
         }
+        // Guard against rapid-skip loops if a stream exits prematurely (< 2.5s)
+        self.started_at.elapsed() >= Duration::from_millis(2500)
     }
 
     fn stop(mut self) {

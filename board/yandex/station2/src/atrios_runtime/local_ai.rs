@@ -1157,7 +1157,10 @@ pub fn start_scheduler() {
         return;
     }
     let _ = store();
-    thread::spawn(|| loop {
+    thread::spawn(|| {
+        let mut last_t_mtime = fs::metadata(TIMERS_FILE).and_then(|m| m.modified()).ok();
+        let mut last_a_mtime = fs::metadata(ALARMS_FILE).and_then(|m| m.modified()).ok();
+        loop {
         thread::sleep(Duration::from_millis(500));
         if ALERT_RINGING.load(Ordering::SeqCst) {
             continue;
@@ -1166,6 +1169,16 @@ pub fn start_scheduler() {
         let mut fired_kind: Option<&'static str> = None;
         {
             let mut s = store().lock().unwrap();
+            let cur_t_mtime = fs::metadata(TIMERS_FILE).and_then(|m| m.modified()).ok();
+            if cur_t_mtime != last_t_mtime {
+                last_t_mtime = cur_t_mtime;
+                s.timers = load_timers_disk();
+            }
+            let cur_a_mtime = fs::metadata(ALARMS_FILE).and_then(|m| m.modified()).ok();
+            if cur_a_mtime != last_a_mtime {
+                last_a_mtime = cur_a_mtime;
+                s.alarms = load_alarms_disk();
+            }
             let before = s.timers.len();
             s.timers.retain(|t| t.fire_at > now);
             if s.timers.len() != before {
@@ -1196,5 +1209,6 @@ pub fn start_scheduler() {
         if let Some(kind) = fired_kind {
             ring_alert_loop(kind);
         }
+    }
     });
 }

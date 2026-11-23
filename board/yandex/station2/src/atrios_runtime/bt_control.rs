@@ -1040,6 +1040,12 @@ pub(crate) fn process_command(cmd_obj: &Json) -> Result<Json, String> {
                 ("remaining_secs", Json::Num(raw_secs as f64)),
             ]));
             save_timers_at(Path::new(TIMERS_FILE), &timers);
+            let disp = obj(vec![
+                ("timer_id", Json::Num(next_id as f64)),
+                ("until", Json::Num((now + 5) as f64)),
+                ("pinned", Json::Bool(false)),
+            ]);
+            let _ = fs::write("/var/run/atrios/timer_display.json", disp.to_string_compact());
             Ok(obj(vec![
                 ("type", Json::Str("timers_response".into())),
                 ("success", Json::Bool(true)),
@@ -1056,6 +1062,9 @@ pub(crate) fn process_command(cmd_obj: &Json) -> Result<Json, String> {
                 timers.clear();
             }
             save_timers_at(Path::new(TIMERS_FILE), &timers);
+            if timers.is_empty() {
+                let _ = fs::remove_file("/var/run/atrios/timer_display.json");
+            }
             Ok(obj(vec![
                 ("type", Json::Str("timers_response".into())),
                 ("success", Json::Bool(true)),
@@ -1313,6 +1322,12 @@ fn spawn_wifi_relay_worker() {
             if last_full_status.elapsed() >= Duration::from_secs(10) {
                 cached_status = build_status_payload();
                 last_full_status = std::time::Instant::now();
+            } else if let Json::Obj(ref mut pairs) = cached_status {
+                // Always inject live ymusic status (~0.05ms file read) so track NEVER flickers back to old!
+                let live_ym = crate::ymusic::read_status_json();
+                if let Some(entry) = pairs.iter_mut().find(|(k, _)| k.as_str() == "ymusic") {
+                    *entry.1 = live_ym;
+                }
             }
             let ident = crate::hardware::device_identity();
             let auth = format!("Bearer {token}");
