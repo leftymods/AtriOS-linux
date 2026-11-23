@@ -708,8 +708,7 @@ fun YandexWaveFullScreen(
                     contentPadding = PaddingValues(horizontal = 112.dp),
                     flingBehavior = PagerDefaults.flingBehavior(
                         state = orbPagerState,
-                        pagerSnapDistance = PagerSnapDistance.atMost(5),
-                        snapAnimationSpec = spring<Float>(dampingRatio = 0.92f, stiffness = 175f)
+                        pagerSnapDistance = PagerSnapDistance.atMost(5)
                     ),
                     modifier = Modifier.fillMaxWidth().height(156.dp)
                 ) { page ->

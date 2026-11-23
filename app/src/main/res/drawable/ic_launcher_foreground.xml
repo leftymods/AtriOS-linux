@@ -9,7 +9,7 @@
         android:fillColor="#00000000"
         android:strokeColor="#FFFFEE00"
         android:strokeWidth="3.5"
-        android:pathData="M54,28 A26,26 0 1,1 53.99,28 Z"/>
+        android:pathData="M54,54m-26,0a26,26 0,1 1,52 0a26,26 0,1 1,-52 0"/>
     <!-- Inner glowing soundwave bars forming stylized 'A' -->
     <path android:fillColor="#FFFFEE00" android:pathData="M39,50 L43,50 L43,60 L39,60 Z"/>
     <path android:fillColor="#FFFF8C00" android:pathData="M46,42 L50,42 L50,66 L46,66 Z"/>
