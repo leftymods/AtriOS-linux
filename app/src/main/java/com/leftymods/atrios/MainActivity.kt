@@ -194,11 +194,7 @@ fun AtriOSApp() {
                 connected = ok
                 connText = msg
                 activeDevice = dev
-                if (ok) {
-                    client.ymusicStatus()
-                    client.getTimers()
-                    client.getAlarms()
-                } else {
+                if (!ok) {
                     timers = emptyList()
                     alarms = emptyList()
                     ymSearchResults = emptyList()
@@ -208,6 +204,14 @@ fun AtriOSApp() {
         ).also { c ->
             // Seed saved internet-pair credentials immediately for seamless BT -> Wi-Fi failover
             c.setSavedRelayConfig(relayConfig.gatewayUrl, relayConfig.deviceId, relayConfig.token)
+        }
+    }
+
+    LaunchedEffect(connected) {
+        if (connected) {
+            client.ymusicStatus()
+            client.getTimers()
+            client.getAlarms()
         }
     }
 
