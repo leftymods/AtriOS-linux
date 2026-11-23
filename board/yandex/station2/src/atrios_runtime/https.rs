@@ -650,6 +650,23 @@ pub fn https_stream(
     Err("Too many HTTPS redirects".into())
 }
 
+pub fn request_stream<F>(
+    url: &str,
+    data: Option<&[u8]>,
+    headers: &[(&str, &str)],
+    ca_file: Option<&str>,
+    timeout_secs: u64,
+    limit: usize,
+    cancel: Option<&dyn Fn() -> bool>,
+    on_chunk: F,
+) -> Result<(), String>
+where
+    F: FnMut(&[u8]) -> Result<(), String>,
+{
+    let method = if data.is_some() { "POST" } else { "GET" };
+    https_stream(url, method, data, headers, ca_file, timeout_secs, limit, cancel, on_chunk)
+}
+
 pub fn request_bytes(
     url: &str,
     data: Option<&[u8]>,

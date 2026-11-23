@@ -12,7 +12,7 @@ use std::sync::{mpsc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::https::{migrate_legacy_url, request_bytes, request_json, require_https};
+use crate::https::{migrate_legacy_url, request_bytes, request_json, request_stream, require_https};
 use crate::json::{obj, Json};
 use crate::light::{RING_OVERRIDE_FILE, SCREEN_MODE_FILE, VOICE_LEVEL_FILE};
 use crate::status::{error_kind_from_msg, set_error};
@@ -1642,6 +1642,137 @@ fn play_pcm_48k(pcm: &[u8]) {
     drain_capture_fd_now();
 }
 
+
+/// Stream 24 kHz S16_LE PCM16 directly from POST /tts/stream into aplay (~0.6s TTFA).
+/// Returns Ok(true) if completed, Ok(false) if interrupted, Err(...) if endpoint unavailable.
+fn stream_tts_and_play(
+    base: &str,
+    token: &str,
+    ca: &str,
+    text: &str,
+    emotion: &str,
+    keep_visual: bool,
+) -> Result<bool, String> {
+    let auth = format!("Bearer {token}");
+    let mut h = vec![("Content-Type", "application/json"), ("Accept", "audio/pcm")];
+    if !token.is_empty() {
+        h.push(("Authorization", auth.as_str()));
+    }
+    let ca_opt = if ca.is_empty() { None } else { Some(ca) };
+    let payload = obj(vec![
+        ("text", Json::Str(text.to_string())),
+        ("emotion", Json::Str(emotion.to_string())),
+        ("speaker", Json::Str("AtriVoice".to_string())),
+    ])
+    .to_string_compact();
+
+    let t0 = Instant::now();
+    let mut aplay: Option<Child> = None;
+    let mut carry: Option<u8> = None;
+    let mut total_bytes: usize = 0;
+    let mut interrupted = false;
+    let mut visual_started = false;
+
+    let cancel_cb = || BUTTON_TRIGGERED.load(Ordering::SeqCst);
+    let stream_res = request_stream(
+        &format!("{base}/tts/stream"),
+        Some(payload.as_bytes()),
+        &h,
+        ca_opt,
+        30,
+        16 * 1024 * 1024,
+        Some(&cancel_cb),
+        |chunk| {
+            if chunk.is_empty() {
+                return Ok(());
+            }
+            if BUTTON_TRIGGERED.load(Ordering::SeqCst) {
+                interrupted = true;
+                return Err("interrupted".into());
+            }
+            if aplay.is_none() {
+                let ttfa_ms = t0.elapsed().as_millis();
+                println!("[tts-stream] TTFA={ttfa_ms}ms emotion={emotion}");
+                send_bt_cmd("duck");
+                if !keep_visual {
+                    set_vad_visual("speaking", false, emotion);
+                    visual_started = true;
+                }
+                let child = Command::new("aplay")
+                    .args(["-q", "-f", "S16_LE", "-r", "24000", "-c", "1", "-t", "raw", "-"])
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .map_err(|e| format!("aplay spawn: {e}"))?;
+                aplay = Some(child);
+            }
+            let mut aligned: Vec<u8> = Vec::with_capacity(chunk.len() + 1);
+            if let Some(b) = carry.take() {
+                aligned.push(b);
+            }
+            aligned.extend_from_slice(chunk);
+            if aligned.len() % 2 == 1 {
+                carry = aligned.pop();
+            }
+            if aligned.is_empty() {
+                return Ok(());
+            }
+            let mut sq = 0.0f64;
+            let n_samp = aligned.len() / 2;
+            for pair in aligned.chunks_exact(2) {
+                let s = i16::from_le_bytes([pair[0], pair[1]]) as f64;
+                sq += s * s;
+            }
+            let rms = (sq / n_samp.max(1) as f64).sqrt();
+            let lvl = (rms / 9000.0).clamp(0.0, 1.0);
+            send_voice_level(Some(lvl));
+
+            if let Some(ref mut ch) = aplay {
+                if let Some(ref mut stdin) = ch.stdin {
+                    stdin.write_all(&aligned).map_err(|e| format!("aplay write: {e}"))?;
+                }
+            }
+            total_bytes += aligned.len();
+            Ok(())
+        },
+    );
+
+    if let Some(mut ch) = aplay {
+        drop(ch.stdin.take());
+        if interrupted {
+            let _ = ch.kill();
+        }
+        let _ = ch.wait();
+    }
+    if visual_started {
+        send_voice_level(None);
+        send_bt_cmd("unduck");
+        if !keep_visual {
+            set_vad_visual("idle", false, "default");
+        }
+    } else if total_bytes > 0 {
+        send_voice_level(None);
+        send_bt_cmd("unduck");
+    }
+
+    if interrupted {
+        return Ok(false);
+    }
+    match stream_res {
+        Ok(()) if total_bytes > 0 => {
+            println!(
+                "[tts-stream] finished {} bytes in {}ms",
+                total_bytes,
+                t0.elapsed().as_millis()
+            );
+            Ok(true)
+        }
+        Ok(()) => Err("empty tts stream".into()),
+        Err(e) => Err(e),
+    }
+}
+
 fn play_spoken_wav(audio: &[u8], text: &str, emotion: &str, keep_visual: bool, base: &str, token: &str, ca: &str) {
     send_bt_cmd("duck");
     if !keep_visual {
@@ -1662,6 +1793,9 @@ pub fn speak_via_remote_tts(text: &str, emotion: &str, keep_visual: bool) -> boo
     let remote_ok = has_remote && now_unix >= REMOTE_DOWN_UNTIL.load(Ordering::Relaxed);
 
     if remote_ok {
+        if stream_tts_and_play(&base, &cfg.token, &cfg.ca_file, text, emotion, keep_visual).is_ok() {
+            return true;
+        }
         let tok = cfg.token.clone();
         let ca = cfg.ca_file.clone();
         let auth = format!("Bearer {tok}");
@@ -2165,39 +2299,45 @@ fn send_phrase_to_server(
         let emotion = chat.get_str("emotion").unwrap_or("neutral").to_string();
         println!("[chat] answer={answer:?} emotion={emotion}");
 
-        let base3 = base.clone();
-        let tok3 = cfg.token.clone();
-        let ca3 = cfg.ca_file.clone();
-        let ans_c = answer.clone();
-        let emo_c = emotion.clone();
-        let audio = voice_call(move || {
-            let auth = format!("Bearer {tok3}");
-            let mut h = vec![("Content-Type", "application/json"), ("Accept", "audio/wav")];
-            if !tok3.is_empty() {
-                h.push(("Authorization", &auth));
-            }
-            let ca = if ca3.is_empty() { None } else { Some(ca3.as_str()) };
-            let payload = obj(vec![
-                ("text", Json::Str(ans_c)),
-                ("emotion", Json::Str(emo_c)),
-            ])
-            .to_string_compact();
-            request_bytes(
-                &format!("{base3}/tts"),
-                Some(payload.as_bytes()),
-                &h,
-                ca,
-                25,
-                8 * 1024 * 1024,
-                None,
-            )
-        })?;
-        parse_wav(&audio)?;
         write_status("speaking", &text, &answer, "");
-        send_bt_cmd("duck");
-        set_vad_visual("speaking", false, &emotion);
-        println!("[tts] playing {} bytes", audio.len());
-        let completed = play_audio_bytes(&audio, &answer, &base, &cfg.token, &cfg.ca_file)?;
+        let completed = match stream_tts_and_play(&base, &cfg.token, &cfg.ca_file, &answer, &emotion, false) {
+            Ok(done) => done,
+            Err(stream_err) => {
+                println!("[tts-stream] fallback to /tts WAV ({stream_err})");
+                let base3 = base.clone();
+                let tok3 = cfg.token.clone();
+                let ca3 = cfg.ca_file.clone();
+                let ans_c = answer.clone();
+                let emo_c = emotion.clone();
+                let audio = voice_call(move || {
+                    let auth = format!("Bearer {tok3}");
+                    let mut h = vec![("Content-Type", "application/json"), ("Accept", "audio/wav")];
+                    if !tok3.is_empty() {
+                        h.push(("Authorization", &auth));
+                    }
+                    let ca = if ca3.is_empty() { None } else { Some(ca3.as_str()) };
+                    let payload = obj(vec![
+                        ("text", Json::Str(ans_c)),
+                        ("emotion", Json::Str(emo_c)),
+                    ])
+                    .to_string_compact();
+                    request_bytes(
+                        &format!("{base3}/tts"),
+                        Some(payload.as_bytes()),
+                        &h,
+                        ca,
+                        25,
+                        8 * 1024 * 1024,
+                        None,
+                    )
+                })?;
+                parse_wav(&audio)?;
+                send_bt_cmd("duck");
+                set_vad_visual("speaking", false, &emotion);
+                println!("[tts] playing {} bytes", audio.len());
+                play_audio_bytes(&audio, &answer, &base, &cfg.token, &cfg.ca_file)?
+            }
+        };
         set_error("voice", None, "", 120);
         if completed && !has_trailing_stop {
             keep_listening = true;

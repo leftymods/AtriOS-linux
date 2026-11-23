@@ -20,6 +20,7 @@ pub const YMUSIC_CMD_SOCK: &str = "/var/run/atrios/ymusic.sock";
 
 const API_BASE: &str = "https://api.music.yandex.net";
 const CLIENT_HEADER: (&str, &str) = ("X-Yandex-Music-Client", "YandexMusicAndroid/24023621");
+const LANG_HEADER: (&str, &str) = ("Accept-Language", "ru");
 const SIGN_SALT: &str = "XGRlBW9FXlekgbPrRHuSiA";
 
 static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
@@ -379,7 +380,7 @@ pub fn announce_now_playing() {
 fn api_get_json(token: &str, endpoint: &str) -> Result<Json, String> {
     let url = format!("{API_BASE}{endpoint}");
     let auth_hdr = format!("OAuth {token}");
-    let hdrs = [("Authorization", auth_hdr.as_str()), CLIENT_HEADER];
+    let hdrs = [("Authorization", auth_hdr.as_str()), CLIENT_HEADER, LANG_HEADER];
     request_json(&url, None, &hdrs, None, 15, 2 * 1024 * 1024, None)
 }
 
@@ -399,7 +400,7 @@ fn api_post_form_json(token: &str, endpoint: &str, form_body: &str) -> Result<Js
 fn api_post_json(token: &str, endpoint: &str, payload: &Json) -> Result<Json, String> {
     let url = format!("{API_BASE}{endpoint}");
     let auth_hdr = format!("OAuth {token}");
-    let hdrs = [("Authorization", auth_hdr.as_str()), CLIENT_HEADER];
+    let hdrs = [("Authorization", auth_hdr.as_str()), CLIENT_HEADER, LANG_HEADER];
     request_json(&url, Some(payload), &hdrs, None, 15, 512 * 1024, None)
 }
 
@@ -479,17 +480,23 @@ fn parse_track_json(t: &Json, liked_default: bool) -> Option<TrackInfo> {
     Some(TrackInfo { id, title, artist, album, duration_ms, liked: liked_default })
 }
 
-fn fetch_my_wave(auth: &YMusicAuth, queue_track_id: Option<&str>) -> Result<(String, Vec<TrackInfo>), String> {
+/// MarshalX rotor_station_tracks: works for user:onyourwave, genre:*, mood:*, activity:*
+fn fetch_rotor_station(
+    auth: &YMusicAuth,
+    station: &str,
+    queue_track_id: Option<&str>,
+) -> Result<(String, Vec<TrackInfo>), String> {
+    let st = if station.trim().is_empty() { "user:onyourwave" } else { station.trim() };
     let ep = match queue_track_id {
         Some(tid) if !tid.is_empty() => {
-            format!("/rotor/station/user:onyourwave/tracks?settings2=true&queue={}", url_encode(tid))
+            format!("/rotor/station/{st}/tracks?settings2=true&queue={}", url_encode(tid))
         }
-        _ => "/rotor/station/user:onyourwave/tracks?settings2=true".to_string(),
+        _ => format!("/rotor/station/{st}/tracks?settings2=true"),
     };
     let resp = api_get_json(&auth.token, &ep)?;
     let res = resp.get("result").ok_or("Missing rotor result")?;
     let batch_id = res.get_str("batchId").unwrap_or("").to_string();
-    let seq = res.get("sequence").and_then(|v| v.as_arr()).ok_or("Empty My Wave sequence")?;
+    let seq = res.get("sequence").and_then(|v| v.as_arr()).ok_or("Empty rotor station sequence")?;
     let mut tracks = Vec::new();
     for item in seq {
         let liked = item.get("liked").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -498,12 +505,23 @@ fn fetch_my_wave(auth: &YMusicAuth, queue_track_id: Option<&str>) -> Result<(Str
         }
     }
     if tracks.is_empty() {
-        return Err("No tracks returned by My Wave".into());
+        return Err(format!("No tracks returned by station {st}"));
     }
     Ok((batch_id, tracks))
 }
 
-fn send_rotor_feedback(auth: &YMusicAuth, batch_id: &str, kind: &str, track_id: Option<&str>) {
+fn fetch_my_wave(auth: &YMusicAuth, queue_track_id: Option<&str>) -> Result<(String, Vec<TrackInfo>), String> {
+    fetch_rotor_station(auth, "user:onyourwave", queue_track_id)
+}
+
+fn send_rotor_feedback_station(
+    auth: &YMusicAuth,
+    station: &str,
+    batch_id: &str,
+    kind: &str,
+    track_id: Option<&str>,
+) {
+    let st = if station.trim().is_empty() { "user:onyourwave" } else { station.trim() };
     let mut fields = vec![
         ("type", Json::Str(kind.into())),
         ("timestamp", Json::Str(crate::sys::format_utc("%Y-%m-%dT%H:%M:%SZ", now_unix_i64()))),
@@ -515,11 +533,71 @@ fn send_rotor_feedback(auth: &YMusicAuth, batch_id: &str, kind: &str, track_id: 
         fields.push(("from", Json::Str("AtriOS-speaker".into())));
     }
     let ep = if batch_id.is_empty() {
-        "/rotor/station/user:onyourwave/feedback".to_string()
+        format!("/rotor/station/{st}/feedback")
     } else {
-        format!("/rotor/station/user:onyourwave/feedback?batch-id={}", url_encode(batch_id))
+        format!("/rotor/station/{st}/feedback?batch-id={}", url_encode(batch_id))
     };
     let _ = api_post_json(&auth.token, &ep, &obj(fields));
+}
+
+fn send_rotor_feedback(auth: &YMusicAuth, batch_id: &str, kind: &str, track_id: Option<&str>) {
+    send_rotor_feedback_station(auth, "user:onyourwave", batch_id, kind, track_id);
+}
+
+/// MarshalX chart(): GET /landing3/chart
+fn fetch_chart(auth: &YMusicAuth) -> Result<Vec<TrackInfo>, String> {
+    let resp = api_get_json(&auth.token, "/landing3/chart")?;
+    let arr = resp
+        .get("result")
+        .and_then(|r| r.get("chart"))
+        .and_then(|c| c.get("tracks"))
+        .and_then(|v| v.as_arr())
+        .ok_or("Empty Yandex Music chart")?;
+    let tracks: Vec<TrackInfo> = arr
+        .iter()
+        .take(30)
+        .filter_map(|item| item.get("track").and_then(|t| parse_track_json(t, false)))
+        .collect();
+    if tracks.is_empty() {
+        return Err("No playable tracks in chart".into());
+    }
+    Ok(tracks)
+}
+
+/// MarshalX users_playlists_list + users_playlists: find user playlist by name and load its tracks
+fn fetch_user_playlist(auth: &YMusicAuth, query: &str) -> Result<Vec<TrackInfo>, String> {
+    let q = query.trim().to_lowercase();
+    let list_ep = format!("/users/{}/playlists/list", auth.uid);
+    let resp = api_get_json(&auth.token, &list_ep)?;
+    let arr = resp
+        .get("result")
+        .and_then(|v| v.as_arr())
+        .ok_or("No playlists found")?;
+    let chosen = arr
+        .iter()
+        .find(|pl| {
+            let title = pl.get_str("title").unwrap_or("").to_lowercase();
+            q.is_empty() || title.contains(&q)
+        })
+        .or_else(|| arr.first())
+        .ok_or("User has no playlists")?;
+    let kind = chosen.get("kind").and_then(|v| v.as_i64()).ok_or("Playlist missing kind")?;
+    let pl_ep = format!("/users/{}/playlists/{kind}", auth.uid);
+    let pl_resp = api_get_json(&auth.token, &pl_ep)?;
+    let tr_arr = pl_resp
+        .get("result")
+        .and_then(|r| r.get("tracks"))
+        .and_then(|v| v.as_arr())
+        .ok_or("Playlist has no tracks")?;
+    let tracks: Vec<TrackInfo> = tr_arr
+        .iter()
+        .take(50)
+        .filter_map(|item| item.get("track").and_then(|t| parse_track_json(t, false)))
+        .collect();
+    if tracks.is_empty() {
+        return Err("Playlist is empty".into());
+    }
+    Ok(tracks)
 }
 
 fn fetch_likes(auth: &YMusicAuth) -> Result<Vec<TrackInfo>, String> {
@@ -557,7 +635,7 @@ fn fetch_search(auth: &YMusicAuth, query: &str) -> Result<Vec<TrackInfo>, String
     if q.is_empty() {
         return Err("Search query is empty".into());
     }
-    let ep = format!("/search?type=track&page=0&nococrrect=false&text={}", url_encode(q));
+    let ep = format!("/search?type=track&page=0&nocorrect=false&text={}", url_encode(q));
     let resp = api_get_json(&auth.token, &ep)?;
     let arr = resp
         .get("result")
@@ -598,7 +676,7 @@ fn resolve_track_stream_url(auth: &YMusicAuth, track_id: &str) -> Result<String,
     let dl_url = chosen.get_str("downloadInfoUrl").ok_or("Missing downloadInfoUrl")?;
     let codec = chosen.get_str("codec").unwrap_or("mp3");
     let auth_hdr = format!("OAuth {}", auth.token);
-    let hdrs = [("Authorization", auth_hdr.as_str()), CLIENT_HEADER];
+    let hdrs = [("Authorization", auth_hdr.as_str()), CLIENT_HEADER, LANG_HEADER];
     let raw = request_bytes(dl_url, None, &hdrs, None, 15, 256 * 1024, None)?;
     let (host, path, ts, s) = parse_download_info_payload(&raw)?;
     Ok(build_stream_url(&host, codec, &path, &ts, &s))
@@ -864,6 +942,16 @@ impl PlayerState {
                 tr
             }),
             "likes" => fetch_likes(&auth),
+            "chart" => fetch_chart(&auth),
+            "station" => {
+                let st = query.unwrap_or("user:onyourwave");
+                fetch_rotor_station(&auth, st, None).map(|(bid, tr)| {
+                    self.batch_id = bid.clone();
+                    send_rotor_feedback_station(&auth, st, &bid, "radioStarted", None);
+                    tr
+                })
+            }
+            "playlist" => fetch_user_playlist(&auth, query.unwrap_or("")),
             "search" => fetch_search(&auth, query.unwrap_or("")),
             _ => Err(format!("Unsupported mode: {mode}")),
         };
@@ -1065,6 +1153,9 @@ pub fn trigger_play(mode: &str, query: Option<&str>) -> Result<YMusicStatus, Str
     let wire = match mode {
         "wave" => "play:wave".to_string(),
         "likes" => "play:likes".to_string(),
+        "chart" => "play:chart".to_string(),
+        "station" => format!("play:station:{}", query.unwrap_or("user:onyourwave").trim()),
+        "playlist" => format!("play:playlist:{}", query.unwrap_or("").trim()),
         "search" => {
             let q = query.unwrap_or("").trim();
             if q.is_empty() {
@@ -1103,6 +1194,9 @@ pub fn trigger_control(action: &str) -> Result<YMusicStatus, String> {
 pub enum YMusicVoiceCmd {
     PlayWave,
     PlayLikes,
+    PlayChart,
+    PlayStation(String),
+    PlayPlaylist(String),
     PlaySearch(String),
     Like,
     Dislike,
@@ -1189,6 +1283,46 @@ pub fn parse_ymusic_voice_command(text: &str, wake_word: &str) -> Option<YMusicV
         return Some(YMusicVoiceCmd::PlayLikes);
     }
 
+    // Top chart (MarshalX /landing3/chart)
+    if joined.contains("чарт")
+        || joined.contains("топ треков")
+        || joined.contains("популярную музыку")
+        || joined.contains("хиты")
+    {
+        return Some(YMusicVoiceCmd::PlayChart);
+    }
+
+    // Genre & mood rotor stations (MarshalX /rotor/station/*)
+    if joined.contains("включи рок") || joined.contains("поставь рок") {
+        return Some(YMusicVoiceCmd::PlayStation("genre:rock".into()));
+    }
+    if joined.contains("включи поп") || joined.contains("поставь поп") {
+        return Some(YMusicVoiceCmd::PlayStation("genre:pop".into()));
+    }
+    if joined.contains("включи электроник") || joined.contains("электронную музыку") {
+        return Some(YMusicVoiceCmd::PlayStation("genre:electronic".into()));
+    }
+    if joined.contains("включи рэп") || joined.contains("поставь рэп") {
+        return Some(YMusicVoiceCmd::PlayStation("genre:rap".into()));
+    }
+    if joined.contains("спокойную музыку") || joined.contains("расслабляющую музыку") {
+        return Some(YMusicVoiceCmd::PlayStation("mood:calm".into()));
+    }
+    if joined.contains("энергичную музыку") || joined.contains("бодрую музыку") {
+        return Some(YMusicVoiceCmd::PlayStation("mood:energetic".into()));
+    }
+    if joined.contains("для тренировки") || joined.contains("для спорта") {
+        return Some(YMusicVoiceCmd::PlayStation("activity:workout".into()));
+    }
+
+    // User playlists (MarshalX /users/{uid}/playlists/list)
+    if let Some(rest) = joined.strip_prefix("включи плейлист ") {
+        return Some(YMusicVoiceCmd::PlayPlaylist(rest.trim().to_string()));
+    }
+    if let Some(rest) = joined.strip_prefix("поставь плейлист ") {
+        return Some(YMusicVoiceCmd::PlayPlaylist(rest.trim().to_string()));
+    }
+
     // "поставь <песня>" / "включи песню <...>" / "включи трек <...>"
     let search_tail = if let Some(rest) = joined.strip_prefix("поставь песню ") {
         Some(rest)
@@ -1233,6 +1367,21 @@ pub fn execute_voice_command(cmd: YMusicVoiceCmd) {
         YMusicVoiceCmd::PlayLikes => {
             if let Err(e) = trigger_play("likes", None) {
                 eprintln!("[ymusic] likes failed: {e}");
+            }
+        }
+        YMusicVoiceCmd::PlayChart => {
+            if let Err(e) = trigger_play("chart", None) {
+                eprintln!("[ymusic] chart failed: {e}");
+            }
+        }
+        YMusicVoiceCmd::PlayStation(st) => {
+            if let Err(e) = trigger_play("station", Some(&st)) {
+                eprintln!("[ymusic] station {st} failed: {e}");
+            }
+        }
+        YMusicVoiceCmd::PlayPlaylist(pl) => {
+            if let Err(e) = trigger_play("playlist", Some(&pl)) {
+                eprintln!("[ymusic] playlist {pl} failed: {e}");
             }
         }
         YMusicVoiceCmd::PlaySearch(q) => {
