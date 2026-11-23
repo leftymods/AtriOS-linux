@@ -26,6 +26,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import com.leftymods.atrios.data.RelayConfig
 import com.leftymods.atrios.data.SpeakerStorage
 import com.leftymods.atrios.model.AlarmItem
 import com.leftymods.atrios.model.SavedSpeaker
@@ -94,6 +95,7 @@ fun AtriOSApp() {
     var timers by remember { mutableStateOf<List<TimerItem>>(emptyList()) }
     var alarms by remember { mutableStateOf<List<AlarmItem>>(emptyList()) }
     var savedSpeakers by remember { mutableStateOf(storage.loadSpeakers()) }
+    var relayConfig by remember { mutableStateOf(storage.loadRelayConfig()) }
     var selectedTab by remember { mutableStateOf(AppTab.OVERVIEW) }
     var showRebootDialog by remember { mutableStateOf(false) }
     var availableAppUpdate by remember { mutableStateOf<AppReleaseInfo?>(null) }
@@ -140,6 +142,14 @@ fun AtriOSApp() {
             },
             onAlarmsUpdate = { list ->
                 alarms = list
+            },
+            onRelayInfo = { did, gw ->
+                val updated = relayConfig.copy(
+                    deviceId = did,
+                    gatewayUrl = gw.ifBlank { relayConfig.gatewayUrl }
+                )
+                relayConfig = updated
+                storage.saveRelayConfig(updated)
             },
             onBtSpeakerPush = { enabled ->
                 status = status.copy(btSpeakerMode = enabled)
@@ -262,6 +272,60 @@ fun AtriOSApp() {
                         onConnect = { dev -> client.connect(dev) },
                         onForgetSaved = { mac -> savedSpeakers = storage.removeSpeaker(mac) }
                     )
+                }
+            }
+
+            if (!connected) {
+                item {
+                    var gwInput by remember(relayConfig.gatewayUrl) { mutableStateOf(relayConfig.gatewayUrl) }
+                    var didInput by remember(relayConfig.deviceId) { mutableStateOf(relayConfig.deviceId) }
+                    var tokInput by remember(relayConfig.token) { mutableStateOf(relayConfig.token) }
+                    ElevatedCard(shape = RoundedCornerShape(24.dp)) {
+                        Column(
+                            modifier = Modifier.fillMaxWidth().padding(20.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Text("Управление по Wi-Fi (TLS)", style = MaterialTheme.typography.titleMedium)
+                            Text(
+                                "После первичной настройки по Bluetooth колонка автоматически подключается к шлюзу ai.leftymods.tech — управляйте ей по Wi-Fi / интернету.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            OutlinedTextField(
+                                value = gwInput,
+                                onValueChange = { gwInput = it },
+                                label = { Text("HTTPS шлюз") },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                            OutlinedTextField(
+                                value = didInput,
+                                onValueChange = { didInput = it },
+                                label = { Text("Device ID (заполняется при BT-подключении)") },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                            OutlinedTextField(
+                                value = tokInput,
+                                onValueChange = { tokInput = it },
+                                label = { Text("Bearer токен шлюза") },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                            Button(
+                                onClick = {
+                                    val cfg = RelayConfig(gwInput.trim(), didInput.trim(), tokInput.trim())
+                                    relayConfig = cfg
+                                    storage.saveRelayConfig(cfg)
+                                    client.connectRelay(cfg.gatewayUrl, cfg.deviceId, cfg.token)
+                                },
+                                enabled = gwInput.trim().startsWith("https://") && didInput.isNotBlank() && tokInput.isNotBlank(),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text("Подключиться по Wi-Fi (HTTPS)")
+                            }
+                        }
+                    }
                 }
             }
 

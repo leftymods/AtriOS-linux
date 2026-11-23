@@ -4,6 +4,13 @@ import android.content.Context
 import com.leftymods.atrios.model.SavedSpeaker
 import org.json.JSONArray
 
+
+data class RelayConfig(
+    val gatewayUrl: String = "https://ai.leftymods.tech",
+    val deviceId: String = "",
+    val token: String = ""
+)
+
 class SpeakerStorage(context: Context) {
     private val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
@@ -41,8 +48,26 @@ class SpeakerStorage(context: Context) {
         prefs.edit().putString(KEY_SPEAKERS, arr.toString()).apply()
     }
 
+    fun loadRelayConfig(): RelayConfig = RelayConfig(
+        gatewayUrl = prefs.getString(KEY_RELAY_URL, "https://ai.leftymods.tech")
+            ?.trim()?.ifBlank { "https://ai.leftymods.tech" } ?: "https://ai.leftymods.tech",
+        deviceId = prefs.getString(KEY_RELAY_DID, "")?.trim().orEmpty(),
+        token = prefs.getString(KEY_RELAY_TOKEN, "")?.trim().orEmpty()
+    )
+
+    fun saveRelayConfig(cfg: RelayConfig) {
+        prefs.edit()
+            .putString(KEY_RELAY_URL, cfg.gatewayUrl.trim())
+            .putString(KEY_RELAY_DID, cfg.deviceId.trim())
+            .putString(KEY_RELAY_TOKEN, cfg.token.trim())
+            .apply()
+    }
+
     companion object {
         private const val PREFS_NAME = "atrios_speakers"
         private const val KEY_SPEAKERS = "saved_speakers_v1"
+        private const val KEY_RELAY_URL = "relay_gateway_url_v1"
+        private const val KEY_RELAY_DID = "relay_device_id_v1"
+        private const val KEY_RELAY_TOKEN = "relay_token_v1"
     }
 }
