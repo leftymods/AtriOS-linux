@@ -14,6 +14,13 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import com.leftymods.atrios.ui.theme.TypeUI
+import androidx.compose.animation.togetherWith
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -598,8 +605,23 @@ fun AtriOSApp(
                     }
                 }
             ) { pad ->
-                Box(modifier = Modifier.fillMaxSize().padding(pad)) {
-                    when (selectedTab) {
+                AnimatedContent(
+                    targetState = selectedTab,
+                    modifier = Modifier.fillMaxSize().padding(pad),
+                    transitionSpec = {
+                        val dir = if (targetState.ordinal >= initialState.ordinal) 1 else -1
+                        (slideInHorizontally(
+                            animationSpec = tween(TypeUI.MotionMediumMs, easing = FastOutSlowInEasing)
+                        ) { it / 5 * dir } + fadeIn(tween(TypeUI.MotionFastMs)))
+                            .togetherWith(
+                                slideOutHorizontally(
+                                    animationSpec = tween(TypeUI.MotionMediumMs, easing = FastOutSlowInEasing)
+                                ) { -it / 5 * dir } + fadeOut(tween(TypeUI.MotionFastMs))
+                            )
+                    },
+                    label = "tabTransition"
+                ) { currentTab ->
+                    when (currentTab) {
                         AppTab.WAVE -> {
                             YandexWaveFullScreen(
                                 ymusic = status.ymusic,
@@ -619,6 +641,7 @@ fun AtriOSApp(
                                         status = status.copy(ymusic = status.ymusic.copy(state = if (action == "pause") "paused" else "playing"))
                                     }
                                     client.ymusicControl(action)
+                                    if (action == "next" || action == "prev") scope.launch { delay(350); client.ymusicStatus() }
                                 },
                                 onOpenAccountSettings = {
                                     selectedTab = AppTab.SETTINGS
@@ -689,10 +712,11 @@ fun AtriOSApp(
                                     items(menuPages.size) { idx ->
                                         val page = menuPages[idx]
                                         Surface(
-                                            shape = RoundedCornerShape(20.dp),
-                                            color = OledCard,
+                                            shape = RoundedCornerShape(TypeUI.RadiusMd),
+                                            color = TypeUI.SurfaceElevated,
                                             modifier = Modifier
                                                 .fillMaxWidth()
+                                                .border(1.dp, TypeUI.Hairline, RoundedCornerShape(TypeUI.RadiusMd))
                                                 .clickable {
                                                     settingsPage = page
                                                     if (page == SettingsPage.ABOUT) client.otaStatus()
@@ -843,7 +867,7 @@ fun AtriOSApp(
                                                         InfoRow("Модель", status.model)
                                                         InfoRow("Кодовое имя", status.codename.ifBlank { "—" })
                                                         InfoRow("Ревизия", status.rev.ifBlank { "—" })
-                                                        InfoRow("Платформа (SoC)", status.soc.ifBlank { "—" })
+                                                        InfoRow("Платформа (SoC)", status.soc.substringBefore("(").trim().ifBlank { "Amlogic S905X3" })
                                                         InfoRow("Прошивка", "v${status.fwVersion}")
                                                         if (relayConfig.deviceId.isNotBlank()) {
                                                             InfoRow("Device ID", relayConfig.deviceId)
@@ -922,6 +946,29 @@ fun AtriOSApp(
                                                     onSetRing = { mode -> status = status.copy(ringMode = mode); client.setRing(mode) }
                                                 )
                                             }
+                                            item {
+                                                Surface(
+                                                    shape = RoundedCornerShape(TypeUI.RadiusLg),
+                                                    color = TypeUI.SurfaceElevated,
+                                                    modifier = Modifier.border(1.dp, TypeUI.Hairline, RoundedCornerShape(TypeUI.RadiusLg))
+                                                ) {
+                                                    Row(
+                                                        modifier = Modifier.fillMaxWidth().padding(18.dp),
+                                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                                        verticalAlignment = Alignment.CenterVertically
+                                                    ) {
+                                                        Column(modifier = Modifier.weight(1f)) {
+                                                            Text("Тест динамиков", color = Color.White, fontWeight = FontWeight.SemiBold)
+                                                            Text("Проверка аудиовыхода колонки", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                                        }
+                                                        FilledTonalButton(onClick = { client.audioTest() }, shape = RoundedCornerShape(TypeUI.RadiusPill)) {
+                                                            Icon(Icons.Rounded.GraphicEq, contentDescription = null, modifier = Modifier.size(18.dp))
+                                                            Spacer(Modifier.width(6.dp))
+                                                            Text("Тест")
+                                                        }
+                                                    }
+                                                }
+                                            }
                                             item { TelemetryCard(status = status) }
                                         }
                                         SettingsPage.ROOT -> Unit
@@ -971,6 +1018,7 @@ fun AtriOSApp(
                             status = status.copy(ymusic = status.ymusic.copy(state = if (action == "pause") "paused" else "playing"))
                         }
                         client.ymusicControl(action)
+                                    if (action == "next" || action == "prev") scope.launch { delay(350); client.ymusicStatus() }
                     },
                     onPlayWave = { client.ymusicPlay("wave", null) },
                     onDismiss = { showBigPlayer = false }

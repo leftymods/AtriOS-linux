@@ -16,6 +16,11 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
+import kotlin.math.absoluteValue
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.pager.PageSize
+import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -589,74 +594,88 @@ fun YandexWaveFullScreen(
                     }
                 }
 
-                // Bottom Dynamic Yandex Music Orbs (Curved glowing domes + circular artist avatars!)
-                LazyRow(
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    contentPadding = PaddingValues(horizontal = 14.dp),
-                    modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp)
-                ) {
-                    items(displayOrbs, key = { it.id }) { orb ->
-                        val orbColor = parseHexColor(orb.colorHex, palette.aura2)
+                // Infinite Circular Carousel of Artist & Genre Orbs (loops endlessly with curved arc!)
+                val orbCount = displayOrbs.size.coerceAtLeast(1)
+                val startPage = remember(orbCount) { (Int.MAX_VALUE / 2) - ((Int.MAX_VALUE / 2) % orbCount) }
+                val orbPagerState = rememberPagerState(initialPage = startPage, pageCount = { Int.MAX_VALUE })
+                HorizontalPager(
+                    state = orbPagerState,
+                    pageSize = PageSize.Fixed(128.dp),
+                    pageSpacing = 12.dp,
+                    contentPadding = PaddingValues(horizontal = 112.dp),
+                    modifier = Modifier.fillMaxWidth().height(156.dp)
+                ) { page ->
+                    val orb = displayOrbs[((page % orbCount) + orbCount) % orbCount]
+                    val pageOffset = ((orbPagerState.currentPage - page) + orbPagerState.currentPageOffsetFraction).absoluteValue.coerceIn(0f, 1.5f)
+                    val scale = 1.06f - 0.14f * pageOffset.coerceIn(0f, 1f)
+                    val arcDropPx = 22f * pageOffset * pageOffset
+                    val alphaVal = (1f - 0.28f * pageOffset).coerceIn(0.60f, 1f)
+                    val orbColor = parseHexColor(orb.colorHex, palette.aura2)
+
+                    Box(
+                        modifier = Modifier
+                            .width(128.dp)
+                            .height(148.dp)
+                            .graphicsLayer {
+                                scaleX = scale
+                                scaleY = scale
+                                translationY = arcDropPx
+                                alpha = alphaVal
+                            }
+                            .clickable {
+                                activePreset = orb.title
+                                onPlay(orb.mode, orb.query.ifBlank { null })
+                            },
+                        contentAlignment = Alignment.BottomCenter
+                    ) {
                         Box(
                             modifier = Modifier
-                                .width(126.dp)
-                                .height(146.dp)
-                                .clickable {
-                                    activePreset = orb.title
-                                    onPlay(orb.mode, orb.query.ifBlank { null })
-                                },
-                            contentAlignment = Alignment.BottomCenter
-                        ) {
-                            // Glowing rounded dome base (just like Yandex Music screenshots!)
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height(114.dp)
-                                    .clip(RoundedCornerShape(topStart = 58.dp, topEnd = 58.dp, bottomStart = 20.dp, bottomEnd = 20.dp))
-                                    .background(
-                                        Brush.verticalGradient(
-                                            listOf(
-                                                orbColor.copy(alpha = 0.78f),
-                                                orbColor.copy(alpha = 0.30f),
-                                                Color.Transparent
-                                            )
+                                .fillMaxWidth()
+                                .height(114.dp)
+                                .clip(RoundedCornerShape(topStart = 60.dp, topEnd = 60.dp, bottomStart = 20.dp, bottomEnd = 20.dp))
+                                .background(
+                                    Brush.verticalGradient(
+                                        listOf(
+                                            orbColor.copy(alpha = 0.80f),
+                                            orbColor.copy(alpha = 0.28f),
+                                            Color.Transparent
                                         )
                                     )
-                            )
-                            Column(
-                                horizontalAlignment = Alignment.CenterHorizontally,
-                                verticalArrangement = Arrangement.spacedBy(4.dp),
-                                modifier = Modifier.fillMaxSize().padding(horizontal = 8.dp, vertical = 4.dp)
-                            ) {
-                                AsyncCoverArt(
-                                    url = orb.coverUrl,
-                                    shape = CircleShape,
-                                    modifier = Modifier.size(64.dp),
-                                    fallbackIcon = when (orb.mode) {
-                                        "likes" -> Icons.Rounded.Favorite
-                                        "chart" -> Icons.Rounded.Bolt
-                                        else -> Icons.Rounded.GraphicEq
-                                    }
                                 )
-                                if (orb.subtitle.isNotBlank()) {
-                                    Text(
-                                        orb.subtitle,
-                                        color = Color.White.copy(alpha = 0.72f),
-                                        fontSize = 11.sp,
-                                        maxLines = 1
-                                    )
+                        )
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                            modifier = Modifier.fillMaxSize().padding(horizontal = 8.dp, vertical = 4.dp)
+                        ) {
+                            AsyncCoverArt(
+                                url = orb.coverUrl,
+                                shape = CircleShape,
+                                modifier = Modifier.size(64.dp),
+                                fallbackIcon = when (orb.mode) {
+                                    "likes" -> Icons.Rounded.Favorite
+                                    "chart" -> Icons.Rounded.Bolt
+                                    else -> Icons.Rounded.GraphicEq
                                 }
+                            )
+                            if (orb.subtitle.isNotBlank()) {
                                 Text(
-                                    orb.title,
-                                    color = Color.White,
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 13.sp,
-                                    textAlign = TextAlign.Center,
-                                    maxLines = 2,
-                                    lineHeight = 15.sp,
-                                    overflow = TextOverflow.Ellipsis
+                                    orb.subtitle,
+                                    color = Color.White.copy(alpha = 0.72f),
+                                    fontSize = 11.sp,
+                                    maxLines = 1
                                 )
                             }
+                            Text(
+                                orb.title,
+                                color = Color.White,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 13.sp,
+                                textAlign = TextAlign.Center,
+                                maxLines = 2,
+                                lineHeight = 15.sp,
+                                overflow = TextOverflow.Ellipsis
+                            )
                         }
                     }
                 }

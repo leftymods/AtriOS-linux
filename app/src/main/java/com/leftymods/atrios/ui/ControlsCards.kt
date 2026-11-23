@@ -100,7 +100,8 @@ fun AudioCard(
     onVolumeChange: (Float) -> Unit,
     onVolumeCommit: (Int) -> Unit,
     onToggleMute: () -> Unit,
-    onAudioTest: () -> Unit
+    onAudioTest: () -> Unit,
+    showAudioTest: Boolean = false
 ) {
     ElevatedCard(shape = RoundedCornerShape(24.dp)) {
         Column(

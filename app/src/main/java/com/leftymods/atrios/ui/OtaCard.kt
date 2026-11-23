@@ -54,20 +54,35 @@ fun OtaUpdateCard(
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Row(
+                    modifier = Modifier.weight(1f),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Icon(Icons.Rounded.SystemUpdate, contentDescription = null)
-                    Text("Обновление прошивки (OTA)", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        "Обновление прошивки (OTA)",
+                        style = MaterialTheme.typography.titleMedium,
+                        maxLines = 2
+                    )
                 }
-                AssistChip(
+                Surface(
                     onClick = onRefreshStatus,
-                    label = { Text(stateLabel) }
-                )
+                    shape = RoundedCornerShape(99.dp),
+                    color = MaterialTheme.colorScheme.primaryContainer
+                ) {
+                    Text(
+                        stateLabel,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer,
+                        maxLines = 1,
+                        softWrap = false
+                    )
+                }
             }
 
             Row(
@@ -85,7 +100,7 @@ fun OtaUpdateCard(
                 if (codename.isNotBlank()) {
                     Column(horizontalAlignment = Alignment.End) {
                         Text(
-                            "Платформа",
+                            "Кодовое имя",
                             style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
