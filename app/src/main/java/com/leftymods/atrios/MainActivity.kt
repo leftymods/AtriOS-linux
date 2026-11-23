@@ -281,7 +281,7 @@ fun AtriOSApp() {
                         .background(Color(0xFF0A101E))
                 ) {
                     val ym = status.ymusic
-                    if (selectedTab != AppTab.ASSISTANT && (ym.playing || ym.paused || ym.title.isNotBlank())) {
+                    if (selectedTab != AppTab.ASSISTANT && (ym.isActive || ym.title.isNotBlank())) {
                         Surface(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -343,7 +343,7 @@ fun AtriOSApp() {
                                     modifier = Modifier.size(36.dp)
                                 ) {
                                     Icon(
-                                        if (ym.playing) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
+                                        if (ym.state == "playing") Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
                                         contentDescription = "Пауза / Плей",
                                         tint = MaterialTheme.colorScheme.primary
                                     )
