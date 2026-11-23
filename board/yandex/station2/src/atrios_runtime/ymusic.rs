@@ -230,6 +230,7 @@ pub struct YMusicStatus {
     pub prev_cover_url: String,
     pub duration_ms: i64,
     pub liked: bool,
+    pub repeat: bool,
     pub error: Option<String>,
     pub updated_ts: i64,
 }
@@ -258,6 +259,7 @@ impl YMusicStatus {
             prev_cover_url: String::new(),
             duration_ms: 0,
             liked: false,
+            repeat: false,
             error: None,
             updated_ts: now_unix_i64(),
         }
@@ -301,6 +303,9 @@ impl YMusicStatus {
         }
         if let Some(b) = j.get("liked").and_then(|v| v.as_bool()) {
             st.liked = b;
+        }
+        if let Some(b) = j.get("repeat").and_then(|v| v.as_bool()) {
+            st.repeat = b;
         }
         if let Some(s) = j.get_str("error") {
             if !s.is_empty() {
@@ -349,6 +354,7 @@ impl YMusicStatus {
             ("prev_cover_url", Json::Str(self.prev_cover_url.clone())),
             ("duration_ms", Json::Num(self.duration_ms as f64)),
             ("liked", Json::Bool(self.liked)),
+            ("repeat", Json::Bool(self.repeat)),
             (
                 "error",
                 self.error.as_ref().map(|s| Json::Str(s.clone())).unwrap_or(Json::Null),
@@ -569,33 +575,68 @@ fn parse_track_json(t: &Json, liked_default: bool) -> Option<TrackInfo> {
 }
 
 /// MarshalX rotor_station_tracks: works for user:onyourwave, genre:*, mood:*, activity:*
+fn station_search_fallback_query(st: &str) -> &'static str {
+    let s = st.to_lowercase();
+    if s.contains("party") || s.contains("вечерин") {
+        "танцевальная вечеринка хиты"
+    } else if s.contains("workout") || s.contains("run") {
+        "музыка для бега и тренировок"
+    } else if s.contains("calm") || s.contains("chill") {
+        "спокойная музыка чиллаут"
+    } else if s.contains("happy") || s.contains("радост") {
+        "весёлая радостная музыка"
+    } else if s.contains("love") || s.contains("романт") {
+        "романтическая музыка для влюбленных"
+    } else if s.contains("energetic") || s.contains("бодр") {
+        "бодрая энергичная музыка"
+    } else if s.contains("sad") {
+        "грустная лирическая музыка"
+    } else if s.contains("electronic") {
+        "электронная музыка"
+    } else {
+        "популярные хиты"
+    }
+}
+
 fn fetch_rotor_station(
     auth: &YMusicAuth,
     station: &str,
     queue_track_id: Option<&str>,
 ) -> Result<(String, Vec<TrackInfo>), String> {
-    let st = if station.trim().is_empty() { "user:onyourwave" } else { station.trim() };
+    let raw_st = station.trim();
+    let st = match raw_st {
+        "" => "user:onyourwave",
+        "mood:party" => "activity:party",
+        "activity:workout" => "activity:run",
+        other => other,
+    };
     let ep = match queue_track_id {
         Some(tid) if !tid.is_empty() => {
             format!("/rotor/station/{st}/tracks?settings2=true&queue={}", url_encode(tid))
         }
         _ => format!("/rotor/station/{st}/tracks?settings2=true"),
     };
-    let resp = api_get_json(&auth.token, &ep)?;
-    let res = resp.get("result").ok_or("Missing rotor result")?;
-    let batch_id = res.get_str("batchId").unwrap_or("").to_string();
-    let seq = res.get("sequence").and_then(|v| v.as_arr()).ok_or("Empty rotor station sequence")?;
-    let mut tracks = Vec::new();
-    for item in seq {
-        let liked = item.get("liked").and_then(|v| v.as_bool()).unwrap_or(false);
-        if let Some(tr) = item.get("track").and_then(|t| parse_track_json(t, liked)) {
-            tracks.push(tr);
+    if let Ok(resp) = api_get_json(&auth.token, &ep) {
+        if let Some(res) = resp.get("result") {
+            let batch_id = res.get_str("batchId").unwrap_or("").to_string();
+            if let Some(seq) = res.get("sequence").and_then(|v| v.as_arr()) {
+                let mut tracks = Vec::new();
+                for item in seq {
+                    let liked = item.get("liked").and_then(|v| v.as_bool()).unwrap_or(false);
+                    if let Some(tr) = item.get("track").and_then(|t| parse_track_json(t, liked)) {
+                        tracks.push(tr);
+                    }
+                }
+                if !tracks.is_empty() {
+                    return Ok((batch_id, tracks));
+                }
+            }
         }
     }
-    if tracks.is_empty() {
-        return Err(format!("No tracks returned by station {st}"));
-    }
-    Ok((batch_id, tracks))
+    // Seamless fallback to catalog search if rotor station tag is unavailable on Yandex
+    let fb_q = station_search_fallback_query(st);
+    let tracks = fetch_search(auth, fb_q)?;
+    Ok((String::new(), tracks))
 }
 
 fn fetch_my_wave(auth: &YMusicAuth, queue_track_id: Option<&str>) -> Result<(String, Vec<TrackInfo>), String> {
@@ -968,7 +1009,7 @@ pub fn fetch_orbs_json() -> Result<Vec<Json>, String> {
 
     // Always append quick mood orbs if fewer than 6
     let fallbacks = [
-        ("mood:party", "Вечериниться", "Настроение", "station", "mood:party", "#00C896"),
+        ("activity:party", "Вечериниться", "Настроение", "station", "activity:party", "#00C896"),
         ("activity:workout", "Бегаю и не устаю", "Занятие", "station", "activity:workout", "#4C7CFF"),
         ("likes", "Мне нравится", "Коллекция", "likes", "", "#FF1F8E"),
         ("chart", "Тренды", "Чарт", "chart", "", "#FF4D00"),
@@ -1329,6 +1370,7 @@ struct PlayerState {
     prefetch: std::sync::Arc<std::sync::Mutex<Option<(String, String)>>>,
     pending_play_at: Option<std::time::Instant>,
     last_skip_at: Option<std::time::Instant>,
+    repeat_one: bool,
     status: YMusicStatus,
 }
 
@@ -1343,6 +1385,7 @@ impl PlayerState {
             prefetch: std::sync::Arc::new(std::sync::Mutex::new(None)),
             pending_play_at: None,
             last_skip_at: None,
+            repeat_one: false,
             status: YMusicStatus::default_idle(),
         }
     }
@@ -1753,6 +1796,10 @@ impl PlayerState {
                 let _ = api_like_track(&auth, &cur.id, true);
             }
             self.next_track(true);
+        } else if cmd == "repeat" {
+            self.repeat_one = !self.repeat_one;
+            self.status.repeat = self.repeat_one;
+            write_status(&mut self.status);
         } else if cmd == "stop" {
             self.stop_playback();
         } else if cmd == "shutdown" {
@@ -1818,7 +1865,11 @@ fn run_daemon() -> i32 {
         }
         let finished = player.pipeline.as_mut().map(|p| p.is_finished()).unwrap_or(false);
         if finished {
-            player.next_track(false);
+            if player.repeat_one {
+                player.start_current_track();
+            } else {
+                player.next_track(false);
+            }
         }
     }
     player.stop_playback();
@@ -1903,7 +1954,7 @@ pub fn trigger_play(mode: &str, query: Option<&str>) -> Result<YMusicStatus, Str
 }
 
 pub fn trigger_control(action: &str) -> Result<YMusicStatus, String> {
-    if !matches!(action, "play" | "pause" | "toggle" | "next" | "prev" | "like" | "dislike" | "stop") {
+    if !matches!(action, "play" | "pause" | "toggle" | "next" | "prev" | "like" | "dislike" | "repeat" | "stop") {
         return Err(format!("Unsupported ymusic action: {action}"));
     }
     if action == "stop" {
