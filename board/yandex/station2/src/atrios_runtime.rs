@@ -406,4 +406,33 @@ mod tests {
         let clk_bar = (1..=23).filter(|&x| clk[(15 * 25 + x) * 3] >= 180).count();
         assert!((10..=13).contains(&clk_bar));
     }
+
+    #[test]
+    fn multi_timer_show_pin_and_hide_intents() {
+        use local_ai::{parse_local_intent, LocalIntent};
+        assert_eq!(
+            parse_local_intent("Атри, какие таймеры есть", "Atri"),
+            Some(LocalIntent::QueryTimers)
+        );
+        assert_eq!(
+            parse_local_intent("Атри, покажи таймер на 20 минут", "Atri"),
+            Some(LocalIntent::ShowTimer { target_secs: Some(1200), index: None, pin: false })
+        );
+        assert_eq!(
+            parse_local_intent("Атри, покажи второй таймер и оставь на экране", "Atri"),
+            Some(LocalIntent::ShowTimer { target_secs: None, index: Some(1), pin: true })
+        );
+        assert_eq!(
+            parse_local_intent("Атри, оставь на экране", "Atri"),
+            Some(LocalIntent::ShowTimer { target_secs: None, index: None, pin: true })
+        );
+        assert_eq!(
+            parse_local_intent("Атри, убери таймер с экрана", "Atri"),
+            Some(LocalIntent::HideTimerDisplay)
+        );
+        assert_eq!(
+            parse_local_intent("Атри, отмени таймер", "Atri"),
+            Some(LocalIntent::CancelTimers)
+        );
+    }
 }

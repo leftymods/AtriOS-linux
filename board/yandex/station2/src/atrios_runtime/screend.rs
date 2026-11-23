@@ -4,13 +4,14 @@ use std::time::{Duration, Instant};
 
 use crate::json::Json;
 use crate::light::{
-    is_bt_active, render_clock_frame, render_clock_with_timer_bar, render_error_frame,
-    render_timer_frame, screen_send_frame_raw, SCREEN_MODE_FILE,
+    is_bt_active, render_clock_frame, render_error_frame, render_timer_frame,
+    screen_send_frame_raw, SCREEN_MODE_FILE,
 };
 use crate::status::active_error;
 use crate::sys::{format_local, now_unix_i64, tzset};
 
 const TIMERS_FILE: &str = "/var/run/atrios/timers.json";
+const TIMER_DISPLAY_FILE: &str = "/var/run/atrios/timer_display.json";
 
 fn get_screen_mode() -> String {
     fs::read_to_string(SCREEN_MODE_FILE)
@@ -20,24 +21,41 @@ fn get_screen_mode() -> String {
         .unwrap_or_else(|| "clock".into())
 }
 
-/// Returns (remaining_secs, total_secs) for the soonest active timer, if any.
-fn soonest_active_timer() -> Option<(u64, u64)> {
+/// Returns (remaining_secs, total_secs) ONLY when timer_display.json requests displaying
+/// an active timer (either pinned == true, or now < until). Auto-hides back to clock after timeout.
+fn active_displayed_timer() -> Option<(u64, u64)> {
+    let disp_raw = fs::read_to_string(TIMER_DISPLAY_FILE).ok()?;
+    let dj = Json::parse(&disp_raw).ok()?;
+    let timer_id = dj.get("timer_id").and_then(|v| v.as_i64()).unwrap_or(0) as u64;
+    let until = dj.get("until").and_then(|v| v.as_i64()).unwrap_or(0);
+    let pinned = dj.get("pinned").and_then(|v| v.as_bool()).unwrap_or(false);
+    let now = now_unix_i64();
+    if !pinned && now >= until {
+        return None;
+    }
+
     let raw = fs::read_to_string(TIMERS_FILE).ok()?;
     let j = Json::parse(&raw).ok()?;
     let arr = j.as_arr()?;
-    let now = now_unix_i64();
-    let mut best: Option<(u64, u64)> = None;
+    // Prefer exact timer_id; if not found (or 0), fall back to soonest active timer
+    let mut exact: Option<(u64, u64)> = None;
+    let mut soonest: Option<(u64, u64)> = None;
     for item in arr {
+        let id = item.get("id").and_then(|v| v.as_i64()).unwrap_or(0) as u64;
         let fire_at = item.get("fire_at").and_then(|v| v.as_i64()).unwrap_or(0);
         let total = item.get("total_secs").and_then(|v| v.as_i64()).unwrap_or(1).max(1) as u64;
         if fire_at > now {
             let rem = (fire_at - now) as u64;
-            if best.map(|(b_rem, _)| rem < b_rem).unwrap_or(true) {
-                best = Some((rem, total));
+            if timer_id != 0 && id == timer_id {
+                exact = Some((rem, total));
+                break;
+            }
+            if soonest.map(|(b_rem, _)| rem < b_rem).unwrap_or(true) {
+                soonest = Some((rem, total));
             }
         }
     }
-    best
+    exact.or(soonest)
 }
 
 pub fn run(_args: &[String]) -> i32 {
@@ -73,29 +91,14 @@ pub fn run(_args: &[String]) -> i32 {
             last_tz = cur_tz;
         }
         let bt = is_bt_active();
-        if let Some((rem, total)) = soonest_active_timer() {
-            // If <= 60s left, lock on live MM:SS countdown.
-            // If > 60s left, show live countdown 8s / clock+timer-bar 4s cycle.
-            let elapsed_s = t0.elapsed().as_secs();
-            let show_timer = rem <= 60 || (elapsed_s % 12) < 8;
+        if let Some((rem, total)) = active_displayed_timer() {
             let colon_on = (t0.elapsed().as_millis() / 500) % 2 == 0;
-            if show_timer {
-                let key = format!("T:{rem}:{total}:{colon_on}:{bt}");
-                if key != last_rendered {
-                    let buf = render_timer_frame(rem, total, colon_on, bt, 200, 2, None);
-                    screen_send_frame_raw(&buf);
-                    last_rendered = key;
-                    last_bt = Some(bt);
-                }
-            } else {
-                let now = format_local("%H:%M", None);
-                let key = format!("CT:{now}:{rem}:{total}:{bt}");
-                if key != last_rendered {
-                    let buf = render_clock_with_timer_bar(&now, bt, 200, rem, total);
-                    screen_send_frame_raw(&buf);
-                    last_rendered = key;
-                    last_bt = Some(bt);
-                }
+            let key = format!("T:{rem}:{total}:{colon_on}:{bt}");
+            if key != last_rendered {
+                let buf = render_timer_frame(rem, total, colon_on, bt, 200, 2, None);
+                screen_send_frame_raw(&buf);
+                last_rendered = key;
+                last_bt = Some(bt);
             }
             thread::sleep(Duration::from_millis(250));
             continue;

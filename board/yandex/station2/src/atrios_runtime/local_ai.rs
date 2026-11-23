@@ -12,6 +12,8 @@ use crate::light::SCREEN_MODE_FILE;
 use crate::sys::{atomic_write_bytes, format_local, kill, now_unix_i64};
 
 const TIMERS_FILE: &str = "/var/run/atrios/timers.json";
+const TIMER_DISPLAY_FILE: &str = "/var/run/atrios/timer_display.json";
+const TIMER_DISPLAY_DEFAULT_SECS: i64 = 15;
 const ALARMS_FILE: &str = "/var/lib/atrios/alarms.json";
 
 static ALERT_RINGING: AtomicBool = AtomicBool::new(false);
@@ -38,6 +40,8 @@ pub struct AlarmItem {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LocalIntent {
     SetTimer { secs: u64 },
+    ShowTimer { target_secs: Option<u64>, index: Option<usize>, pin: bool },
+    HideTimerDisplay,
     CancelTimers,
     QueryTimers,
     SetAlarm { hour: u8, minute: u8 },
@@ -85,6 +89,26 @@ fn load_timers_disk() -> Vec<TimerItem> {
         }
     }
     out
+}
+
+fn set_timer_display(timer_id: u64, pinned: bool) {
+    let until = now_unix_i64() + TIMER_DISPLAY_DEFAULT_SECS;
+    let j = obj(vec![
+        ("timer_id", Json::Num(timer_id as f64)),
+        ("until", Json::Num(until as f64)),
+        ("pinned", Json::Bool(pinned)),
+    ]);
+    let _ = fs::create_dir_all("/var/run/atrios");
+    let _ = atomic_write_bytes(
+        Path::new(TIMER_DISPLAY_FILE),
+        j.to_string_compact().as_bytes(),
+        0o644,
+        false,
+    );
+}
+
+fn clear_timer_display() {
+    let _ = fs::remove_file(TIMER_DISPLAY_FILE);
 }
 
 fn save_timers_disk(timers: &[TimerItem]) {
@@ -476,13 +500,45 @@ pub fn parse_local_intent(text: &str, wake_word: &str) -> Option<LocalIntent> {
         matches!(w, "сколько" | "какие" | "какой" | "статус" | "покажи" | "осталось" | "во")
     });
 
+    let has_show = words.iter().any(|&w| {
+        matches!(w, "покажи" | "показать" | "выведи" | "открой" | "отобрази")
+    });
+    let has_pin = words.iter().any(|&w| {
+        matches!(w, "оставь" | "оставить" | "закрепи" | "закрепить" | "убирай" | "держи" | "зафиксируй")
+    });
+    let has_screen_word = words.iter().any(|&w| {
+        w.starts_with("экран") || w.starts_with("диспле")
+    });
+    let has_set_verb = words.iter().any(|&w| {
+        matches!(w, "поставь" | "поставить" | "установи" | "установить" | "заведи" | "завести" | "засеки" | "засечь" | "добавь" | "создай" | "напомни")
+    });
+    let ordinal_idx = if words.iter().any(|&w| w.starts_with("перв")) {
+        Some(0usize)
+    } else if words.iter().any(|&w| w.starts_with("втор")) {
+        Some(1usize)
+    } else if words.iter().any(|&w| w.starts_with("трет")) {
+        Some(2usize)
+    } else {
+        None
+    };
+
     if has_timer {
+        if has_cancel && has_screen_word {
+            return Some(LocalIntent::HideTimerDisplay);
+        }
         if has_cancel {
             return Some(LocalIntent::CancelTimers);
         }
         // Only parse duration from words after the timer keyword so stray wake words ("три") never leak in
         let tail = timer_pos.map(|p| &words[p + 1..]).unwrap_or(&words[..]);
         let dur = parse_russian_duration_secs(tail).or_else(|| parse_russian_duration_secs(&words));
+        if (has_show || has_pin) && !has_set_verb {
+            return Some(LocalIntent::ShowTimer {
+                target_secs: dur,
+                index: ordinal_idx,
+                pin: has_pin,
+            });
+        }
         if has_query && dur.is_none() {
             return Some(LocalIntent::QueryTimers);
         }
@@ -490,6 +546,15 @@ pub fn parse_local_intent(text: &str, wake_word: &str) -> Option<LocalIntent> {
             return Some(LocalIntent::SetTimer { secs });
         }
         return Some(LocalIntent::QueryTimers);
+    }
+
+    // "оставь на экране" / "не убирай с экрана" without repeating the word "таймер"
+    if has_pin && has_screen_word {
+        return Some(LocalIntent::ShowTimer {
+            target_secs: None,
+            index: ordinal_idx,
+            pin: true,
+        });
     }
 
     if words.iter().any(|&w| w == "осталось") && words.iter().any(|&w| w == "сколько") {
@@ -651,7 +716,7 @@ pub fn execute_local_intent(intent: LocalIntent) {
         LocalIntent::SetTimer { secs } => {
             let now = now_unix_i64();
             let fire_at = now + secs as i64;
-            {
+            let new_id = {
                 let mut s = store().lock().unwrap();
                 let id = s.next_id;
                 s.next_id += 1;
@@ -661,13 +726,78 @@ pub fn execute_local_intent(intent: LocalIntent) {
                     total_secs: secs,
                 });
                 save_timers_disk(&s.timers);
-            }
+                id
+            };
+            set_timer_display(new_id, false);
             let lbl = format!("TMR {}", format_duration_short(secs));
-            println!("[local-ai] timer set: {secs}s ({lbl})");
+            println!("[local-ai] timer set: id={new_id} {secs}s ({lbl}) [auto-hide 15s]");
             show_timer_popup_async("timer_set", Some(secs.to_string()));
             let spoken = format!("Поставила таймер на {}!", format_duration_ru(secs));
             if !speak_via_remote_tts(&spoken, "happy", false) {
                 play_command_chime("timer_set");
+            }
+        }
+        LocalIntent::ShowTimer { target_secs, index, pin } => {
+            let now = now_unix_i64();
+            let mut active: Vec<TimerItem> = {
+                let s = store().lock().unwrap();
+                s.timers.iter().filter(|t| t.fire_at > now).cloned().collect()
+            };
+            active.sort_by_key(|t| t.fire_at);
+            if active.is_empty() {
+                clear_timer_display();
+                if !speak_via_remote_tts("Активных таймеров сейчас нет.", "neutral", false) {
+                    play_command_chime("tick");
+                    show_ticker_briefly("NO TMR");
+                }
+                return;
+            }
+            let picked = if let Some(req) = target_secs {
+                active
+                    .iter()
+                    .min_by_key(|t| t.total_secs.abs_diff(req))
+                    .cloned()
+                    .unwrap()
+            } else if let Some(idx) = index {
+                active.get(idx).or_else(|| active.first()).cloned().unwrap()
+            } else {
+                let cur_id = fs::read_to_string(TIMER_DISPLAY_FILE)
+                    .ok()
+                    .and_then(|raw| Json::parse(&raw).ok())
+                    .and_then(|j| j.get("timer_id").and_then(|v| v.as_i64()))
+                    .unwrap_or(0) as u64;
+                active
+                    .iter()
+                    .find(|t| t.id == cur_id)
+                    .or_else(|| active.first())
+                    .cloned()
+                    .unwrap()
+            };
+            let rem = (picked.fire_at - now).max(1) as u64;
+            set_timer_display(picked.id, pin);
+            println!(
+                "[local-ai] show timer id={} total={}s rem={}s pinned={pin}",
+                picked.id, picked.total_secs, rem
+            );
+            show_timer_popup_async("timer_set", Some(rem.to_string()));
+            let spoken = if pin {
+                format!("Оставила таймер на экране. Осталось {}.", format_duration_ru(rem))
+            } else {
+                format!("До конца таймера осталось {}.", format_duration_ru(rem))
+            };
+            if !speak_via_remote_tts(&spoken, "neutral", false) {
+                let fallback = format!("До конца таймера осталось {}.", format_duration_ru(rem));
+                if !speak_via_remote_tts(&fallback, "neutral", false) {
+                    play_command_chime("tick");
+                }
+            }
+        }
+        LocalIntent::HideTimerDisplay => {
+            clear_timer_display();
+            let _ = fs::write(SCREEN_MODE_FILE, "clock");
+            println!("[local-ai] timer hidden from display (still running in background)");
+            if !speak_via_remote_tts("Готово.", "neutral", false) {
+                play_command_chime("tick");
             }
         }
         LocalIntent::CancelTimers => {
@@ -676,6 +806,7 @@ pub fn execute_local_intent(intent: LocalIntent) {
                 s.timers.clear();
                 save_timers_disk(&s.timers);
             }
+            clear_timer_display();
             stop_ringing();
             println!("[local-ai] all timers cancelled");
             show_timer_popup_async("timer_off", None);
@@ -685,29 +816,52 @@ pub fn execute_local_intent(intent: LocalIntent) {
         }
         LocalIntent::QueryTimers => {
             let now = now_unix_i64();
-            let rem = {
+            let mut active: Vec<TimerItem> = {
                 let s = store().lock().unwrap();
-                s.timers
-                    .iter()
-                    .filter(|t| t.fire_at > now)
-                    .map(|t| (t.fire_at - now) as u64)
-                    .min()
+                s.timers.iter().filter(|t| t.fire_at > now).cloned().collect()
             };
-            let (lbl, spoken) = match rem {
-                Some(r) => (
-                    format!("TMR {}", format_duration_short(r)),
-                    format!("До конца таймера осталось {}.", format_duration_ru(r)),
-                ),
-                None => ("NO TMR".into(), "Активных таймеров сейчас нет.".into()),
-            };
-            println!("[local-ai] query timers -> {lbl}");
-            if let Some(r) = rem {
-                show_timer_popup_async("timer_set", Some(r.to_string()));
+            active.sort_by_key(|t| t.fire_at);
+            if active.is_empty() {
+                clear_timer_display();
+                println!("[local-ai] query timers -> NO TMR");
+                if !speak_via_remote_tts("Активных таймеров сейчас нет.", "neutral", false) {
+                    play_command_chime("tick");
+                    show_ticker_briefly("NO TMR");
+                }
+                return;
             }
-            if !speak_via_remote_tts(&spoken, "neutral", false) {
-                play_command_chime("tick");
-                if rem.is_none() {
-                    show_ticker_briefly(&lbl);
+            let first = &active[0];
+            let first_rem = (first.fire_at - now).max(1) as u64;
+            set_timer_display(first.id, false);
+            show_timer_popup_async("timer_set", Some(first_rem.to_string()));
+            if active.len() == 1 {
+                let spoken = format!("До конца таймера осталось {}.", format_duration_ru(first_rem));
+                println!("[local-ai] query timers (1) -> {spoken}");
+                if !speak_via_remote_tts(&spoken, "neutral", false) {
+                    play_command_chime("tick");
+                }
+            } else {
+                let mut parts = vec![format!(
+                    "Сейчас {} {}.",
+                    active.len(),
+                    ru_plural(active.len() as u64, "таймер", "таймера", "таймеров")
+                )];
+                for t in &active {
+                    let r = (t.fire_at - now).max(1) as u64;
+                    parts.push(format!(
+                        "На {} — осталось {}.",
+                        format_duration_ru(t.total_secs),
+                        format_duration_ru(r)
+                    ));
+                }
+                let spoken = parts.join(" ");
+                println!("[local-ai] query timers ({}) -> {spoken}", active.len());
+                if !speak_via_remote_tts(&spoken, "neutral", false) {
+                    for t in &active {
+                        let r = (t.fire_at - now).max(1) as u64;
+                        let s_one = format!("До конца таймера осталось {}.", format_duration_ru(r));
+                        let _ = speak_via_remote_tts(&s_one, "neutral", false);
+                    }
                 }
             }
         }
