@@ -110,6 +110,9 @@ data class OtaStatus(
                 downloadedBytes = obj.optLong("downloaded_bytes", 0L),
                 rollbackAvailable = obj.optBoolean("rollback_available", false),
                 lastCheckTs = obj.optLong("last_check_ts", 0L),
+                audioBass = obj.optDouble("audio_bass", 0.0).toFloat().coerceIn(0f, 1f),
+                audioMid = obj.optDouble("audio_mid", 0.0).toFloat().coerceIn(0f, 1f),
+                audioEnergy = obj.optDouble("audio_energy", 0.0).toFloat().coerceIn(0f, 1f),
                 updatedTs = obj.optLong("updated_ts", 0L),
                 rebootRequired = obj.optBoolean("reboot_required", false)
             )
@@ -355,6 +358,9 @@ data class YMusicStatus(
     val durationMs: Long = 0L,
     val liked: Boolean = false,
     val error: String? = null,
+    val audioBass: Float = 0f,
+    val audioMid: Float = 0f,
+    val audioEnergy: Float = 0f,
     val updatedTs: Long = 0L
 ) {
     val isActive: Boolean

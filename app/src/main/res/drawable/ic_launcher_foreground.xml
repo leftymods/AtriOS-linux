@@ -4,13 +4,16 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
+    <!-- Outer acoustic speaker ring -->
     <path
-        android:fillColor="#FFFFEE00"
-        android:pathData="M54,24 C69,24 81,36 81,51 C81,66 69,78 54,78 C39,78 27,66 27,51 C27,36 39,24 54,24 Z"/>
-    <path
-        android:fillColor="#050507"
-        android:pathData="M47,40 L67,51 L47,62 Z"/>
-    <path
-        android:fillColor="#FFFF1C96"
-        android:pathData="M54,82 C62,82 69,84 74,87 C68,90 61,91 54,91 C47,91 40,90 34,87 C39,84 46,82 54,82 Z"/>
+        android:fillColor="#00000000"
+        android:strokeColor="#FFFFEE00"
+        android:strokeWidth="3.5"
+        android:pathData="M54,28 A26,26 0 1,1 53.99,28 Z"/>
+    <!-- Inner glowing soundwave bars forming stylized 'A' -->
+    <path android:fillColor="#FFFFEE00" android:pathData="M39,50 L43,50 L43,60 L39,60 Z"/>
+    <path android:fillColor="#FFFF8C00" android:pathData="M46,42 L50,42 L50,66 L46,66 Z"/>
+    <path android:fillColor="#FFFFFFFF" android:pathData="M53,36 L57,36 L57,72 L53,72 Z"/>
+    <path android:fillColor="#FFFF2E7A" android:pathData="M60,44 L64,44 L64,64 L60,64 Z"/>
+    <path android:fillColor="#FFFFEE00" android:pathData="M67,51 L71,51 L71,59 L67,59 Z"/>
 </vector>

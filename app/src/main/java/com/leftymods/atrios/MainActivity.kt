@@ -21,6 +21,7 @@ import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.scaleOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.core.spring
@@ -325,7 +326,7 @@ fun AtriOSApp(
 
     LaunchedEffect(connected, status.ymusic.isActive) {
         while (connected && status.ymusic.isActive) {
-            delay(4000)
+            delay(1800)
             client.ymusicStatus()
         }
     }
@@ -510,7 +511,7 @@ fun AtriOSApp(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .padding(horizontal = 16.dp, vertical = 6.dp)
-                                    .graphicsLayer { translationX = animatedOffset }
+                                    .graphicsLayer { translationX = animatedOffset; alpha = (1f - kotlin.math.abs(animatedOffset) / 420f).coerceIn(0.35f, 1f) }
                                     .pointerInput(ym.trackId) {
                                         detectHorizontalDragGestures(
                                             onDragEnd = {
@@ -527,7 +528,7 @@ fun AtriOSApp(
                                             },
                                             onDragCancel = { dragOffset = 0f },
                                             onHorizontalDrag = { _, amt ->
-                                                dragOffset = (dragOffset + amt * 0.75f).coerceIn(-140f, 140f)
+                                                dragOffset = (dragOffset + amt).coerceIn(-340f, 340f)
                                             }
                                         )
                                     }
@@ -598,10 +599,20 @@ fun AtriOSApp(
                             ) {
                                 AppTab.entries.forEach { tab ->
                                     val sel = selectedTab == tab
+                                    val pillBg by animateColorAsState(
+                                        if (sel) palette.accent.copy(alpha = 0.18f) else Color.Transparent,
+                                        tween(240),
+                                        label = "navBg"
+                                    )
+                                    val iconTint by animateColorAsState(
+                                        if (sel) palette.accent else Color(0xFF7A7A86),
+                                        tween(240),
+                                        label = "navTint"
+                                    )
                                     Row(
                                         modifier = Modifier
                                             .clip(RoundedCornerShape(99.dp))
-                                            .background(if (sel) palette.accent.copy(alpha = 0.16f) else Color.Transparent)
+                                            .background(pillBg)
                                             .clickable {
                                                 selectedTab = tab
                                                 if (tab == AppTab.SETTINGS) settingsPage = SettingsPage.ROOT
@@ -615,19 +626,9 @@ fun AtriOSApp(
                                         verticalAlignment = Alignment.CenterVertically,
                                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                                     ) {
-                                        Icon(
-                                            tab.icon,
-                                            contentDescription = tab.label,
-                                            tint = if (sel) palette.accent else Color(0xFF7A7A86),
-                                            modifier = Modifier.size(22.dp)
-                                        )
-                                        if (sel) {
-                                            Text(
-                                                tab.label,
-                                                color = palette.accent,
-                                                fontSize = 13.sp,
-                                                fontWeight = FontWeight.Bold
-                                            )
+                                        Icon(tab.icon, contentDescription = tab.label, tint = iconTint, modifier = Modifier.size(22.dp))
+                                        AnimatedVisibility(visible = sel) {
+                                            Text(tab.label, color = palette.accent, fontSize = 13.sp, fontWeight = FontWeight.Bold, maxLines = 1)
                                         }
                                     }
                                 }
@@ -683,7 +684,9 @@ fun AtriOSApp(
                                     settingsPage = SettingsPage.ACCOUNT
                                 },
                                 onOpenBigPlayer = { showBigPlayer = true },
-                                onOpenVolumeSheet = { showVolumeSheet = true }
+                                onOpenVolumeSheet = { showVolumeSheet = true },
+                                volume = sliderVol,
+                                mute = status.mute
                             )
                         }
 

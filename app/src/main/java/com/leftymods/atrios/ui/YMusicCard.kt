@@ -32,6 +32,7 @@ import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -103,8 +104,27 @@ private fun parseHexColor(hex: String, fallback: Color): Color {
 fun MyWaveAnimatedAura(
     isPlaying: Boolean,
     palette: AppPalette,
+    coverUrl: String = "",
+    audioBass: Float = 0f,
+    audioMid: Float = 0f,
+    audioEnergy: Float = 0f,
     modifier: Modifier = Modifier
 ) {
+    var extracted by remember(coverUrl) { mutableStateOf(CoverArtCache.getColors(coverUrl)) }
+    LaunchedEffect(coverUrl) {
+        if (coverUrl.isNotBlank()) {
+            CoverArtCache.load(coverUrl)
+            extracted = CoverArtCache.getColors(coverUrl)
+        } else {
+            extracted = null
+        }
+    }
+    val col1 by animateColorAsState(extracted?.c1 ?: col1, tween(900), label = "ac1")
+    val col2 by animateColorAsState(extracted?.c2 ?: col2, tween(900), label = "ac2")
+    val col3 by animateColorAsState(extracted?.c3 ?: col3, tween(900), label = "ac3")
+    val bassSmooth by animateFloatAsState(if (isPlaying) audioBass else 0f, spring(dampingRatio = 0.7f, stiffness = 240f), label = "bs")
+    val midSmooth by animateFloatAsState(if (isPlaying) audioMid else 0f, spring(dampingRatio = 0.7f, stiffness = 240f), label = "ms")
+    val engSmooth by animateFloatAsState(if (isPlaying) audioEnergy else 0f, spring(dampingRatio = 0.7f, stiffness = 240f), label = "es")
     val inf = rememberInfiniteTransition(label = "waveAura")
     // Single master phase 0..2*PI with integer harmonics -> mathematically 100% seamless loop!
     val t by inf.animateFloat(
@@ -120,17 +140,18 @@ fun MyWaveAnimatedAura(
     Canvas(modifier = modifier) {
         val cx = size.width * 0.5f
         val cy = size.height * 0.43f
-        val breathe = 1f + 0.08f * sin(t * 2f)
-        val r = size.minDimension * 0.64f * breathe
+        val beatPulse = if (isPlaying) (0.06f * sin(t * 6f) + bassSmooth * 0.22f + engSmooth * 0.10f) else 0.05f * sin(t * 2f)
+        val voiceShimmer = if (isPlaying) (0.14f + midSmooth * 0.36f + 0.08f * kotlin.math.abs(sin(t * 9f))) else 0.18f
+        val r = size.minDimension * 0.64f * (1f + beatPulse)
 
         // Layer 1: Wide soft ambient nebula (slow orbit, 1x harmonic)
         val c1 = Offset(cx + cos(t) * size.width * 0.14f, cy + sin(t) * size.height * 0.08f)
         drawCircle(
             brush = Brush.radialGradient(
                 colorStops = arrayOf(
-                    0.0f to palette.aura2.copy(alpha = 0.72f),
-                    0.45f to palette.aura3.copy(alpha = 0.36f),
-                    0.82f to palette.aura2.copy(alpha = 0.10f),
+                    0.0f to col2.copy(alpha = 0.72f),
+                    0.45f to col3.copy(alpha = 0.36f),
+                    0.82f to col2.copy(alpha = 0.10f),
                     1.0f to Color.Transparent
                 ),
                 center = c1,
@@ -145,9 +166,9 @@ fun MyWaveAnimatedAura(
         drawCircle(
             brush = Brush.radialGradient(
                 colorStops = arrayOf(
-                    0.0f to palette.aura3.copy(alpha = 0.90f),
-                    0.42f to palette.aura3.copy(alpha = 0.48f),
-                    0.78f to palette.aura3.copy(alpha = 0.12f),
+                    0.0f to col3.copy(alpha = 0.90f),
+                    0.42f to col3.copy(alpha = 0.48f),
+                    0.78f to col3.copy(alpha = 0.12f),
                     1.0f to Color.Transparent
                 ),
                 center = c2,
@@ -162,9 +183,9 @@ fun MyWaveAnimatedAura(
         drawCircle(
             brush = Brush.radialGradient(
                 colorStops = arrayOf(
-                    0.0f to palette.aura1.copy(alpha = 0.96f),
-                    0.40f to palette.aura2.copy(alpha = 0.62f),
-                    0.76f to palette.aura1.copy(alpha = 0.14f),
+                    0.0f to col1.copy(alpha = 0.96f),
+                    0.40f to col2.copy(alpha = 0.62f),
+                    0.76f to col1.copy(alpha = 0.14f),
                     1.0f to Color.Transparent
                 ),
                 center = c3,
@@ -179,9 +200,9 @@ fun MyWaveAnimatedAura(
         drawCircle(
             brush = Brush.radialGradient(
                 colorStops = arrayOf(
-                    0.0f to Color.White.copy(alpha = 0.30f),
-                    0.35f to palette.aura1.copy(alpha = 0.68f),
-                    0.75f to palette.aura2.copy(alpha = 0.15f),
+                    0.0f to Color.White.copy(alpha = (voiceShimmer + bassSmooth * 0.25f).coerceIn(0.18f, 0.72f)),
+                    0.35f to col1.copy(alpha = 0.68f),
+                    0.75f to col2.copy(alpha = 0.15f),
                     1.0f to Color.Transparent
                 ),
                 center = c4,
@@ -207,7 +228,9 @@ fun YandexWaveFullScreen(
     onControl: (String) -> Unit,
     onOpenAccountSettings: () -> Unit,
     onOpenBigPlayer: () -> Unit = {},
-    onOpenVolumeSheet: () -> Unit = {}
+    onOpenVolumeSheet: () -> Unit = {},
+    volume: Float = 50f,
+    mute: Boolean = false
 ) {
     var searchOpen by remember { mutableStateOf(false) }
     var searchQuery by remember { mutableStateOf("") }
@@ -251,6 +274,10 @@ fun YandexWaveFullScreen(
         MyWaveAnimatedAura(
             isPlaying = ymusic.state == "playing",
             palette = palette,
+            coverUrl = ymusic.coverUrl,
+            audioBass = ymusic.audioBass,
+            audioMid = ymusic.audioMid,
+            audioEnergy = ymusic.audioEnergy,
             modifier = Modifier
                 .fillMaxWidth()
                 .fillMaxHeight(0.74f)
@@ -466,7 +493,7 @@ fun YandexWaveFullScreen(
 
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         IconButton(onClick = onOpenVolumeSheet) {
-                            Icon(Icons.Rounded.VolumeUp, contentDescription = "Громкость колонки", tint = Color.White, modifier = Modifier.size(24.dp))
+                            Icon(if (mute || volume.toInt() == 0) Icons.Rounded.VolumeOff else Icons.Rounded.VolumeUp, contentDescription = "Громкость колонки", tint = if (mute || volume.toInt() == 0) Color(0xFFFF5C8A) else Color.White, modifier = Modifier.size(24.dp))
                         }
                         IconButton(
                             onClick = { if (ymusic.loggedIn) searchOpen = true else showOAuthDialog = true }
@@ -568,7 +595,7 @@ fun YandexWaveFullScreen(
                             color = Color(0x991C1C22),
                             modifier = Modifier
                                 .fillMaxWidth(0.92f)
-                                .graphicsLayer { translationX = pillAnimX }
+                                .graphicsLayer { translationX = pillAnimX; alpha = (1f - kotlin.math.abs(pillAnimX) / 420f).coerceIn(0.35f, 1f) }
                                 .pointerInput(ymusic.trackId) {
                                     detectHorizontalDragGestures(
                                         onDragEnd = {
@@ -583,7 +610,7 @@ fun YandexWaveFullScreen(
                                         },
                                         onDragCancel = { pillDrag = 0f },
                                         onHorizontalDrag = { _, amt ->
-                                            pillDrag = (pillDrag + amt * 0.7f).coerceIn(-120f, 120f)
+                                            pillDrag = (pillDrag + amt).coerceIn(-340f, 340f)
                                         }
                                     )
                                 }
@@ -681,7 +708,8 @@ fun YandexWaveFullScreen(
                     contentPadding = PaddingValues(horizontal = 112.dp),
                     flingBehavior = PagerDefaults.flingBehavior(
                         state = orbPagerState,
-                        pagerSnapDistance = PagerSnapDistance.atMost(6)
+                        pagerSnapDistance = PagerSnapDistance.atMost(5),
+                        snapAnimationSpec = spring(dampingRatio = 0.92f, stiffness = 175f)
                     ),
                     modifier = Modifier.fillMaxWidth().height(156.dp)
                 ) { page ->
