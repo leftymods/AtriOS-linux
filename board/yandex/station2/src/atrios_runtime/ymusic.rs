@@ -1186,7 +1186,7 @@ impl ActivePipeline {
             return false;
         }
         // Guard against rapid-skip loops if a stream exits prematurely (< 2.5s)
-        self.started_at.elapsed() >= Duration::from_millis(2500)
+        self.started_at.elapsed() >= Duration::from_millis(1000)
     }
 
     fn stop(mut self) {
@@ -1385,7 +1385,35 @@ impl PlayerState {
         }
     }
 
+    fn preview_current_track(&mut self) {
+        if let Some(p) = self.pipeline.take() {
+            p.stop();
+        }
+        let Some(track) = self.queue.get(self.index).cloned() else {
+            return;
+        };
+        if let Some(auth) = load_auth() {
+            self.status.logged_in = true;
+            self.status.uid = auth.uid;
+            self.status.login = auth.login;
+            self.status.display_name = auth.display_name;
+            self.status.avatar_url = auth.avatar_url;
+        }
+        self.status.mode = if self.mode == "none" { "wave".into() } else { self.mode.clone() };
+        self.status.state = "paused".into();
+        self.status.track_id = track.id;
+        self.status.title = track.title;
+        self.status.artist = track.artist;
+        self.status.album = track.album;
+        self.status.cover_url = track.cover_url;
+        self.status.duration_ms = track.duration_ms;
+        self.status.liked = track.liked;
+        self.status.error = None;
+        write_status(&mut self.status);
+    }
+
     fn next_track(&mut self, skipped: bool) {
+        let should_play = !skipped || self.pipeline.as_ref().map(|p| !p.paused).unwrap_or(false);
         if let Some(auth) = load_auth() {
             if self.mode == "wave" {
                 if let Some(cur) = self.queue.get(self.index) {
@@ -1394,36 +1422,63 @@ impl PlayerState {
                 }
             }
         }
-        if self.index + 1 < self.queue.len() {
-            self.index += 1;
-            self.start_current_track();
-            return;
-        }
-        if self.mode == "wave" {
+        if self.queue.is_empty() {
             if let Some(auth) = load_auth() {
-                let last_id = self.queue.last().map(|t| t.id.as_str());
-                if let Ok((bid, more)) = fetch_my_wave(&auth, last_id) {
+                if let Ok((bid, more)) = fetch_my_wave(&auth, None) {
+                    self.mode = "wave".into();
                     self.batch_id = bid;
                     self.queue = more;
                     self.index = 0;
-                    self.start_current_track();
+                    if should_play { self.start_current_track(); } else { self.preview_current_track(); }
+                    return;
+                }
+            }
+        }
+        if self.index + 1 < self.queue.len() {
+            self.index += 1;
+            if should_play { self.start_current_track(); } else { self.preview_current_track(); }
+            return;
+        }
+        if self.mode == "wave" || self.mode == "none" {
+            if let Some(auth) = load_auth() {
+                let last_id = self.queue.last().map(|t| t.id.as_str());
+                if let Ok((bid, more)) = fetch_my_wave(&auth, last_id) {
+                    self.mode = "wave".into();
+                    self.batch_id = bid;
+                    self.queue = more;
+                    self.index = 0;
+                    if should_play { self.start_current_track(); } else { self.preview_current_track(); }
                     return;
                 }
             }
         } else if !self.queue.is_empty() {
             self.index = 0;
-            self.start_current_track();
+            if should_play { self.start_current_track(); } else { self.preview_current_track(); }
             return;
         }
         self.stop_playback();
     }
 
     fn prev_track(&mut self) {
+        let should_play = self.pipeline.as_ref().map(|p| !p.paused).unwrap_or(false);
+        if self.queue.is_empty() {
+            if let Some(auth) = load_auth() {
+                if let Ok((bid, more)) = fetch_my_wave(&auth, None) {
+                    self.mode = "wave".into();
+                    self.batch_id = bid;
+                    self.queue = more;
+                    self.index = 0;
+                    if should_play { self.start_current_track(); } else { self.preview_current_track(); }
+                    return;
+                }
+            }
+        }
         if self.index > 0 {
             self.index -= 1;
-            self.start_current_track();
+            if should_play { self.start_current_track(); } else { self.preview_current_track(); }
         } else if !self.queue.is_empty() {
-            self.start_current_track();
+            self.index = self.queue.len() - 1;
+            if should_play { self.start_current_track(); } else { self.preview_current_track(); }
         }
     }
 
