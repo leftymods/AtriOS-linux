@@ -1,7 +1,7 @@
 {
   "enabled": true,
   "manifest_url": "https://ai.leftymods.tech/ota/manifest.json",
-  "ca_file": "/etc/atrios/ca.crt",
+  "ca_file": "",
   "channel": "stable",
   "auto_install": true
 }
