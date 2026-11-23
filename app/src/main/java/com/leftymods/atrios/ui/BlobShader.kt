@@ -11,12 +11,13 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ShaderBrush
+import androidx.compose.ui.graphics.StrokeCap
 import com.leftymods.atrios.ui.theme.AppPalette
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.sin
 
-private const val METABALL_AGSL = """
+private const val METABALL_GODRAYS_AGSL = """
 uniform float2 uResolution;
 uniform float uTime;
 uniform float uBass;
@@ -26,9 +27,11 @@ uniform float3 uCol2;
 uniform float3 uCol3;
 
 half4 main(float2 fragCoord) {
-    float2 uv = (fragCoord - float2(uResolution.x * 0.5, uResolution.y * 0.44)) / min(uResolution.x, uResolution.y);
-    float pulse = 1.0 + uBass * 0.22 + 0.04 * sin(uTime * 2.0);
-    uv /= pulse;
+    float2 center = float2(uResolution.x * 0.5, uResolution.y * 0.44);
+    float minDim = min(uResolution.x, uResolution.y);
+    float2 rawUv = (fragCoord - center) / minDim;
+    float pulse = 1.0 + uBass * 0.24 + 0.04 * sin(uTime * 2.0);
+    float2 uv = rawUv / pulse;
 
     // 4 sub-nuclei fused into ONE cohesive organic liquid blob via smooth metaball field
     float2 p1 = float2(cos(uTime) * 0.11, sin(uTime * 2.0) * 0.08);
@@ -47,21 +50,31 @@ half4 main(float2 fragCoord) {
     float w4 = 0.038 / (d4 * d4 + 0.028);
     float field = w1 + w2 + w3 + w4;
 
-    // Crisp outer contour with soft glowing rim
+    // Procedural Volumetric God-Rays radiating outward in multi-harmonic directions
+    float r = length(rawUv);
+    float ang = atan(rawUv.y, rawUv.x);
+    float ray1 = pow(max(0.0, sin(ang * 5.0 + uTime * 1.0)), 3.0);
+    float ray2 = pow(max(0.0, cos(ang * 8.0 - uTime * 2.0 + 1.3)), 4.0);
+    float ray3 = pow(max(0.0, sin(ang * 13.0 + uTime * 3.0)), 5.0);
+    float rayMask = smoothstep(0.14, 0.28, r) * (1.0 - smoothstep(0.28, 0.72 + uBass * 0.18, r));
+    float rays = (ray1 * 0.45 + ray2 * 0.35 + ray3 * 0.20) * rayMask * (0.48 + uBass * 0.85 + uMid * 0.35);
+
+    // Crisp outer blob contour with soft glowing rim
     float body = smoothstep(1.12, 1.85, field);
     float core = smoothstep(2.15, 3.60, field);
-    float halo = smoothstep(0.62, 1.25, field) * 0.42;
+    float halo = smoothstep(0.58, 1.25, field) * 0.40;
 
-    // Internal multi-hue swirling inside the single blob
+    // Internal multi-hue swirling inside the single blob + ray color blend
     float totalW = w1 + w2 + w3 + 0.001;
-    float3 rgb = (uCol1 * w1 + uCol2 * w2 + uCol3 * w3) / totalW;
+    float3 blobRgb = (uCol1 * w1 + uCol2 * w2 + uCol3 * w3) / totalW;
+    float3 rayRgb = mix(uCol2, uCol1, ray1) + uCol3 * (ray2 * 0.45);
 
-    // Vocal/mid shimmer & bright core highlight
     float shimmer = (0.18 + uMid * 0.45) * core;
-    rgb = mix(rgb, float3(1.0, 0.98, 0.92), clamp(shimmer, 0.0, 0.72));
+    blobRgb = mix(blobRgb, float3(1.0, 0.98, 0.92), clamp(shimmer, 0.0, 0.72));
 
-    float alpha = clamp(body + halo, 0.0, 0.96);
-    return half4(half3(rgb * alpha), half(alpha));
+    float3 finalRgb = blobRgb * (body + halo) + rayRgb * rays;
+    float alpha = clamp(body + halo + rays * 0.88, 0.0, 0.97);
+    return half4(half3(clamp(finalRgb, 0.0, 1.0)), half(alpha));
 }
 """
 
@@ -103,7 +116,7 @@ fun SingleLiquidBlobShaderAura(
 
     val agslShader = remember {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            try { RuntimeShader(METABALL_AGSL) } catch (_: Throwable) { null }
+            try { RuntimeShader(METABALL_GODRAYS_AGSL) } catch (_: Throwable) { null }
         } else null
     }
 
@@ -118,10 +131,30 @@ fun SingleLiquidBlobShaderAura(
             agslShader.setFloatUniform("uCol3", col3.red, col3.green, col3.blue)
             drawRect(brush = ShaderBrush(agslShader))
         } else {
-            // Crisp single-blob fallback for Android < 13: tight core + defined contour edge
             val cx = size.width * 0.5f
             val cy = size.height * 0.44f
             val r = size.minDimension * 0.44f * (1f + bassSmooth * 0.20f + 0.04f * sin(t * 2f))
+
+            // Volumetric diagonal God-Rays fallback
+            val rayCount = 12
+            for (i in 0 until rayCount) {
+                val baseAng = (i.toFloat() / rayCount.toFloat()) * (2f * PI.toFloat()) + t * (if (i % 2 == 0) 0.5f else -0.5f)
+                val wave = 0.5f + 0.5f * sin(t * 2f + i * 1.7f)
+                val rayLen = r * (1.25f + wave * 0.45f + bassSmooth * 0.35f)
+                val end = Offset(cx + cos(baseAng) * rayLen, cy + sin(baseAng) * rayLen)
+                val rCol = when (i % 3) { 0 -> col1; 1 -> col2; else -> col3 }
+                drawLine(
+                    brush = Brush.linearGradient(
+                        listOf(rCol.copy(alpha = (0.28f + bassSmooth * 0.25f) * wave), Color.Transparent),
+                        start = Offset(cx, cy),
+                        end = end
+                    ),
+                    start = Offset(cx, cy),
+                    end = end,
+                    strokeWidth = r * (0.22f + wave * 0.14f),
+                    cap = StrokeCap.Round
+                )
+            }
 
             val p1 = Offset(cx + cos(t) * r * 0.24f, cy + sin(t * 2f) * r * 0.18f)
             val p2 = Offset(cx - cos(t + 0.9f) * r * 0.25f, cy + cos(t) * r * 0.20f)

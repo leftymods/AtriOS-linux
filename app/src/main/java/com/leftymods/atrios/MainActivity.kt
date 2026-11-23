@@ -193,6 +193,7 @@ fun AtriOSApp(
     var selectedTab by remember { mutableStateOf(AppTab.WAVE) }
     var settingsPage by remember { mutableStateOf(SettingsPage.ROOT) }
     var showBigPlayer by remember { mutableStateOf(false) }
+    var lastUserActionMs by remember { mutableLongStateOf(0L) }
     var showVolumeSheet by remember { mutableStateOf(false) }
     var showRebootDialog by remember { mutableStateOf(false) }
     var availableAppUpdate by remember { mutableStateOf<AppReleaseInfo?>(null) }
@@ -206,7 +207,8 @@ fun AtriOSApp(
         BtControlClient(
             scope = scope,
             onStatus = { s ->
-                status = s
+                val locked = System.currentTimeMillis() - lastUserActionMs < 1600L
+                status = if (locked) s.copy(ymusic = status.ymusic) else s
                 sliderVol = s.volume.toFloat()
                 activeDevice?.let { dev ->
                     savedSpeakers = storage.upsertSpeaker(
@@ -234,7 +236,12 @@ fun AtriOSApp(
                 ymAlbumResults = albums
             },
             onYMusicOrbsUpdate = { orbs -> ymOrbs = orbs },
-            onYMusicUpdate = { ym -> status = status.copy(ymusic = ym) },
+            onYMusicUpdate = { ym ->
+                val locked = System.currentTimeMillis() - lastUserActionMs < 1600L
+                if (!locked || (ym.title.isNotBlank() && ym.title != status.ymusic.title)) {
+                    status = status.copy(ymusic = ym)
+                }
+            },
             onTimersUpdate = { list -> timers = list },
             onAlarmsUpdate = { list -> alarms = list },
             onRelayInfo = { did, gw, tok ->
@@ -269,6 +276,54 @@ fun AtriOSApp(
             }
         ).also { c ->
             c.setSavedRelayConfig(relayConfig.gatewayUrl, relayConfig.deviceId, relayConfig.token)
+        }
+    }
+
+    fun dispatchYMusicControl(action: String) {
+        lastUserActionMs = System.currentTimeMillis()
+        val cur = status.ymusic
+        when (action) {
+            "pause" -> status = status.copy(ymusic = cur.copy(state = "paused"))
+            "play" -> status = status.copy(ymusic = cur.copy(state = "playing"))
+            "repeat" -> status = status.copy(ymusic = cur.copy(repeat = !cur.repeat))
+            "like" -> status = status.copy(ymusic = cur.copy(liked = !cur.liked))
+            "next" -> {
+                if (cur.nextTitle.isNotBlank()) {
+                    status = status.copy(
+                        ymusic = cur.copy(
+                            trackId = "opt_next_${lastUserActionMs}",
+                            title = cur.nextTitle,
+                            artist = cur.nextArtist,
+                            coverUrl = cur.nextCoverUrl.ifBlank { cur.coverUrl },
+                            prevTitle = cur.title,
+                            prevArtist = cur.artist,
+                            prevCoverUrl = cur.coverUrl
+                        )
+                    )
+                }
+            }
+            "prev" -> {
+                if (cur.prevTitle.isNotBlank()) {
+                    status = status.copy(
+                        ymusic = cur.copy(
+                            trackId = "opt_prev_${lastUserActionMs}",
+                            title = cur.prevTitle,
+                            artist = cur.prevArtist,
+                            coverUrl = cur.prevCoverUrl.ifBlank { cur.coverUrl },
+                            nextTitle = cur.title,
+                            nextArtist = cur.artist,
+                            nextCoverUrl = cur.coverUrl
+                        )
+                    )
+                }
+            }
+        }
+        client.ymusicControl(action)
+        if (action == "next" || action == "prev") {
+            scope.launch {
+                delay(550)
+                client.ymusicStatus()
+            }
         }
     }
 
@@ -522,15 +577,13 @@ fun AtriOSApp(
                                                 Text(artist, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                             }
                                         }
-                                        IconButton(onClick = { if (interactive) client.ymusicControl("like") }, modifier = Modifier.size(32.dp)) {
+                                        IconButton(onClick = { if (interactive) dispatchYMusicControl("like") }, modifier = Modifier.size(32.dp)) {
                                             Icon(if (liked) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder, contentDescription = null, tint = if (liked) Color(0xFFFF2E7A) else Color.White, modifier = Modifier.size(20.dp))
                                         }
                                         IconButton(
                                             onClick = {
                                                 if (interactive) {
-                                                    val nxt = if (playing) "paused" else "playing"
-                                                    status = status.copy(ymusic = ym.copy(state = nxt))
-                                                    client.ymusicControl(if (playing) "pause" else "play")
+                                                    dispatchYMusicControl(if (playing) "pause" else "play")
                                                 }
                                             },
                                             modifier = Modifier.size(34.dp)
@@ -543,14 +596,8 @@ fun AtriOSApp(
 
                             SwipeableTwoCardRibbon(
                                 trackKey = ym.trackId,
-                                onSwipeNext = {
-                                    client.ymusicControl("next")
-                                    scope.launch { delay(350); client.ymusicStatus() }
-                                },
-                                onSwipePrev = {
-                                    client.ymusicControl("prev")
-                                    scope.launch { delay(350); client.ymusicStatus() }
-                                },
+                                onSwipeNext = { dispatchYMusicControl("next") },
+                                onSwipePrev = { dispatchYMusicControl("prev") },
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .padding(horizontal = 16.dp, vertical = 6.dp),
@@ -668,13 +715,7 @@ fun AtriOSApp(
                                     scope.launch { delay(900); client.ymusicStatus() }
                                 },
                                 onSearch = { q -> client.ymusicSearch(q) },
-                                onControl = { action ->
-                                    if (action == "pause" || action == "play") {
-                                        status = status.copy(ymusic = status.ymusic.copy(state = if (action == "pause") "paused" else "playing"))
-                                    }
-                                    client.ymusicControl(action)
-                                    if (action == "next" || action == "prev") scope.launch { delay(350); client.ymusicStatus() }
-                                },
+                                onControl = { action -> dispatchYMusicControl(action) },
                                 onOpenAccountSettings = {
                                     selectedTab = AppTab.SETTINGS
                                     settingsPage = SettingsPage.ACCOUNT
@@ -710,12 +751,28 @@ fun AtriOSApp(
                         }
 
                         AppTab.SETTINGS -> {
+                            AnimatedContent(
+                                targetState = settingsPage,
+                                transitionSpec = {
+                                    val forward = targetState != SettingsPage.ROOT
+                                    val dir = if (forward) 1 else -1
+                                    (slideInHorizontally(spring(dampingRatio = 0.86f, stiffness = 340f)) { (it * 0.32f).toInt() * dir } +
+                                        scaleIn(initialScale = 0.96f, animationSpec = tween(220)) +
+                                        fadeIn(tween(200)))
+                                        .togetherWith(
+                                            slideOutHorizontally(spring(dampingRatio = 0.86f, stiffness = 340f)) { -(it * 0.25f).toInt() * dir } +
+                                                scaleOut(targetScale = 0.96f, animationSpec = tween(170)) +
+                                                fadeOut(tween(150))
+                                        )
+                                },
+                                label = "settingsSubmenuTransition"
+                            ) { curPage ->
                             LazyColumn(
                                 modifier = Modifier.fillMaxSize().statusBarsPadding().padding(horizontal = 16.dp),
                                 verticalArrangement = Arrangement.spacedBy(12.dp),
                                 contentPadding = PaddingValues(vertical = 14.dp)
                             ) {
-                                if (settingsPage == SettingsPage.ROOT) {
+                                if (curPage == SettingsPage.ROOT) {
                                     item {
                                         Row(
                                             modifier = Modifier.fillMaxWidth(),
@@ -788,11 +845,11 @@ fun AtriOSApp(
                                             ) {
                                                 Icon(Icons.Rounded.ArrowBack, contentDescription = "Назад", tint = Color.White)
                                             }
-                                            Text(settingsPage.title, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 22.sp)
+                                            Text(curPage.title, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 22.sp)
                                         }
                                     }
 
-                                    when (settingsPage) {
+                                    when (curPage) {
                                         SettingsPage.ACCOUNT -> {
                                             item {
                                                 YandexAccountCard(
@@ -1008,6 +1065,7 @@ fun AtriOSApp(
                                         SettingsPage.ROOT -> Unit
                                     }
                                 }
+                            }
                             }
                         }
                     }

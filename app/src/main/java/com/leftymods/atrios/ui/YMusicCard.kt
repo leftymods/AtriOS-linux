@@ -12,6 +12,9 @@ import android.webkit.WebViewClient
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -167,7 +170,7 @@ fun YandexWaveFullScreen(
         if (orbs.isNotEmpty()) orbs else listOf(
             YMusicOrb("likes", "Мне нравится", "Коллекция", "likes", "", "", "#FF1F8E"),
             YMusicOrb("chart", "Тренды", "Чарт", "chart", "", "", "#FF4D00"),
-            YMusicOrb("party", "Вечериниться", "Настроение", "station", "mood:party", "", "#00C896"),
+            YMusicOrb("party", "Вечериниться", "Настроение", "station", "activity:party", "", "#00C896"),
             YMusicOrb("run", "Бегаю и не устаю", "Занятие", "station", "activity:workout", "", "#4C7CFF"),
             YMusicOrb("calm", "Спокойное", "Настроение", "station", "mood:calm", "", "#9B6BFF")
         )
@@ -194,42 +197,51 @@ fun YandexWaveFullScreen(
 
         if (searchOpen && ymusic.loggedIn) {
             BackHandler { searchOpen = false; searchQuery = ""; onSearch("") }
-            // Clean full-screen Search Overlay (Tracks + Albums with cover art)
+            val focusRequester = remember { FocusRequester() }
+            LaunchedEffect(Unit) {
+                delay(80)
+                try { focusRequester.requestFocus() } catch (_: Exception) {}
+            }
             Column(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(OledBlack.copy(alpha = 0.96f))
+                    .background(OledBlack.copy(alpha = 0.97f))
                     .statusBarsPadding()
                     .padding(horizontal = 16.dp, vertical = 10.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
+                verticalArrangement = Arrangement.spacedBy(14.dp)
             ) {
+                // Sleek Search Bar Header
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    IconButton(onClick = { searchOpen = false; searchQuery = ""; onSearch("") }) {
+                    IconButton(
+                        onClick = { searchOpen = false; searchQuery = ""; onSearch("") },
+                        modifier = Modifier.size(42.dp).clip(CircleShape).background(OledCard)
+                    ) {
                         Icon(Icons.Rounded.ArrowBack, contentDescription = "Назад", tint = Color.White)
                     }
                     OutlinedTextField(
                         value = searchQuery,
                         onValueChange = { searchQuery = it },
-                        placeholder = { Text("Трек, альбом или исполнитель...") },
+                        placeholder = { Text("Трек, альбом или артист...", color = Color(0xFF7A7A85)) },
                         singleLine = true,
                         shape = RoundedCornerShape(99.dp),
-                        modifier = Modifier.weight(1f),
+                        modifier = Modifier.weight(1f).focusRequester(focusRequester),
                         colors = OutlinedTextFieldDefaults.colors(
                             focusedContainerColor = OledCardHigh,
                             unfocusedContainerColor = OledCard,
                             focusedBorderColor = palette.accent,
-                            unfocusedBorderColor = Color(0xFF28282E)
+                            unfocusedBorderColor = Color(0xFF282830)
                         ),
+                        leadingIcon = { Icon(Icons.Rounded.Search, contentDescription = null, tint = palette.accent) },
                         trailingIcon = {
                             if (searching) {
                                 CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp, color = palette.accent)
                             } else if (searchQuery.isNotEmpty()) {
                                 IconButton(onClick = { searchQuery = ""; onSearch("") }) {
-                                    Icon(Icons.Rounded.Clear, contentDescription = "Очистить")
+                                    Icon(Icons.Rounded.Clear, contentDescription = "Очистить", tint = Color.White)
                                 }
                             }
                         }
@@ -237,35 +249,80 @@ fun YandexWaveFullScreen(
                 }
 
                 LazyColumn(
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                    contentPadding = PaddingValues(bottom = 24.dp),
                     modifier = Modifier.fillMaxSize()
                 ) {
-                    if (searchQuery.trim().length >= 2 && albumResults.isNotEmpty()) {
+                    if (searchQuery.trim().length < 2) {
                         item {
-                            Text("Альбомы", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                            Text("Быстрые подборки и жанры", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
                         }
                         item {
-                            LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            val quickChips = listOf(
+                                "Фонк" to "phonk",
+                                "Электроника" to "электронная музыка",
+                                "Вечеринка" to "танцевальная вечеринка",
+                                "Рок-хиты" to "рок хиты",
+                                "Чиллаут" to "chillout lofi",
+                                "Для бега" to "музыка для бега",
+                                "Поп-чарт" to "популярные хиты",
+                                "Брейккор" to "breakcore"
+                            )
+                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                quickChips.chunked(2).forEach { pair ->
+                                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                                        pair.forEach { (label, q) ->
+                                            Surface(
+                                                shape = RoundedCornerShape(16.dp),
+                                                color = OledCard,
+                                                modifier = Modifier
+                                                    .weight(1f)
+                                                    .border(1.dp, Color.White.copy(alpha = 0.07f), RoundedCornerShape(16.dp))
+                                                    .clickable { searchQuery = q }
+                                            ) {
+                                                Row(
+                                                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 14.dp),
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    horizontalArrangement = Arrangement.SpaceBetween
+                                                ) {
+                                                    Text(label, color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                                                    Icon(Icons.Rounded.NorthEast, contentDescription = null, tint = palette.accent, modifier = Modifier.size(16.dp))
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if (searchQuery.trim().length >= 2 && albumResults.isNotEmpty()) {
+                        item {
+                            Text("Альбомы", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                        }
+                        item {
+                            LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                                 items(albumResults, key = { it.id }) { album ->
                                     Surface(
-                                        shape = RoundedCornerShape(16.dp),
+                                        shape = RoundedCornerShape(18.dp),
                                         color = OledCard,
                                         modifier = Modifier
-                                            .width(124.dp)
+                                            .width(138.dp)
+                                            .border(1.dp, Color.White.copy(alpha = 0.07f), RoundedCornerShape(18.dp))
                                             .clickable {
                                                 activePreset = album.title
                                                 onPlay("album", album.id)
                                                 searchOpen = false
                                             }
                                     ) {
-                                        Column(Modifier.padding(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                        Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                             AsyncCoverArt(
                                                 url = album.coverUrl,
-                                                shape = RoundedCornerShape(12.dp),
+                                                shape = RoundedCornerShape(14.dp),
                                                 modifier = Modifier.fillMaxWidth().aspectRatio(1f),
                                                 fallbackIcon = Icons.Rounded.Album
                                             )
-                                            Text(album.title, color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                            Text(album.title, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                             Text(
                                                 buildString {
                                                     append(album.artist)
@@ -282,33 +339,47 @@ fun YandexWaveFullScreen(
                             }
                         }
                     }
+
                     if (searchQuery.trim().length >= 2 && searchResults.isNotEmpty()) {
                         item {
-                            Text("Треки", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                            Text("Треки", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
                         }
                         items(searchResults, key = { it.id }) { track ->
+                            val isCurrent = track.id == ymusic.trackId || (track.title == ymusic.title && ymusic.title.isNotBlank())
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .clip(RoundedCornerShape(14.dp))
-                                    .background(OledCard)
+                                    .clip(RoundedCornerShape(16.dp))
+                                    .background(if (isCurrent) palette.accent.copy(alpha = 0.14f) else OledCard)
+                                    .border(
+                                        1.dp,
+                                        if (isCurrent) palette.accent else Color.White.copy(alpha = 0.06f),
+                                        RoundedCornerShape(16.dp)
+                                    )
                                     .clickable {
                                         activePreset = null
                                         onPlay("track", track.id)
                                         searchOpen = false
                                     }
-                                    .padding(horizontal = 12.dp, vertical = 9.dp),
+                                    .padding(horizontal = 12.dp, vertical = 10.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(12.dp)
                             ) {
                                 AsyncCoverArt(
                                     url = track.coverUrl,
-                                    shape = RoundedCornerShape(10.dp),
-                                    modifier = Modifier.size(48.dp),
+                                    shape = RoundedCornerShape(12.dp),
+                                    modifier = Modifier.size(50.dp),
                                     fallbackIcon = Icons.Rounded.MusicNote
                                 )
                                 Column(modifier = Modifier.weight(1f)) {
-                                    Text(track.title, color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    Text(
+                                        track.title,
+                                        color = if (isCurrent) palette.accent else Color.White,
+                                        fontWeight = FontWeight.SemiBold,
+                                        fontSize = 14.sp,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
                                     Text(
                                         buildString {
                                             append(track.artist)
@@ -323,7 +394,17 @@ fun YandexWaveFullScreen(
                                 if (track.durationMs > 0) {
                                     Text(formatDurationMs(track.durationMs), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
                                 }
-                                Icon(Icons.Rounded.PlayArrow, contentDescription = null, tint = palette.accent, modifier = Modifier.size(22.dp))
+                                Box(
+                                    modifier = Modifier.size(34.dp).clip(CircleShape).background(palette.accent.copy(alpha = 0.18f)),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        if (isCurrent && ymusic.state == "playing") Icons.Rounded.GraphicEq else Icons.Rounded.PlayArrow,
+                                        contentDescription = null,
+                                        tint = palette.accent,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
                             }
                         }
                     }
@@ -611,15 +692,17 @@ fun YandexWaveFullScreen(
                             ((itemCenter - vpCenter) / (itemInfo.size.coerceAtLeast(1) * 1.15f)).coerceIn(-1.5f, 1.5f)
                         } else 0f
                         val absDist = distFromCenter.absoluteValue
-                        val scale = 1.05f - 0.12f * absDist.coerceIn(0f, 1f)
-                        val arcDropPx = 18f * absDist * absDist
-                        val alphaVal = (1f - 0.22f * absDist).coerceIn(0.65f, 1f)
+                        val isSelectedOrb = activePreset == orb.title
+                        val baseScale = 1.18f - 0.24f * absDist.coerceIn(0f, 1f)
+                        val scale = if (isSelectedOrb) baseScale + 0.06f else baseScale
+                        val arcDropPx = (34f * absDist * absDist) - (if (isSelectedOrb || absDist < 0.35f) 22f * (1f - absDist.coerceIn(0f, 1f)) else 0f)
+                        val alphaVal = (1f - 0.30f * absDist).coerceIn(0.55f, 1f)
                         val orbColor = parseHexColor(orb.colorHex, palette.aura2)
 
                         Box(
                             modifier = Modifier
-                                .width(126.dp)
-                                .height(148.dp)
+                                .width(130.dp)
+                                .height(158.dp)
                                 .graphicsLayer {
                                     scaleX = scale
                                     scaleY = scale
@@ -637,6 +720,7 @@ fun YandexWaveFullScreen(
                                     .fillMaxWidth()
                                     .height(114.dp)
                                     .clip(RoundedCornerShape(topStart = 60.dp, topEnd = 60.dp, bottomStart = 20.dp, bottomEnd = 20.dp))
+                                    .then(if (isSelectedOrb) Modifier.border(1.5.dp, palette.accent, RoundedCornerShape(topStart = 60.dp, topEnd = 60.dp, bottomStart = 20.dp, bottomEnd = 20.dp)) else Modifier)
                                     .background(
                                         Brush.verticalGradient(
                                             listOf(

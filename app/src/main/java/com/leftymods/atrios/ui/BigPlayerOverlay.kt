@@ -292,8 +292,18 @@ fun BigPlayerOverlay(
                     modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    Surface(shape = RoundedCornerShape(99.dp), color = Color.White.copy(alpha = 0.10f), modifier = Modifier.width(96.dp).height(44.dp).clickable { onPlayWave() }) {
-                        Box(contentAlignment = Alignment.Center) { Icon(Icons.Rounded.Repeat, contentDescription = "Волна", tint = Color.White.copy(alpha = 0.85f)) }
+                    Surface(
+                        shape = RoundedCornerShape(99.dp),
+                        color = if (ymusic.repeat) palette.accent.copy(alpha = 0.24f) else Color.White.copy(alpha = 0.10f),
+                        modifier = Modifier.width(96.dp).height(44.dp).clickable { onControl("repeat") }
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                if (ymusic.repeat) Icons.Rounded.RepeatOne else Icons.Rounded.Repeat,
+                                contentDescription = "Повтор трека",
+                                tint = if (ymusic.repeat) palette.accent else Color.White.copy(alpha = 0.85f)
+                            )
+                        }
                     }
                     Surface(shape = RoundedCornerShape(99.dp), color = Color.White.copy(alpha = 0.10f), modifier = Modifier.width(96.dp).height(44.dp).clickable { showVolumeRow = !showVolumeRow }) {
                         Box(contentAlignment = Alignment.Center) { Icon(if (mute || volume.toInt() == 0) Icons.Rounded.VolumeOff else Icons.Rounded.VolumeUp, contentDescription = "Звук", tint = if (showVolumeRow) palette.accent else Color.White.copy(alpha = 0.85f)) }
