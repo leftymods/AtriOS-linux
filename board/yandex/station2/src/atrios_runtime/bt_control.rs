@@ -613,11 +613,16 @@ pub(crate) fn process_command(cmd_obj: &Json) -> Result<Json, String> {
             let generation = {
                 let _g = SCREEN_LOCK.lock().unwrap();
                 let gen = SCREEN_GEN.fetch_add(1, Ordering::SeqCst) + 1;
-                let _ = Command::new("pkill")
-                    .args(["-f", "/usr/lib/atrios/light screen"])
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status();
+                for pat in ["/usr/lib/atrios/light screen", "/usr/bin/atrios screen"] {
+                    let _ = Command::new("pkill")
+                        .args(["-f", pat])
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .status();
+                }
+                if mode == "clock" {
+                    let _ = fs::remove_file("/var/run/atrios/timer_display.json");
+                }
                 set_screen_mode(mode);
                 if mode == "ticker" {
                     let text: String = map

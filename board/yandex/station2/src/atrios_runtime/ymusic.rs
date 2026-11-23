@@ -794,7 +794,47 @@ impl ActivePipeline {
                 .map_err(|e| format!("madplay pipeline failed: {e}"))?;
             return Ok(Self { decoder: dec, sink: None, paused: false });
         }
-        Err("No audio stream decoder found (install ffmpeg, mpg123, madplay, or gstreamer)".into())
+        if bin_exists("atri-mp3dec") {
+            let mut dec = Command::new("atri-mp3dec")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .map_err(|e| format!("atri-mp3dec spawn failed: {e}"))?;
+            let dec_in = dec.stdin.take().ok_or("Missing atri-mp3dec stdin")?;
+            let dec_out = dec.stdout.take().ok_or("Missing atri-mp3dec stdout")?;
+            let sink = Command::new("aplay")
+                .args(["-q", "-t", "raw", "-f", "S16_LE", "-r", "44100", "-c", "2"])
+                .stdin(Stdio::from(dec_out))
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .map_err(|e| {
+                    let _ = dec.kill();
+                    format!("aplay spawn failed: {e}")
+                })?;
+            let stream_url = url.to_string();
+            thread::spawn(move || {
+                use std::io::Write;
+                let mut w = dec_in;
+                let _ = crate::https::request_stream(
+                    &stream_url,
+                    None,
+                    &[],
+                    None,
+                    300,
+                    64 * 1024 * 1024,
+                    None,
+                    |chunk| w.write_all(chunk).map_err(|e| e.to_string()),
+                );
+            });
+            return Ok(Self {
+                decoder: dec,
+                sink: Some(sink),
+                paused: false,
+            });
+        }
+        Err("No audio stream decoder found (install ffmpeg, mpg123, madplay, or atri-mp3dec)".into())
     }
 
     fn set_paused(&mut self, pause: bool) {
