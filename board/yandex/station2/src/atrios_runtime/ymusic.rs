@@ -243,6 +243,8 @@ pub struct YMusicStatus {
     pub started_ts: i64,
     pub liked: bool,
     pub repeat: bool,
+    pub can_prev: bool,
+    pub can_next: bool,
     pub error: Option<String>,
     pub seq: u64,
     pub updated_ms: i64,
@@ -277,6 +279,8 @@ impl YMusicStatus {
             started_ts: 0,
             liked: false,
             repeat: false,
+            can_prev: false,
+            can_next: true,
             error: None,
             seq: 0,
             updated_ms: now_ms,
@@ -331,6 +335,12 @@ impl YMusicStatus {
         }
         if let Some(b) = j.get("repeat").and_then(|v| v.as_bool()) {
             st.repeat = b;
+        }
+        if let Some(b) = j.get("can_prev").and_then(|v| v.as_bool()) {
+            st.can_prev = b;
+        }
+        if let Some(b) = j.get("can_next").and_then(|v| v.as_bool()) {
+            st.can_next = b;
         }
         if let Some(s) = j.get_str("error") {
             if !s.is_empty() {
@@ -391,6 +401,8 @@ impl YMusicStatus {
             ("started_ts", Json::Num(self.started_ts as f64)),
             ("liked", Json::Bool(self.liked)),
             ("repeat", Json::Bool(self.repeat)),
+            ("can_prev", Json::Bool(self.can_prev)),
+            ("can_next", Json::Bool(self.can_next)),
             (
                 "error",
                 self.error.as_ref().map(|s| Json::Str(s.clone())).unwrap_or(Json::Null),
@@ -793,7 +805,7 @@ fn fetch_likes(auth: &YMusicAuth) -> Result<Vec<TrackInfo>, String> {
         .and_then(|t| t.as_arr())
         .ok_or("No liked tracks found")?;
     let mut ids: Vec<String> = Vec::new();
-    for item in arr.iter().take(35) {
+    for item in arr.iter().take(500) {
         if let Some(id) = item.get_str("id") {
             ids.push(id.to_string());
         } else if let Some(n) = item.get("id").and_then(|v| v.as_i64()) {
@@ -803,10 +815,15 @@ fn fetch_likes(auth: &YMusicAuth) -> Result<Vec<TrackInfo>, String> {
     if ids.is_empty() {
         return Err("Your Liked Tracks list is empty".into());
     }
-    let body = format!("track-ids={}", url_encode(&ids.join(",")));
-    let detail = api_post_form_json(&auth.token, "/tracks", &body)?;
-    let list = detail.get("result").and_then(|r| r.as_arr()).ok_or("Failed loading liked track metadata")?;
-    let tracks: Vec<TrackInfo> = list.iter().filter_map(|t| parse_track_json(t, true)).collect();
+    let mut tracks: Vec<TrackInfo> = Vec::with_capacity(ids.len());
+    for chunk in ids.chunks(100) {
+        let body = format!("track-ids={}", url_encode(&chunk.join(",")));
+        if let Ok(detail) = api_post_form_json(&auth.token, "/tracks", &body) {
+            if let Some(list) = detail.get("result").and_then(|r| r.as_arr()) {
+                tracks.extend(list.iter().filter_map(|t| parse_track_json(t, true)));
+            }
+        }
+    }
     if tracks.is_empty() {
         return Err("Could not parse liked tracks".into());
     }
@@ -995,18 +1012,18 @@ pub fn fetch_collection_json() -> Result<Json, String> {
         {
             likes_count = arr.len() as i64;
             let mut ids: Vec<String> = Vec::new();
-            for item in arr.iter().take(30) {
+            for item in arr.iter().take(300) {
                 if let Some(id) = item.get_str("id") {
                     ids.push(id.to_string());
                 } else if let Some(n) = item.get("id").and_then(|v| v.as_i64()) {
                     ids.push(n.to_string());
                 }
             }
-            if !ids.is_empty() {
-                let body = format!("track-ids={}", url_encode(&ids.join(",")));
+            for chunk in ids.chunks(100) {
+                let body = format!("track-ids={}", url_encode(&chunk.join(",")));
                 if let Ok(detail) = api_post_form_json(&auth.token, "/tracks", &body) {
                     if let Some(list) = detail.get("result").and_then(|r| r.as_arr()) {
-                        liked_tracks_parsed = list.iter().filter_map(|t| parse_track_json(t, true)).collect();
+                        liked_tracks_parsed.extend(list.iter().filter_map(|t| parse_track_json(t, true)));
                     }
                 }
             }
@@ -1444,7 +1461,7 @@ fn mp3_cache_put(track_id: String, data: Vec<u8>) {
     let c = MP3_RAM_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::VecDeque::new()));
     if let Ok(mut g) = c.lock() {
         g.retain(|(id, _)| id != &track_id);
-        while g.len() >= 4 {
+        while g.len() >= 20 {
             g.pop_front();
         }
         g.push_back((track_id, data));
@@ -1805,7 +1822,7 @@ impl PlayerState {
     }
 
     fn sync_neighbors_to_status(&mut self) {
-        if let Some(nxt) = self.queue.get(self.index + 1).or_else(|| self.queue.first()) {
+        if let Some(nxt) = self.queue.get(self.index + 1) {
             self.status.next_title = nxt.title.clone();
             self.status.next_artist = nxt.artist.clone();
             self.status.next_cover_url = nxt.cover_url.clone();
@@ -1814,15 +1831,15 @@ impl PlayerState {
             self.status.next_artist.clear();
             self.status.next_cover_url.clear();
         }
-        let prev_opt = if self.index > 0 {
-            self.queue.get(self.index - 1)
-        } else {
-            self.queue.last()
-        };
-        if let Some(prv) = prev_opt {
-            self.status.prev_title = prv.title.clone();
-            self.status.prev_artist = prv.artist.clone();
-            self.status.prev_cover_url = prv.cover_url.clone();
+        // Hard stop at first seen track (index == 0): NEVER wrap around backward!
+        self.status.can_prev = self.index > 0;
+        self.status.can_next = true;
+        if self.index > 0 {
+            if let Some(prv) = self.queue.get(self.index - 1) {
+                self.status.prev_title = prv.title.clone();
+                self.status.prev_artist = prv.artist.clone();
+                self.status.prev_cover_url = prv.cover_url.clone();
+            }
         } else {
             self.status.prev_title.clear();
             self.status.prev_artist.clear();
@@ -2126,6 +2143,12 @@ impl PlayerState {
         }
         if self.index + 1 < self.queue.len() {
             self.index += 1;
+            // Keep up to 20 seen/played tracks in history so user can swipe back/forward freely
+            if self.index > 20 {
+                let drop_n = self.index - 20;
+                self.queue.drain(0..drop_n);
+                self.index -= drop_n;
+            }
             // Proactively replenish My Wave near queue tail (like Yandex Music mobile!)
             if self.mode == "wave" && self.index + 2 >= self.queue.len() {
                 if let Some(auth) = load_auth() {
@@ -2139,14 +2162,7 @@ impl PlayerState {
                 }
             }
             if should_play {
-                if skipped && mp3_cache_get(&self.queue[self.index].id).is_none() {
-                    self.preview_current_track();
-                    self.status.state = "loading".into();
-                    write_status(&mut self.status);
-                    self.pending_play_at = Some(std::time::Instant::now() + Duration::from_millis(120));
-                } else {
-                    self.start_current_track();
-                }
+                self.start_current_track();
             } else {
                 self.preview_current_track();
             }
@@ -2168,18 +2184,16 @@ impl PlayerState {
     }
 
     fn prev_track(&mut self) {
+        // Hard stop at first seen track (index == 0): cannot go back further!
+        if self.queue.is_empty() || self.index == 0 {
+            self.sync_neighbors_to_status();
+            write_status(&mut self.status);
+            return;
+        }
         let should_play = self.pending_play_at.is_some()
             || self.status.state == "loading"
             || self.pipeline.as_ref().map(|p| !p.paused).unwrap_or(false);
-        if self.queue.is_empty() {
-            self.load_mode("wave", None);
-            return;
-        }
-        if self.index > 0 {
-            self.index -= 1;
-        } else {
-            self.index = self.queue.len() - 1;
-        }
+        self.index -= 1;
         if should_play {
             self.start_current_track();
         } else {

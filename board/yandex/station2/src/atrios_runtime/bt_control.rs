@@ -596,6 +596,10 @@ fn send_json_line(fd: c_int, j: &Json) -> bool {
     true
 }
 
+fn shell_quote_single(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\"'\"'"))
+}
+
 pub(crate) fn process_command(cmd_obj: &Json) -> Result<Json, String> {
     let Some(map) = cmd_obj.as_obj() else {
         return Err("Command must be a JSON object".into());
@@ -1263,6 +1267,89 @@ pub(crate) fn process_command(cmd_obj: &Json) -> Result<Json, String> {
             let mac = map.get("mac").and_then(|v| v.as_str()).unwrap_or("all");
             let _ = Command::new("/usr/bin/atrios").args(["bt", "unpair", mac]).status();
             Ok(build_status_payload())
+        }
+        "term_e2ee_init" => {
+            use std::collections::HashMap;
+            use std::sync::{Mutex, OnceLock};
+            static E2EE_SESSIONS: OnceLock<Mutex<HashMap<String, ([u8; 32], i64)>>> = OnceLock::new();
+            let store = E2EE_SESSIONS.get_or_init(|| Mutex::new(HashMap::new()));
+            let mut priv_k = [0u8; 32];
+            let mut sid_raw = [0u8; 8];
+            crate::e2ee::random_bytes(&mut priv_k);
+            crate::e2ee::random_bytes(&mut sid_raw);
+            let pub_k = crate::e2ee::x25519_public_key(&priv_k);
+            let sid = crate::e2ee::hex_encode(&sid_raw);
+            let now = now_unix_i64();
+            if let Ok(mut g) = store.lock() {
+                g.retain(|_, (_, ts)| now - *ts < 1800);
+                if g.len() >= 8 { g.clear(); }
+                g.insert(sid.clone(), (priv_k, now));
+            }
+            // Also persist active E2EE session key in /var/run/atrios/term_e2ee.key (0600, tmpfs) so any handler thread sees it
+            let _ = fs::create_dir_all("/var/run/atrios");
+            let key_line = format!("{}:{}\n", sid, crate::e2ee::hex_encode(&priv_k));
+            let _ = atomic_write_bytes(Path::new("/var/run/atrios/term_e2ee.key"), key_line.as_bytes(), 0o600, false);
+            Ok(obj(vec![
+                ("type", Json::Str("term_e2ee_init_response".into())),
+                ("success", Json::Bool(true)),
+                ("sid", Json::Str(sid)),
+                ("pub", Json::Str(crate::e2ee::hex_encode(&pub_k))),
+            ]))
+        }
+        "term_e2ee_exec" => {
+            let sid = map.get("sid").and_then(|v| v.as_str()).unwrap_or("").trim();
+            let peer_pub_hex = map.get("pub").and_then(|v| v.as_str()).unwrap_or("");
+            let iv_hex = map.get("iv").and_then(|v| v.as_str()).unwrap_or("");
+            let ct_hex = map.get("ct").and_then(|v| v.as_str()).unwrap_or("");
+            let mac_hex = map.get("mac").and_then(|v| v.as_str()).unwrap_or("");
+            let key_txt = fs::read_to_string("/var/run/atrios/term_e2ee.key").map_err(|_| "E2EE session not initialized")?;
+            let (stored_sid, priv_hex) = key_txt.trim().split_once(':').ok_or("Invalid E2EE session state")?;
+            if stored_sid != sid {
+                return Err("E2EE session expired — reconnect terminal".into());
+            }
+            let priv_vec = crate::e2ee::hex_decode(priv_hex)?;
+            let peer_vec = crate::e2ee::hex_decode(peer_pub_hex)?;
+            let iv_vec = crate::e2ee::hex_decode(iv_hex)?;
+            let ct_vec = crate::e2ee::hex_decode(ct_hex)?;
+            let mac_vec = crate::e2ee::hex_decode(mac_hex)?;
+            if priv_vec.len() != 32 || peer_vec.len() != 32 || iv_vec.len() != 12 || mac_vec.len() != 32 {
+                return Err("Invalid E2EE field lengths".into());
+            }
+            let priv_k: [u8; 32] = priv_vec.try_into().unwrap();
+            let peer_pub: [u8; 32] = peer_vec.try_into().unwrap();
+            let iv: [u8; 12] = iv_vec.try_into().unwrap();
+            let mac: [u8; 32] = mac_vec.try_into().unwrap();
+            let shared = crate::e2ee::x25519(&priv_k, &peer_pub);
+            let pt = crate::e2ee::decrypt_e2ee(&shared, &iv, &ct_vec, &mac)?;
+            let shell_cmd = String::from_utf8_lossy(&pt).trim().to_string();
+            if shell_cmd.is_empty() || shell_cmd.len() > 2048 {
+                return Err("Empty or oversized command".into());
+            }
+            let out = Command::new("/bin/sh")
+                .args(["-c", &format!("timeout 8 sh -c {} 2>&1 || true", shell_quote_single(&shell_cmd))])
+                .output()
+                .or_else(|_| Command::new("/bin/sh").args(["-c", &shell_cmd]).output())
+                .map_err(|e| format!("Shell exec failed: {e}"))?;
+            let mut combined = String::from_utf8_lossy(&out.stdout).to_string();
+            if !out.stderr.is_empty() {
+                if !combined.is_empty() && !combined.ends_with('\n') { combined.push('\n'); }
+                combined.push_str(&String::from_utf8_lossy(&out.stderr));
+            }
+            if combined.len() > 14000 {
+                combined.truncate(14000);
+                combined.push_str("\n... [truncated]");
+            }
+            let mut resp_iv = [0u8; 12];
+            crate::e2ee::random_bytes(&mut resp_iv);
+            let (resp_ct, resp_mac) = crate::e2ee::encrypt_e2ee(&shared, &resp_iv, combined.as_bytes());
+            Ok(obj(vec![
+                ("type", Json::Str("term_e2ee_response".into())),
+                ("success", Json::Bool(true)),
+                ("sid", Json::Str(sid.into())),
+                ("iv", Json::Str(crate::e2ee::hex_encode(&resp_iv))),
+                ("ct", Json::Str(crate::e2ee::hex_encode(&resp_ct))),
+                ("mac", Json::Str(crate::e2ee::hex_encode(&resp_mac))),
+            ]))
         }
         "wifi_connect" => {
             let ssid = map.get("ssid").and_then(|v| v.as_str()).unwrap_or("");

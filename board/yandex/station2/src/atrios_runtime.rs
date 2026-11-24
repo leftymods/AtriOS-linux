@@ -33,6 +33,9 @@ mod ymusic;
 mod hardware;
 #[path = "atrios_runtime/supervise.rs"]
 mod supervise;
+#[allow(dead_code)]
+#[path = "atrios_runtime/e2ee.rs"]
+mod e2ee;
 #[path = "atrios_runtime/tools.rs"]
 mod tools;
 
