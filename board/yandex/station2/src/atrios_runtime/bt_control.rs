@@ -1452,17 +1452,17 @@ fn spawn_wifi_relay_worker() {
                 let live_eq = read_eq_info();
                 let live_vol = get_current_volume();
                 if let Some(entry) = pairs.iter_mut().find(|(k, _)| k.as_str() == "ymusic") {
-                    entry.1 = live_ym;
+                    *entry.1 = live_ym;
                 }
                 if let Some(entry) = pairs.iter_mut().find(|(k, _)| k.as_str() == "eq") {
-                    entry.1 = live_eq;
+                    *entry.1 = live_eq;
                 }
                 if let Some((_, Json::Obj(ref mut audio_pairs))) = pairs.iter_mut().find(|(k, _)| k.as_str() == "audio") {
                     if let Some(ve) = audio_pairs.iter_mut().find(|(k, _)| k.as_str() == "volume") {
-                        ve.1 = Json::Num(live_vol as f64);
+                        *ve.1 = Json::Num(live_vol as f64);
                     }
                     if let Some(me) = audio_pairs.iter_mut().find(|(k, _)| k.as_str() == "mute") {
-                        me.1 = Json::Bool(live_vol == 0);
+                        *me.1 = Json::Bool(live_vol == 0);
                     }
                 }
             }
