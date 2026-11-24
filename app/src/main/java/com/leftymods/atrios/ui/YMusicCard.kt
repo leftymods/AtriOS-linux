@@ -198,7 +198,7 @@ fun YandexWaveFullScreen(
             audioBeat = ymusic.audioBeat,
             modifier = Modifier
                 .fillMaxWidth()
-                .fillMaxHeight(0.74f)
+                .fillMaxHeight(0.84f)
                 .align(Alignment.TopCenter)
         )
 
@@ -537,41 +537,82 @@ fun YandexWaveFullScreen(
                     } else {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(26.dp)
+                            horizontalArrangement = Arrangement.spacedBy(if (palette.isYandexOriginal) 16.dp else 26.dp)
                         ) {
                             IconButton(
                                 onClick = { onControl("prev") },
                                 modifier = Modifier
                                     .size(46.dp)
                                     .clip(CircleShape)
-                                    .background(Color.Black.copy(alpha = 0.34f))
+                                    .background(if (palette.isYandexOriginal) Color(0xCC1A1A1A) else Color.Black.copy(alpha = 0.34f))
+                                    .then(if (palette.isYandexOriginal) Modifier.border(1.dp, Color(0xFF333333), CircleShape) else Modifier)
                             ) {
-                                Icon(Icons.Rounded.SkipPrevious, contentDescription = "Назад", tint = Color.White, modifier = Modifier.size(28.dp))
+                                Icon(Icons.Rounded.SkipPrevious, contentDescription = "Назад", tint = Color.White, modifier = Modifier.size(26.dp))
                             }
 
-                            Box(
-                                modifier = Modifier
-                                    .size(86.dp)
-                                    .clip(CircleShape)
-                                    .background(palette.accent)
-                                    .clickable {
-                                        when (ymusic.state) {
-                                            "playing" -> onControl("pause")
-                                            "paused" -> onControl("play")
-                                            else -> onPlay("wave", null)
+                            if (palette.isYandexOriginal) {
+                                // Official Yandex Music VibeBlock pill button (#FFFF00 with black icon/text)
+                                Surface(
+                                    shape = RoundedCornerShape(99.dp),
+                                    color = palette.accent,
+                                    modifier = Modifier
+                                        .height(58.dp)
+                                        .clickable {
+                                            when (ymusic.state) {
+                                                "playing" -> onControl("pause")
+                                                "paused" -> onControl("play")
+                                                else -> onPlay("wave", null)
+                                            }
                                         }
-                                    },
-                                contentAlignment = Alignment.Center
-                            ) {
-                                if (ymusic.state == "loading") {
-                                    CircularProgressIndicator(modifier = Modifier.size(32.dp), color = palette.onAccent, strokeWidth = 3.dp)
-                                } else {
-                                    Icon(
-                                        if (ymusic.state == "playing") Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
-                                        contentDescription = "Играть / Пауза",
-                                        tint = palette.onAccent,
-                                        modifier = Modifier.size(44.dp)
-                                    )
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 28.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        if (ymusic.state == "loading") {
+                                            CircularProgressIndicator(modifier = Modifier.size(22.dp), color = palette.onAccent, strokeWidth = 2.5.dp)
+                                        } else {
+                                            Icon(
+                                                if (ymusic.state == "playing") Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
+                                                contentDescription = "Играть / Пауза",
+                                                tint = palette.onAccent,
+                                                modifier = Modifier.size(28.dp)
+                                            )
+                                        }
+                                        Text(
+                                            if (ymusic.state == "playing") "Пауза" else "Слушать",
+                                            color = palette.onAccent,
+                                            fontWeight = FontWeight.ExtraBold,
+                                            fontSize = 16.sp
+                                        )
+                                    }
+                                }
+                            } else {
+                                Box(
+                                    modifier = Modifier
+                                        .size(86.dp)
+                                        .clip(CircleShape)
+                                        .background(palette.accent)
+                                        .clickable {
+                                            when (ymusic.state) {
+                                                "playing" -> onControl("pause")
+                                                "paused" -> onControl("play")
+                                                else -> onPlay("wave", null)
+                                            }
+                                        },
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    if (ymusic.state == "loading") {
+                                        CircularProgressIndicator(modifier = Modifier.size(32.dp), color = palette.onAccent, strokeWidth = 3.dp)
+                                    } else {
+                                        Icon(
+                                            if (ymusic.state == "playing") Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
+                                            contentDescription = "Играть / Пауза",
+                                            tint = palette.onAccent,
+                                            modifier = Modifier.size(44.dp)
+                                        )
+                                    }
                                 }
                             }
 
@@ -580,9 +621,10 @@ fun YandexWaveFullScreen(
                                 modifier = Modifier
                                     .size(46.dp)
                                     .clip(CircleShape)
-                                    .background(Color.Black.copy(alpha = 0.34f))
+                                    .background(if (palette.isYandexOriginal) Color(0xCC1A1A1A) else Color.Black.copy(alpha = 0.34f))
+                                    .then(if (palette.isYandexOriginal) Modifier.border(1.dp, Color(0xFF333333), CircleShape) else Modifier)
                             ) {
-                                Icon(Icons.Rounded.SkipNext, contentDescription = "Вперёд", tint = Color.White, modifier = Modifier.size(28.dp))
+                                Icon(Icons.Rounded.SkipNext, contentDescription = "Вперёд", tint = Color.White, modifier = Modifier.size(26.dp))
                             }
                         }
 

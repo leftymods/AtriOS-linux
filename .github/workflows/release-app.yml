@@ -43,6 +43,7 @@ jobs:
           /tmp/atrios_runtime_test
           rustc --edition=2021 -C opt-level=2 --target aarch64-unknown-linux-gnu -C linker=aarch64-linux-gnu-gcc atrios_runtime.rs -o "$GITHUB_WORKSPACE/atrios-runtime-aarch64"
           aarch64-linux-gnu-gcc -O2 atri_mp3dec.c -lm -o "$GITHUB_WORKSPACE/atri-mp3dec-aarch64"
+          aarch64-linux-gnu-gcc -O2 atri_aec.c -lm -o "$GITHUB_WORKSPACE/atri-aec-aarch64"
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -51,7 +52,7 @@ jobs:
           VER="${TAG#app-v}"
           APK_OUT="AtriOS-Control-v${VER}.apk"
           cp app/build/outputs/apk/debug/app-debug.apk "$APK_OUT"
-          gh release create "$TAG" "$APK_OUT" atrios-runtime-aarch64 atri-mp3dec-aarch64 \
+          gh release create "$TAG" "$APK_OUT" atrios-runtime-aarch64 atri-mp3dec-aarch64 atri-aec-aarch64 \
             --title "AtriOS Control v${VER}" \
-            --notes "AtriOS Control v${VER}: multi-speaker UI, phone OTA check/install/rollback, timers & alarms, NTP/timezone sync, Bluetooth speaker controls, and Qwen3-TTS voice/emotion settings." \
-            || gh release upload "$TAG" "$APK_OUT" atrios-runtime-aarch64 atri-mp3dec-aarch64 --clobber
+            --notes "AtriOS Control v${VER}: STFT-AEC + Barge-In VQE, huge official Yandex Vibe shader, full Yandex Music layout theme, and live ERLE/SNR telemetry." \
+            || gh release upload "$TAG" "$APK_OUT" atrios-runtime-aarch64 atri-mp3dec-aarch64 atri-aec-aarch64 --clobber

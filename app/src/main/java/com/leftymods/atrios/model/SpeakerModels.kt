@@ -422,6 +422,29 @@ data class YMusicStatus(
     }
 }
 
+data class VqeStatus(
+    val erleDb: Float = 0f,
+    val snrDb: Float = 0f,
+    val lagMs: Int = 0,
+    val bestMic: Int = 0,
+    val bargeIn: Boolean = false,
+    val refActive: Boolean = false
+) {
+    companion object {
+        fun fromJson(obj: JSONObject?): VqeStatus {
+            if (obj == null) return VqeStatus()
+            return VqeStatus(
+                erleDb = obj.optDouble("erle_db", 0.0).toFloat(),
+                snrDb = obj.optDouble("snr_db", 0.0).toFloat(),
+                lagMs = obj.optInt("lag_ms", 0),
+                bestMic = obj.optInt("best_mic", 0),
+                bargeIn = obj.optBoolean("barge_in", false),
+                refActive = obj.optBoolean("ref_active", false)
+            )
+        }
+    }
+}
+
 data class SpeakerStatus(
     val model: String = "AtriOS Speaker",
     val codename: String = "",
@@ -454,6 +477,7 @@ data class SpeakerStatus(
     val btPairRemainingSec: Int = 0,
     val pairedDevices: List<String> = emptyList(),
     val ai: AiStatus = AiStatus(),
+    val vqe: VqeStatus = VqeStatus(),
     val ota: OtaStatus = OtaStatus(),
     val ymusic: YMusicStatus = YMusicStatus(),
     val capabilities: DeviceCapabilities = DeviceCapabilities()

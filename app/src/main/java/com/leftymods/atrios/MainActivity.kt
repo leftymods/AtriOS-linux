@@ -636,34 +636,61 @@ fun AtriOSApp(
                                 Surface(
                                     modifier = Modifier
                                         .fillMaxWidth()
+                                        .then(
+                                            if (palette.isYandexOriginal) {
+                                                Modifier.border(1.dp, Color(0xFF333333), RoundedCornerShape(18.dp))
+                                            } else Modifier
+                                        )
                                         .then(if (interactive) Modifier.clickable { showBigPlayer = true } else Modifier),
-                                    shape = RoundedCornerShape(22.dp),
-                                    color = Color(0xFF1A1A1F)
+                                    shape = RoundedCornerShape(if (palette.isYandexOriginal) 18.dp else 22.dp),
+                                    color = if (palette.isYandexOriginal) Color(0xFF141414) else Color(0xFF1A1A1F)
                                 ) {
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(10.dp)
-                                    ) {
-                                        AsyncCoverArt(url = coverUrl, shape = RoundedCornerShape(10.dp), modifier = Modifier.size(42.dp))
-                                        Column(modifier = Modifier.weight(1f)) {
-                                            Text(title.ifBlank { "Моя волна" }, color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                            if (artist.isNotBlank()) {
-                                                Text(artist, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    Column(modifier = Modifier.fillMaxWidth()) {
+                                        if (palette.isYandexOriginal) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .height(2.5.dp)
+                                                    .background(Color(0xFF2B2B2B))
+                                            ) {
+                                                Box(
+                                                    modifier = Modifier
+                                                        .fillMaxWidth(if (playing) 0.55f else 0.25f)
+                                                        .fillMaxHeight()
+                                                        .background(palette.accent)
+                                                )
                                             }
                                         }
-                                        IconButton(onClick = { if (interactive) dispatchYMusicControl("like") }, modifier = Modifier.size(32.dp)) {
-                                            Icon(if (liked) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder, contentDescription = null, tint = if (liked) Color(0xFFFF2E7A) else Color.White, modifier = Modifier.size(20.dp))
-                                        }
-                                        IconButton(
-                                            onClick = {
-                                                if (interactive) {
-                                                    dispatchYMusicControl(if (playing) "pause" else "play")
-                                                }
-                                            },
-                                            modifier = Modifier.size(34.dp)
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(10.dp)
                                         ) {
-                                            Icon(if (playing) Icons.Rounded.Pause else Icons.Rounded.PlayArrow, contentDescription = null, tint = Color.White, modifier = Modifier.size(26.dp))
+                                            AsyncCoverArt(url = coverUrl, shape = RoundedCornerShape(10.dp), modifier = Modifier.size(42.dp))
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text(title.ifBlank { "Моя волна" }, color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                                if (artist.isNotBlank()) {
+                                                    Text(artist, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                                }
+                                            }
+                                            IconButton(onClick = { if (interactive) dispatchYMusicControl("like") }, modifier = Modifier.size(32.dp)) {
+                                                Icon(if (liked) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder, contentDescription = null, tint = if (liked) Color(0xFFFF2E7A) else Color.White, modifier = Modifier.size(20.dp))
+                                            }
+                                            IconButton(
+                                                onClick = {
+                                                    if (interactive) {
+                                                        dispatchYMusicControl(if (playing) "pause" else "play")
+                                                    }
+                                                },
+                                                modifier = Modifier.size(34.dp)
+                                            ) {
+                                                Icon(
+                                                    if (playing) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
+                                                    contentDescription = null,
+                                                    tint = if (palette.isYandexOriginal) palette.accent else Color.White,
+                                                    modifier = Modifier.size(26.dp)
+                                                )
+                                            }
                                         }
                                     }
                                 }
@@ -1163,6 +1190,38 @@ fun AtriOSApp(
                                                             Spacer(Modifier.width(6.dp))
                                                             Text("Тест")
                                                         }
+                                                    }
+                                                }
+                                            }
+                                            item {
+                                                // Live VQE / STFT-AEC & Barge-In Telemetry Card (ERLE, SNR, Echo Lag, Active Mic)
+                                                Surface(
+                                                    shape = RoundedCornerShape(TypeUI.RadiusLg),
+                                                    color = TypeUI.SurfaceElevated,
+                                                    modifier = Modifier.border(1.dp, TypeUI.Hairline, RoundedCornerShape(TypeUI.RadiusLg))
+                                                ) {
+                                                    Column(
+                                                        modifier = Modifier.fillMaxWidth().padding(18.dp),
+                                                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                                                    ) {
+                                                        Row(
+                                                            modifier = Modifier.fillMaxWidth(),
+                                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                                            verticalAlignment = Alignment.CenterVertically
+                                                        ) {
+                                                            Text("VQE · STFT-AEC & Barge-In", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                                                            Text(
+                                                                if (status.vqe.refActive) "Loopback OK" else "Ожидание",
+                                                                color = if (status.vqe.refActive) palette.accent else Color(0xFF7A7A86),
+                                                                fontSize = 12.sp,
+                                                                fontWeight = FontWeight.SemiBold
+                                                            )
+                                                        }
+                                                        InfoRow("Подавление эха (ERLE)", "%.1f дБ".format(status.vqe.erleDb))
+                                                        InfoRow("Речевой SNR (300–3400 Гц)", "%.1f дБ".format(status.vqe.snrDb))
+                                                        InfoRow("Задержка тракта", "${status.vqe.lagMs} мс")
+                                                        InfoRow("Активный микрофон", "MIC #${status.vqe.bestMic} (из 7)")
+                                                        InfoRow("Перебивание (Barge-In)", if (status.vqe.bargeIn) "Активно (речь)" else "Готово")
                                                     }
                                                 }
                                             }

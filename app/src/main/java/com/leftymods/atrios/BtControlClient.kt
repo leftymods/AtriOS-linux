@@ -9,6 +9,7 @@ import com.leftymods.atrios.model.DeviceCapabilities
 import com.leftymods.atrios.model.OtaStatus
 import com.leftymods.atrios.model.SpeakerStatus
 import com.leftymods.atrios.model.TimerItem
+import com.leftymods.atrios.model.VqeStatus
 import com.leftymods.atrios.model.YMusicStatus
 import com.leftymods.atrios.model.YMusicAlbum
 import com.leftymods.atrios.model.YMusicOrb
@@ -475,6 +476,7 @@ class BtControlClient(
                 )
                 val ota = OtaStatus.fromJson(json.optJSONObject("ota"))
                 val ai = AiStatus.fromJson(json.optJSONObject("ai"))
+                val vqe = VqeStatus.fromJson(json.optJSONObject("vqe"))
                 val ymusic = YMusicStatus.fromJson(json.optJSONObject("ymusic"))
                 val status = SpeakerStatus(
                     model = model,
@@ -508,6 +510,7 @@ class BtControlClient(
                     btPairRemainingSec = bt.optInt("pair_remaining_sec", 0),
                     pairedDevices = paired,
                     ai = ai,
+                    vqe = vqe,
                     ota = ota,
                     ymusic = ymusic,
                     capabilities = caps
