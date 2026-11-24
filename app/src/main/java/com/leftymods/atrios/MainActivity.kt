@@ -235,7 +235,32 @@ fun AtriOSApp(
     var appUpdateProgress by remember { mutableStateOf<Float?>(null) }
 
     LaunchedEffect(Unit) {
-        availableAppUpdate = AppUpdater.checkForUpdate(context)
+        while (true) {
+            val rel = AppUpdater.checkForUpdate(context)
+            if (rel != null) {
+                availableAppUpdate = rel
+                DebugLogStore.log("INFO", "UPDATER", "Найдена новая версия v${rel.version} — автозагрузка APK...")
+                val dl = AppUpdater.downloadOnly(context, rel) { p -> appUpdateProgress = p }
+                appUpdateProgress = null
+                dl.onSuccess { apkFile ->
+                    DebugLogStore.log("OK", "UPDATER", "APK v${rel.version} скачан (${apkFile.length() / 1024} КБ) — запуск установки")
+                    AppUpdater.downloadAndInstall(context, rel) { p -> appUpdateProgress = p }
+                }.onFailure { err ->
+                    DebugLogStore.log("WARN", "UPDATER", "Ошибка автозагрузки v${rel.version}: ${err.message}")
+                }
+            }
+            delay(30L * 60L * 1000L)
+        }
+    }
+
+    // Persistent auto-reconnect watchdog if connection ever drops unexpectedly
+    LaunchedEffect(connected, autoConnectState) {
+        if (!connected && autoConnectState != "manual") {
+            delay(4500L)
+            if (!connected && autoConnectState != "manual") {
+                autoAttemptSeq++
+            }
+        }
     }
 
     val client = remember {

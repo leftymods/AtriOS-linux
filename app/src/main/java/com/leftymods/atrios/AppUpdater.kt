@@ -159,6 +159,63 @@ object AppUpdater {
         null
     }
 
+    suspend fun downloadOnly(
+        context: Context,
+        release: AppReleaseInfo,
+        onProgress: (Float) -> Unit = {}
+    ): Result<File> = withContext(Dispatchers.IO) {
+        runCatching {
+            val outFile = cachedApkFile(context, release)
+            val dir = outFile.parentFile!!
+            if (isValidApkFile(outFile, release.apkSize)) {
+                withContext(Dispatchers.Main) { onProgress(1f) }
+                return@runCatching outFile
+            }
+            dir.listFiles()?.forEach { f ->
+                if ((f.name != outFile.name && f.name.endsWith(".apk")) || f.name.endsWith(".part")) {
+                    f.delete()
+                }
+            }
+            val partFile = File(dir, "${outFile.name}.part")
+            val conn = (URL(release.apkUrl).openConnection() as HttpURLConnection).apply {
+                instanceFollowRedirects = true
+                connectTimeout = 15000
+                readTimeout = 30000
+                setRequestProperty("User-Agent", "AtriOS-Control")
+            }
+            if (conn.responseCode !in 200..299) {
+                error("HTTP ${conn.responseCode}")
+            }
+            val total = conn.contentLengthLong.coerceAtLeast(release.apkSize).coerceAtLeast(1L)
+            var downloaded = 0L
+            conn.inputStream.use { input ->
+                FileOutputStream(partFile).use { output ->
+                    val buf = ByteArray(16384)
+                    while (true) {
+                        val n = input.read(buf)
+                        if (n <= 0) break
+                        output.write(buf, 0, n)
+                        downloaded += n
+                        val frac = (downloaded.toFloat() / total.toFloat()).coerceIn(0f, 0.99f)
+                        withContext(Dispatchers.Main) { onProgress(frac) }
+                    }
+                }
+            }
+            conn.disconnect()
+            if (!isValidApkFile(partFile, release.apkSize)) {
+                partFile.delete()
+                error("Downloaded APK corrupted")
+            }
+            if (outFile.exists()) outFile.delete()
+            if (!partFile.renameTo(outFile)) {
+                partFile.copyTo(outFile, overwrite = true)
+                partFile.delete()
+            }
+            withContext(Dispatchers.Main) { onProgress(1f) }
+            outFile
+        }
+    }
+
     suspend fun downloadAndInstall(
         context: Context,
         release: AppReleaseInfo,

@@ -168,17 +168,23 @@ class BtControlClient(
                 closeQuietly()
                 if (!userDisconnected && trySeamlessRelayFailover()) return@launch
                 if (!userDisconnected) {
+                    DebugLogStore.log("WARN", "BT", "RFCOMM disconnected; auto-reconnecting in 3s")
                     withContext(Dispatchers.Main) {
-                        onConnectionState(false, "Bluetooth отключён", null)
+                        onConnectionState(false, "Переподключение к колонке...", device)
                     }
+                    delay(3000)
+                    if (!userDisconnected) connect(device)
                 }
             } catch (e: Exception) {
                 closeQuietly()
                 if (!userDisconnected && trySeamlessRelayFailover()) return@launch
                 if (!userDisconnected) {
+                    DebugLogStore.log("WARN", "BT", "RFCOMM error: ${e.message}; retrying in 3.5s")
                     withContext(Dispatchers.Main) {
-                        onConnectionState(false, "Отключено: ${e.message ?: "ошибка соединения"}", null)
+                        onConnectionState(false, "Переподключение: ${e.message ?: "ожидание сети"}", device)
                     }
+                    delay(3500)
+                    if (!userDisconnected) connect(device)
                 }
             } finally {
                 closeQuietly()
@@ -204,42 +210,43 @@ class BtControlClient(
     private fun startRelayLoop(cleanUrl: String, cleanDid: String, cleanTok: String, keepConnectedOnStart: Boolean) {
         relayJob?.cancel()
         relayJob = scope.launch(Dispatchers.IO) {
-            try {
-                if (!keepConnectedOnStart) {
-                    withContext(Dispatchers.Main) {
-                        onConnectionState(false, "Интернет подключение к $cleanDid...", null)
-                    }
-                }
-                val first = relayHttpGet("$cleanUrl/relay/v1/app/$cleanDid/status", cleanTok)
-                val firstStatus = first.optJSONObject("status")
-                val online = first.optBoolean("online", false)
-                withContext(Dispatchers.Main) {
-                    val label = if (online) "Интернет (TLS): $cleanDid" else "Интернет (ожидание): $cleanDid"
-                    onConnectionState(true, label, null)
-                }
-                if (firstStatus != null && firstStatus.length() > 0) {
-                    handlePacket(firstStatus)
-                }
-                sendCommand(JSONObject().put("cmd", "get_timers"))
-                sendCommand(JSONObject().put("cmd", "get_alarms"))
-                sendCommand(JSONObject().put("cmd", "ymusic_status"))
-
-                while (isActive && relayActive) {
-                    delay(1500)
-                    try {
-                        val resp = relayHttpGet("$cleanUrl/relay/v1/app/$cleanDid/status", cleanTok)
-                        val st = resp.optJSONObject("status")
-                        if (st != null && st.length() > 0) {
-                            handlePacket(st)
+            var initialSynced = false
+            var failStreak = 0
+            while (isActive && relayActive && !userDisconnected) {
+                try {
+                    if (!initialSynced && !keepConnectedOnStart) {
+                        withContext(Dispatchers.Main) {
+                            onConnectionState(false, "Интернет подключение к $cleanDid...", null)
                         }
-                    } catch (_: Exception) {
-                        // Transient network hiccup; keep retrying
                     }
-                }
-            } catch (e: Exception) {
-                relayActive = false
-                withContext(Dispatchers.Main) {
-                    onConnectionState(false, "Интернет релей: ${e.message ?: "ошибка"}", null)
+                    val resp = relayHttpGet("$cleanUrl/relay/v1/app/$cleanDid/status", cleanTok)
+                    val st = resp.optJSONObject("status")
+                    val online = resp.optBoolean("online", false)
+                    if (!initialSynced || failStreak > 0) {
+                        failStreak = 0
+                        withContext(Dispatchers.Main) {
+                            val label = if (online) "Интернет (TLS): $cleanDid" else "Интернет (ожидание): $cleanDid"
+                            onConnectionState(true, label, null)
+                        }
+                    }
+                    if (st != null && st.length() > 0) {
+                        handlePacket(st)
+                    }
+                    if (!initialSynced) {
+                        initialSynced = true
+                        DebugLogStore.log("OK", "RELAY", "Connected to $cleanDid (online=$online)")
+                        sendCommand(JSONObject().put("cmd", "get_timers"))
+                        sendCommand(JSONObject().put("cmd", "get_alarms"))
+                        sendCommand(JSONObject().put("cmd", "ymusic_status"))
+                    }
+                    delay(1500)
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    failStreak++
+                    val waitMs = (1500L * failStreak).coerceAtMost(5000L)
+                    DebugLogStore.log("WARN", "RELAY", "Poll hiccup #$failStreak (${e.message}); retry in ${waitMs}ms")
+                    delay(waitMs)
                 }
             }
         }
