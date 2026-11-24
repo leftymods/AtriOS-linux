@@ -965,6 +965,20 @@ pub(crate) fn process_command(cmd_obj: &Json) -> Result<Json, String> {
                 ])),
             }
         }
+        "ymusic_collection" => {
+            match crate::ymusic::fetch_collection_json() {
+                Ok(col) => Ok(obj(vec![
+                    ("type", Json::Str("ymusic_collection_response".into())),
+                    ("success", Json::Bool(true)),
+                    ("collection", col),
+                ])),
+                Err(e) => Ok(obj(vec![
+                    ("type", Json::Str("ymusic_collection_response".into())),
+                    ("success", Json::Bool(false)),
+                    ("message", Json::Str(e)),
+                ])),
+            }
+        }
         "ymusic_search" => {
             let q = map.get("query").and_then(|v| v.as_str()).unwrap_or("").trim();
             if q.is_empty() {

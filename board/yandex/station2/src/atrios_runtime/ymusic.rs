@@ -970,6 +970,221 @@ pub fn search_tracks_json(query: &str) -> Result<Vec<Json>, String> {
     Ok(search_catalog_json(query)?.0)
 }
 
+pub fn fetch_collection_json() -> Result<Json, String> {
+    use std::collections::{HashMap, HashSet};
+    use std::sync::{Mutex, OnceLock};
+    static COLLECTION_CACHE: OnceLock<Mutex<(i64, i64, Json)>> = OnceLock::new();
+    let cache = COLLECTION_CACHE.get_or_init(|| Mutex::new((0, 0, Json::Null)));
+    let auth = load_auth().ok_or("Not logged in to Yandex Music")?;
+    let now = now_unix_i64();
+    if let Ok(g) = cache.lock() {
+        if g.0 == auth.uid && now - g.1 < 300 && !matches!(g.2, Json::Null) {
+            return Ok(g.2.clone());
+        }
+    }
+
+    // 1. Liked tracks (total count + top 30 metadata)
+    let mut likes_count: i64 = 0;
+    let mut liked_tracks_parsed: Vec<TrackInfo> = Vec::new();
+    if let Ok(resp) = api_get_json(&auth.token, &format!("/users/{}/likes/tracks", auth.uid)) {
+        if let Some(arr) = resp
+            .get("result")
+            .and_then(|r| r.get("library"))
+            .and_then(|l| l.get("tracks"))
+            .and_then(|v| v.as_arr())
+        {
+            likes_count = arr.len() as i64;
+            let mut ids: Vec<String> = Vec::new();
+            for item in arr.iter().take(30) {
+                if let Some(id) = item.get_str("id") {
+                    ids.push(id.to_string());
+                } else if let Some(n) = item.get("id").and_then(|v| v.as_i64()) {
+                    ids.push(n.to_string());
+                }
+            }
+            if !ids.is_empty() {
+                let body = format!("track-ids={}", url_encode(&ids.join(",")));
+                if let Ok(detail) = api_post_form_json(&auth.token, "/tracks", &body) {
+                    if let Some(list) = detail.get("result").and_then(|r| r.as_arr()) {
+                        liked_tracks_parsed = list.iter().filter_map(|t| parse_track_json(t, true)).collect();
+                    }
+                }
+            }
+        }
+    }
+
+    let liked_tracks_json: Vec<Json> = liked_tracks_parsed
+        .iter()
+        .map(|t| {
+            obj(vec![
+                ("id", Json::Str(t.id.clone())),
+                ("title", Json::Str(t.title.clone())),
+                ("artist", Json::Str(t.artist.clone())),
+                ("album", Json::Str(t.album.clone())),
+                ("cover_url", Json::Str(t.cover_url.clone())),
+                ("duration_ms", Json::Num(t.duration_ms as f64)),
+            ])
+        })
+        .collect();
+
+    // 2. Favorite artists: combine /users/{uid}/likes/artists with top artists from liked tracks
+    let mut favorite_artists: Vec<Json> = Vec::new();
+    let mut seen_artists: HashSet<String> = HashSet::new();
+    let mut liked_artist_counts: HashMap<String, (usize, String)> = HashMap::new();
+    for tr in &liked_tracks_parsed {
+        let main_a = tr.artist.split(',').next().unwrap_or("").trim();
+        if !main_a.is_empty() {
+            let e = liked_artist_counts
+                .entry(main_a.to_string())
+                .or_insert_with(|| (0, tr.cover_url.clone()));
+            e.0 += 1;
+            if e.1.is_empty() && !tr.cover_url.is_empty() {
+                e.1 = tr.cover_url.clone();
+            }
+        }
+    }
+    if let Ok(resp) = api_get_json(&auth.token, &format!("/users/{}/likes/artists", auth.uid)) {
+        if let Some(arr) = resp.get("result").and_then(|v| v.as_arr()) {
+            for item in arr.iter().take(10) {
+                let a = item.get("artist").unwrap_or(item);
+                let name = a.get_str("name").unwrap_or("").trim().to_string();
+                if name.is_empty() || !seen_artists.insert(name.to_lowercase()) {
+                    continue;
+                }
+                let id = match a.get("id") {
+                    Some(Json::Str(s)) => s.clone(),
+                    Some(Json::Num(n)) => format!("{}", *n as i64),
+                    _ => name.clone(),
+                };
+                let cov_uri = a
+                    .get("cover")
+                    .and_then(|c| c.get_str("uri"))
+                    .or_else(|| a.get_str("ogImage"));
+                let cov = format_cover_url(cov_uri);
+                let cnt = liked_artist_counts.get(&name).map(|x| x.0).unwrap_or(0);
+                favorite_artists.push(obj(vec![
+                    ("id", Json::Str(id)),
+                    ("name", Json::Str(name)),
+                    ("cover_url", Json::Str(cov)),
+                    ("track_count", Json::Num(cnt as f64)),
+                ]));
+            }
+        }
+    }
+    if favorite_artists.len() < 8 {
+        let mut ranked: Vec<(String, usize, String)> = liked_artist_counts
+            .into_iter()
+            .map(|(n, (c, cov))| (n, c, cov))
+            .collect();
+        ranked.sort_by(|a, b| b.1.cmp(&a.1));
+        for (name, cnt, cov) in ranked {
+            if favorite_artists.len() >= 10 {
+                break;
+            }
+            if !seen_artists.insert(name.to_lowercase()) {
+                continue;
+            }
+            favorite_artists.push(obj(vec![
+                ("id", Json::Str(name.clone())),
+                ("name", Json::Str(name)),
+                ("cover_url", Json::Str(cov)),
+                ("track_count", Json::Num(cnt as f64)),
+            ]));
+        }
+    }
+
+    // 3. User playlists (/users/{uid}/playlists/list)
+    let mut playlists: Vec<Json> = Vec::new();
+    if let Ok(resp) = api_get_json(&auth.token, &format!("/users/{}/playlists/list", auth.uid)) {
+        if let Some(arr) = resp.get("result").and_then(|v| v.as_arr()) {
+            for pl in arr.iter().take(12) {
+                let title = pl.get_str("title").unwrap_or("").trim().to_string();
+                if title.is_empty() {
+                    continue;
+                }
+                let kind = pl.get("kind").and_then(|v| v.as_i64()).unwrap_or(0);
+                let track_count = pl.get("trackCount").and_then(|v| v.as_i64()).unwrap_or(0);
+                let cov_uri = pl
+                    .get("cover")
+                    .and_then(|c| {
+                        c.get_str("uri").or_else(|| {
+                            c.get("itemsUri")
+                                .and_then(|u| u.as_arr())
+                                .and_then(|a| a.first())
+                                .and_then(|v| v.as_str())
+                        })
+                    })
+                    .or_else(|| pl.get_str("ogImage"));
+                playlists.push(obj(vec![
+                    ("kind", Json::Num(kind as f64)),
+                    ("title", Json::Str(title)),
+                    ("track_count", Json::Num(track_count as f64)),
+                    ("cover_url", Json::Str(format_cover_url(cov_uri))),
+                ]));
+            }
+        }
+    }
+
+    // 4. Liked albums (/users/{uid}/likes/albums -> POST /albums)
+    let mut liked_albums: Vec<Json> = Vec::new();
+    if let Ok(resp) = api_get_json(&auth.token, &format!("/users/{}/likes/albums", auth.uid)) {
+        if let Some(arr) = resp.get("result").and_then(|v| v.as_arr()) {
+            let mut album_ids: Vec<String> = Vec::new();
+            for item in arr.iter().take(12) {
+                let id_v = item.get("id").or_else(|| item.get("album").and_then(|a| a.get("id")));
+                match id_v {
+                    Some(Json::Str(s)) if !s.is_empty() => album_ids.push(s.clone()),
+                    Some(Json::Num(n)) => album_ids.push(format!("{}", *n as i64)),
+                    _ => {}
+                }
+            }
+            if !album_ids.is_empty() {
+                let body = format!("album-ids={}", url_encode(&album_ids.join(",")));
+                if let Ok(detail) = api_post_form_json(&auth.token, "/albums", &body) {
+                    if let Some(list) = detail.get("result").and_then(|v| v.as_arr()) {
+                        for al in list.iter().filter_map(parse_album_json) {
+                            liked_albums.push(obj(vec![
+                                ("id", Json::Str(al.id)),
+                                ("title", Json::Str(al.title)),
+                                ("artist", Json::Str(al.artist)),
+                                ("year", Json::Num(al.year as f64)),
+                                ("track_count", Json::Num(al.track_count as f64)),
+                                ("cover_url", Json::Str(al.cover_url)),
+                            ]));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 5. Dislikes count
+    let mut dislikes_count: i64 = 0;
+    if let Ok(resp) = api_get_json(&auth.token, &format!("/users/{}/dislikes/tracks", auth.uid)) {
+        if let Some(arr) = resp
+            .get("result")
+            .and_then(|r| r.get("library"))
+            .and_then(|l| l.get("tracks"))
+            .and_then(|v| v.as_arr())
+        {
+            dislikes_count = arr.len() as i64;
+        }
+    }
+
+    let result = obj(vec![
+        ("likes_count", Json::Num(likes_count as f64)),
+        ("dislikes_count", Json::Num(dislikes_count as f64)),
+        ("liked_tracks", Json::Arr(liked_tracks_json)),
+        ("favorite_artists", Json::Arr(favorite_artists)),
+        ("playlists", Json::Arr(playlists)),
+        ("liked_albums", Json::Arr(liked_albums)),
+    ]);
+    if let Ok(mut g) = cache.lock() {
+        *g = (auth.uid, now, result.clone());
+    }
+    Ok(result)
+}
+
 pub fn fetch_orbs_json() -> Result<Vec<Json>, String> {
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -977,7 +1192,7 @@ pub fn fetch_orbs_json() -> Result<Vec<Json>, String> {
     let cache = ORB_CACHE.get_or_init(|| Mutex::new((0, Vec::new())));
     let now = now_unix_i64();
     if let Ok(g) = cache.lock() {
-        if !g.1.is_empty() && now - g.0 < 300 {
+        if !g.1.is_empty() && now - g.0 < 600 {
             return Ok(g.1.clone());
         }
     }
