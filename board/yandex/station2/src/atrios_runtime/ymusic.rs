@@ -230,6 +230,7 @@ pub struct YMusicStatus {
     pub prev_cover_url: String,
     pub duration_ms: i64,
     pub position_ms: i64,
+    pub started_ts: i64,
     pub liked: bool,
     pub repeat: bool,
     pub error: Option<String>,
@@ -260,6 +261,7 @@ impl YMusicStatus {
             prev_cover_url: String::new(),
             duration_ms: 0,
             position_ms: 0,
+            started_ts: 0,
             liked: false,
             repeat: false,
             error: None,
@@ -305,6 +307,9 @@ impl YMusicStatus {
         }
         if let Some(n) = j.get("position_ms").and_then(|v| v.as_i64()) {
             st.position_ms = n.max(0);
+        }
+        if let Some(n) = j.get("started_ts").and_then(|v| v.as_i64()) {
+            st.started_ts = n.max(0);
         }
         if let Some(b) = j.get("liked").and_then(|v| v.as_bool()) {
             st.liked = b;
@@ -359,6 +364,7 @@ impl YMusicStatus {
             ("prev_cover_url", Json::Str(self.prev_cover_url.clone())),
             ("duration_ms", Json::Num(self.duration_ms as f64)),
             ("position_ms", Json::Num(self.position_ms as f64)),
+            ("started_ts", Json::Num(self.started_ts as f64)),
             ("liked", Json::Bool(self.liked)),
             ("repeat", Json::Bool(self.repeat)),
             (
@@ -421,8 +427,8 @@ pub fn read_status() -> YMusicStatus {
 
 pub fn read_status_json() -> Json {
     let mut st = read_status();
-    if st.state == "playing" && st.duration_ms > 0 && st.updated_ts > 0 {
-        let elapsed = (now_unix_i64() - st.updated_ts).max(0) * 1000;
+    if st.state == "playing" && st.duration_ms > 0 && st.started_ts > 0 {
+        let elapsed = (now_unix_i64() - st.started_ts).max(0) * 1000;
         st.position_ms = (st.position_ms + elapsed).clamp(0, st.duration_ms);
     }
     if !st.track_id.is_empty() {
@@ -1170,6 +1176,27 @@ fn bin_exists(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+static MP3_RAM_CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::VecDeque<(String, Vec<u8>)>>> = std::sync::OnceLock::new();
+
+fn mp3_cache_get(track_id: &str) -> Option<Vec<u8>> {
+    if track_id.is_empty() { return None; }
+    let c = MP3_RAM_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::VecDeque::new()));
+    let g = c.lock().ok()?;
+    g.iter().find(|(id, _)| id == track_id).map(|(_, b)| b.clone())
+}
+
+fn mp3_cache_put(track_id: String, data: Vec<u8>) {
+    if track_id.is_empty() || data.len() < 16384 || data.len() > 18 * 1024 * 1024 { return; }
+    let c = MP3_RAM_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::VecDeque::new()));
+    if let Ok(mut g) = c.lock() {
+        g.retain(|(id, _)| id != &track_id);
+        while g.len() >= 4 {
+            g.pop_front();
+        }
+        g.push_back((track_id, data));
+    }
+}
+
 struct ActivePipeline {
     decoder: Child,
     sink: Option<Child>,
@@ -1178,7 +1205,39 @@ struct ActivePipeline {
 }
 
 impl ActivePipeline {
-    fn spawn(url: &str) -> Result<Self, String> {
+    fn spawn_from_ram(bytes: Vec<u8>) -> Result<Self, String> {
+        let _ = Command::new("pkill").args(["-9", "-x", "atri-mp3dec"]).stdout(Stdio::null()).stderr(Stdio::null()).status();
+        let mut dec = Command::new("atri-mp3dec")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| format!("atri-mp3dec spawn failed: {e}"))?;
+        let dec_in = dec.stdin.take().ok_or("Missing atri-mp3dec stdin")?;
+        let dec_out = dec.stdout.take().ok_or("Missing atri-mp3dec stdout")?;
+        let sink = Command::new("aplay")
+            .args(["-q", "-B", "100000", "-F", "25000", "-t", "raw", "-f", "S16_LE", "-r", "44100", "-c", "2"])
+            .stdin(Stdio::from(dec_out))
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| { let _ = dec.kill(); format!("aplay spawn failed: {e}") })?;
+        thread::spawn(move || {
+            use std::io::Write;
+            let mut w = dec_in;
+            let _ = w.write_all(&bytes);
+        });
+        Ok(Self { decoder: dec, sink: Some(sink), paused: false, started_at: std::time::Instant::now() })
+    }
+
+    fn spawn_with_cache(track_id: &str, url: &str) -> Result<Self, String> {
+        if let Some(cached) = mp3_cache_get(track_id) {
+            return Self::spawn_from_ram(cached);
+        }
+        Self::spawn_inner(track_id, url)
+    }
+
+    fn spawn_inner(track_id: &str, url: &str) -> Result<Self, String> {
         // Ensure zero overlapping decoders from any previous track
         let _ = Command::new("pkill")
             .args(["-9", "-x", "atri-mp3dec"])
@@ -1289,14 +1348,16 @@ impl ActivePipeline {
                     format!("aplay spawn failed: {e}")
                 })?;
             let stream_url = url.to_string();
-            // Full-speed RAM-buffered feeder: drains Yandex CDN in ~0.5s so CDN never times out at 1/4 track!
+            let cache_tid = track_id.to_string();
+            // Full-speed RAM-buffered feeder + 4-track LRU cache (instant prev switch + zero 1/4 CDN drop!)
             let shared = std::sync::Arc::new((
                 std::sync::Mutex::new((std::collections::VecDeque::<Vec<u8>>::new(), false)),
                 std::sync::Condvar::new(),
             ));
             let prod_s = shared.clone();
             thread::spawn(move || {
-                let _ = crate::https::request_stream(
+                let mut full_buf: Vec<u8> = Vec::with_capacity(4 * 1024 * 1024);
+                let ok = crate::https::request_stream(
                     &stream_url,
                     None,
                     &[],
@@ -1305,13 +1366,19 @@ impl ActivePipeline {
                     64 * 1024 * 1024,
                     None,
                     |chunk| {
+                        if full_buf.len() + chunk.len() <= 18 * 1024 * 1024 {
+                            full_buf.extend_from_slice(chunk);
+                        }
                         let (lk, cv) = &*prod_s;
                         let mut g = lk.lock().unwrap();
                         g.0.push_back(chunk.to_vec());
                         cv.notify_one();
                         Ok(())
                     },
-                );
+                ).is_ok();
+                if ok && !cache_tid.is_empty() && !full_buf.is_empty() {
+                    mp3_cache_put(cache_tid, full_buf);
+                }
                 let (lk, cv) = &*prod_s;
                 let mut g = lk.lock().unwrap();
                 g.1 = true;
@@ -1511,21 +1578,28 @@ impl PlayerState {
         self.status.error = None;
         write_status(&mut self.status);
 
-        let cached_url = self.prefetch.lock().ok().and_then(|mut g| {
-            if g.as_ref().map(|(id, _)| id == &track.id).unwrap_or(false) {
-                g.take().map(|(_, u)| u)
-            } else {
-                None
-            }
-        });
-        let stream_res = match cached_url {
-            Some(u) => Ok(u),
-            None => resolve_track_stream_url(&auth, &track.id),
+        let pipe_res = if let Some(cached) = mp3_cache_get(&track.id) {
+            ActivePipeline::spawn_from_ram(cached)
+        } else {
+            let cached_url = self.prefetch.lock().ok().and_then(|mut g| {
+                if g.as_ref().map(|(id, _)| id == &track.id).unwrap_or(false) {
+                    g.take().map(|(_, u)| u)
+                } else {
+                    None
+                }
+            });
+            let stream_res = match cached_url {
+                Some(u) => Ok(u),
+                None => resolve_track_stream_url(&auth, &track.id),
+            };
+            stream_res.and_then(|url| ActivePipeline::spawn_with_cache(&track.id, &url))
         };
-        match stream_res.and_then(|url| ActivePipeline::spawn(&url)) {
+        match pipe_res {
             Ok(pipe) => {
                 self.pipeline = Some(pipe);
                 self.status.state = "playing".into();
+                self.status.position_ms = 0;
+                self.status.started_ts = now_unix_i64();
                 self.status.error = None;
                 write_status(&mut self.status);
                 println!("[ymusic] Playing: {} — {}", track.artist, track.title);
@@ -1792,6 +1866,11 @@ impl PlayerState {
             if let Some(ref mut p) = self.pipeline {
                 if !p.paused {
                     p.set_paused(true);
+                    if self.status.started_ts > 0 {
+                        let elapsed = (now_unix_i64() - self.status.started_ts).max(0) * 1000;
+                        self.status.position_ms = (self.status.position_ms + elapsed).clamp(0, self.status.duration_ms.max(0));
+                        self.status.started_ts = 0;
+                    }
                     self.status.state = "paused".into();
                     write_status(&mut self.status);
                 }
@@ -1800,6 +1879,7 @@ impl PlayerState {
             if let Some(ref mut p) = self.pipeline {
                 if p.paused {
                     p.set_paused(false);
+                    self.status.started_ts = now_unix_i64();
                     self.status.state = "playing".into();
                     write_status(&mut self.status);
                 }
@@ -1816,13 +1896,13 @@ impl PlayerState {
                 self.handle_command("pause");
             }
         } else if cmd == "next" {
-            if self.last_skip_at.map(|t| t.elapsed() < Duration::from_millis(650)).unwrap_or(false) {
+            if self.last_skip_at.map(|t| t.elapsed() < Duration::from_millis(1000)).unwrap_or(false) {
                 return;
             }
             self.last_skip_at = Some(std::time::Instant::now());
             self.next_track(true);
         } else if cmd == "prev" {
-            if self.last_skip_at.map(|t| t.elapsed() < Duration::from_millis(650)).unwrap_or(false) {
+            if self.last_skip_at.map(|t| t.elapsed() < Duration::from_millis(250)).unwrap_or(false) {
                 return;
             }
             self.last_skip_at = Some(std::time::Instant::now());

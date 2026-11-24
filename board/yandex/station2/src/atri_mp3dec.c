@@ -26,24 +26,30 @@ typedef struct {
 static eq_band_t g_eq[5];
 static int g_eq_enabled = 0;
 static float g_eq_gains[5] = {0.f, 0.f, 0.f, 0.f, 0.f};
+static float g_eq_headroom = 1.0f;
+static ino_t g_eq_ino = 0;
+static long g_eq_nsec = -1;
 static time_t g_eq_mtime = 0;
 static int g_eq_sr = 44100;
 
 static void eq_calc_coeffs(int sr) {
     static const float freqs[5] = {60.f, 230.f, 910.f, 3600.f, 14000.f};
-    static const float qs[5] = {0.75f, 1.0f, 1.0f, 1.0f, 0.75f};
+    static const float qs[5] = {0.65f, 0.72f, 0.72f, 0.72f, 0.65f};
     if (sr < 8000) sr = 44100;
     g_eq_sr = sr;
+    float max_boost = 0.f;
     for (int i = 0; i < 5; i++) {
         float db = g_eq_gains[i];
         if (db < -12.f) db = -12.f;
         if (db > 12.f) db = 12.f;
+        if (db > max_boost) max_boost = db;
         if (fabsf(db) < 0.05f) {
             g_eq[i].b0 = 1.f; g_eq[i].b1 = 0.f; g_eq[i].b2 = 0.f;
             g_eq[i].a1 = 0.f; g_eq[i].a2 = 0.f;
             continue;
         }
-        float A = powf(10.f, db / 40.f);
+        /* Pronounced 1.35x musical shelf/peak response */
+        float A = powf(10.f, (db * 1.35f) / 40.f);
         float w0 = 2.f * 3.14159265f * freqs[i] / (float)sr;
         if (w0 > 2.95f) w0 = 2.95f;
         float cw = cosf(w0), sw = sinf(w0);
@@ -79,6 +85,7 @@ static void eq_calc_coeffs(int sr) {
         g_eq[i].a1 = a1 / a0;
         g_eq[i].a2 = a2 / a0;
     }
+    g_eq_headroom = (max_boost > 2.f) ? powf(10.f, -max_boost * 0.025f) : 1.0f;
 }
 
 static void eq_reload_if_changed(int sr) {
@@ -87,8 +94,10 @@ static void eq_reload_if_changed(int sr) {
         g_eq_enabled = 0;
         return;
     }
-    if (st.st_mtime == g_eq_mtime && sr == g_eq_sr) return;
+    if (st.st_ino == g_eq_ino && st.st_mtime == g_eq_mtime && st.st_mtim.tv_nsec == g_eq_nsec && sr == g_eq_sr) return;
+    g_eq_ino = st.st_ino;
     g_eq_mtime = st.st_mtime;
+    g_eq_nsec = st.st_mtim.tv_nsec;
     FILE *fp = fopen(EQ_CONFIG_FILE, "r");
     if (!fp) return;
     char buf[512];
@@ -183,7 +192,7 @@ int main(void) {
         if (samples > 0) {
             int ch = (info.channels == 1) ? 1 : info.channels;
             int total = samples * ch;
-            if ((frame_cnt & 15u) == 0u) {
+            if ((frame_cnt & 3u) == 0u) {
                 eq_reload_if_changed(info.hz > 0 ? info.hz : 44100);
             }
 
@@ -191,7 +200,7 @@ int main(void) {
             if (g_eq_enabled) {
                 for (int i = 0; i < samples; i++) {
                     for (int c = 0; c < ch && c < 2; c++) {
-                        float x = (float)pcm[i * ch + c];
+                        float x = (float)pcm[i * ch + c] * g_eq_headroom;
                         for (int b = 0; b < 5; b++) {
                             float y = g_eq[b].b0 * x + g_eq[b].z1[c];
                             g_eq[b].z1[c] = g_eq[b].b1 * x - g_eq[b].a1 * y + g_eq[b].z2[c];

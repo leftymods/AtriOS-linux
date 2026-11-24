@@ -1161,7 +1161,7 @@ pub fn start_scheduler() {
         let mut last_t_mtime = fs::metadata(TIMERS_FILE).and_then(|m| m.modified()).ok();
         let mut last_a_mtime = fs::metadata(ALARMS_FILE).and_then(|m| m.modified()).ok();
         loop {
-        thread::sleep(Duration::from_millis(500));
+        thread::sleep(Duration::from_millis(200));
         if ALERT_RINGING.load(Ordering::SeqCst) {
             continue;
         }
