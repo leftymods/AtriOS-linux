@@ -177,18 +177,18 @@ fun BigPlayerOverlay(
                 },
                 nextCard = {
                     AsyncCoverArt(
-                        url = ymusic.nextCoverUrl.ifBlank { ymusic.coverUrl },
+                        url = ymusic.nextCoverUrl,
                         shape = RoundedCornerShape(22.dp),
                         modifier = Modifier.fillMaxSize(),
-                        fallbackIcon = Icons.Rounded.Album
+                        fallbackIcon = Icons.Rounded.SkipNext
                     )
                 },
                 prevCard = {
                     AsyncCoverArt(
-                        url = ymusic.prevCoverUrl.ifBlank { ymusic.coverUrl },
+                        url = ymusic.prevCoverUrl,
                         shape = RoundedCornerShape(22.dp),
                         modifier = Modifier.fillMaxSize(),
-                        fallbackIcon = Icons.Rounded.Album
+                        fallbackIcon = Icons.Rounded.SkipPrevious
                     )
                 }
             )
@@ -307,8 +307,16 @@ fun BigPlayerOverlay(
                             modifier = Modifier.size(34.dp)
                         )
                     }
-                    IconButton(onClick = { coverDir = 1; elapsedSec = 0; onControl("next") }) {
-                        Icon(painterResource(R.drawable.ic_ym_next), contentDescription = "Следующий", tint = Color.White, modifier = Modifier.size(30.dp))
+                    IconButton(
+                        onClick = { if (canSwipeNext) { coverDir = 1; elapsedSec = 0; onControl("next") } },
+                        enabled = canSwipeNext
+                    ) {
+                        Icon(
+                            painterResource(R.drawable.ic_ym_next),
+                            contentDescription = "Следующий",
+                            tint = if (canSwipeNext) Color.White else Color.White.copy(alpha = 0.28f),
+                            modifier = Modifier.size(30.dp)
+                        )
                     }
                     IconButton(onClick = { onControl("like") }) {
                         Icon(

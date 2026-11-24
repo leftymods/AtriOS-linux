@@ -73,14 +73,17 @@ fun SwipeableTwoCardRibbon(
                         scope.launch {
                             if (latestCanNext && cur < -thresh) {
                                 settling = true
-                                offsetX.animateTo(-span, tween(210, easing = FastOutSlowInEasing))
+                                // Smooth slide out -> trigger the exact same skip action as the Next button -> snap cleanly after frame
+                                offsetX.animateTo(-span, tween(190, easing = FastOutSlowInEasing))
                                 latestNext()
+                                withFrameNanos { }
                                 offsetX.snapTo(0f)
                                 settling = false
                             } else if (latestCanPrev && cur > thresh) {
                                 settling = true
-                                offsetX.animateTo(span, tween(210, easing = FastOutSlowInEasing))
+                                offsetX.animateTo(span, tween(190, easing = FastOutSlowInEasing))
                                 latestPrev()
+                                withFrameNanos { }
                                 offsetX.snapTo(0f)
                                 settling = false
                             } else {

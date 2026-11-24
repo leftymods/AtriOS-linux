@@ -352,7 +352,7 @@ fun AtriOSApp(
                 val locked = nowMs - lastUserActionRef.get() < 1600L
                 if (!locked || (mergedYm.title.isNotBlank() && mergedYm.title != status.ymusic.title) || mergedYm.state == wantState || isTrackTransitioning) {
                     status = status.copy(ymusic = mergedYm)
-                    if (isTrackTransitioning && mergedYm.trackId.isNotBlank() && !mergedYm.trackId.startsWith("opt_")) {
+                    if (isTrackTransitioning && mergedYm.trackId.isNotBlank() && !mergedYm.trackId.startsWith("opt_") && mergedYm.state != "loading") {
                         isTrackTransitioning = false
                     }
                 }
@@ -446,6 +446,7 @@ fun AtriOSApp(
                 if (cur.nextTitle.isNotBlank()) {
                     status = status.copy(
                         ymusic = cur.copy(
+                            state = "loading",
                             trackId = "opt_next_${nowMs}",
                             title = cur.nextTitle,
                             artist = cur.nextArtist,
@@ -459,6 +460,8 @@ fun AtriOSApp(
                             positionMs = 0L
                         )
                     )
+                } else {
+                    status = status.copy(ymusic = cur.copy(state = "loading", positionMs = 0L))
                 }
             }
             "prev" -> {
@@ -814,7 +817,7 @@ fun AtriOSApp(
                                 trackKey = ym.trackId,
                                 onSwipeNext = { dispatchYMusicControl("next") },
                                 onSwipePrev = { dispatchYMusicControl("prev") },
-                                canSwipeNext = !isTrackTransitioning,
+                                canSwipeNext = !isTrackTransitioning && status.ymusic.state != "loading",
                                 canSwipePrev = true,
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -957,7 +960,7 @@ fun AtriOSApp(
                                 onOpenEqualizer = { showEqSheet = true },
                                 volume = sliderVol,
                                 mute = status.mute,
-                                canSwipeNext = !isTrackTransitioning,
+                                canSwipeNext = !isTrackTransitioning && status.ymusic.state != "loading",
                                 canSwipePrev = true
                             )
                         }
@@ -1552,7 +1555,7 @@ fun AtriOSApp(
                     onPlayWave = { client.ymusicPlay("wave", null) },
                     onDismiss = { showBigPlayer = false },
                     onOpenEqualizer = { showEqSheet = true },
-                    canSwipeNext = !isTrackTransitioning,
+                    canSwipeNext = !isTrackTransitioning && status.ymusic.state != "loading",
                     canSwipePrev = true
                 )
             }
