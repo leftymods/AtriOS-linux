@@ -192,9 +192,7 @@ int main(void) {
         if (samples > 0) {
             int ch = (info.channels == 1) ? 1 : info.channels;
             int total = samples * ch;
-            if ((frame_cnt & 3u) == 0u) {
-                eq_reload_if_changed(info.hz > 0 ? info.hz : 44100);
-            }
+            eq_reload_if_changed(info.hz > 0 ? info.hz : 44100);
 
             /* Apply live 5-band stereo EQ before envelope & playback */
             if (g_eq_enabled) {

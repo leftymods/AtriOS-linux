@@ -205,10 +205,17 @@ static inline float biquad_hpf192(biquad_t *q, float x) {
 
 static float g_lp48[VQE_MICS];
 static biquad_t g_hpf[VQE_MICS][2];
+static float g_lp34[VQE_MICS];
 static double g_msq_acc[VQE_MICS];
 static float g_m_ema[VQE_MICS];
 static float g_m_noise[VQE_MICS];
+static float g_m_weight[VQE_MICS] = {
+    1.0f / VQE_MICS, 1.0f / VQE_MICS, 1.0f / VQE_MICS, 1.0f / VQE_MICS,
+    1.0f / VQE_MICS, 1.0f / VQE_MICS, 1.0f / VQE_MICS
+};
 static int g_best_mic = 0;
+static int g_second_mic = 1;
+static int g_speech_focused = 0;
 
 /* ---- BNR + speech AGC state ---- */
 static float g_nr_hist[NR_HOPS];
@@ -439,8 +446,6 @@ int main(int argc, char **argv) {
         for (int i = 0; i < BLK; i++) {
             const int32_t *fr = in + i * DECIM * CAP_CH;
             float s16[VQE_MICS];
-            float h_sum = 0.0f;
-            int h_cnt = 0;
             for (int m = 0; m < VQE_MICS; m++) {
                 float d_acc = 0.0f;
                 for (int d = 0; d < DECIM; d++) {
@@ -451,14 +456,15 @@ int main(int argc, char **argv) {
                 float x16 = biquad_hpf192(&g_hpf[m][0], d_acc / (float)DECIM);
                 x16 = biquad_hpf192(&g_hpf[m][1], x16);
                 s16[m] = x16;
-                g_msq_acc[m] += (double)x16 * x16;
-                if (g_m_noise[m] < 1950.0f && (g_m_ema[m] >= 1.0f || g_ecount < 5)) {
-                    h_sum += x16;
-                    h_cnt++;
-                }
+                /* Speech-band (~192..3400 Hz) energy per mic for proximity speech detection */
+                g_lp34[m] += 0.58f * (x16 - g_lp34[m]);
+                g_msq_acc[m] += (double)g_lp34[m] * g_lp34[m];
             }
-            float avg_h = (h_cnt > 0) ? (h_sum / (float)h_cnt) : s16[g_best_mic];
-            float mic = 0.72f * s16[g_best_mic] + 0.28f * avg_h;
+            /* Weighted mix: listens to ALL mics when idle, focuses on the 2 closest mics on speech detect */
+            float mic = 0.0f;
+            for (int m = 0; m < VQE_MICS; m++) {
+                mic += g_m_weight[m] * s16[m];
+            }
 
             long q = mp - g_delay;
             float r = 0.f;
@@ -494,13 +500,15 @@ int main(int argc, char **argv) {
             g_macc += fabsf(mic);
             g_racc_env += fabsf(rraw);
             if (++g_ecnt == ENV_HOP) {
-                /* Per-mic RMSChooser (alpha=0.90, micSwitchThreshold=0.20) */
-                int cand_m = g_best_mic;
-                float best_snr = -1.0f;
+                /* Continuous 7-mic speech-band monitoring + proximity focus on closest 1-2 mics */
+                int cand1 = g_best_mic, cand2 = g_second_mic;
+                float best_snr = -1.0f, second_snr = -1.0f;
+                int healthy[VQE_MICS];
+                int healthy_cnt = 0;
                 for (int m = 0; m < VQE_MICS; m++) {
                     float mr = sqrtf((float)(g_msq_acc[m] / ENV_HOP));
                     g_msq_acc[m] = 0.0;
-                    g_m_ema[m] = 0.90f * g_m_ema[m] + 0.10f * mr;
+                    g_m_ema[m] = 0.85f * g_m_ema[m] + 0.15f * mr;
                     if (mr < g_m_noise[m]) {
                         g_m_noise[m] = 0.85f * g_m_noise[m] + 0.15f * mr;
                     } else {
@@ -508,16 +516,46 @@ int main(int argc, char **argv) {
                     }
                     if (g_m_noise[m] < 10.0f) g_m_noise[m] = 10.0f;
                     if (g_m_noise[m] > 2000.0f) g_m_noise[m] = 2000.0f;
-                    if (g_m_ema[m] >= 1.0f && g_m_noise[m] < 1950.0f) {
+                    healthy[m] = (g_m_noise[m] < 1950.0f && (g_m_ema[m] >= 1.0f || g_ecount < 5)) ? 1 : 0;
+                    if (healthy[m]) {
+                        healthy_cnt++;
                         float snr = g_m_ema[m] / (g_m_noise[m] + 1.0f);
                         if (snr > best_snr) {
+                            second_snr = best_snr;
+                            cand2 = cand1;
                             best_snr = snr;
-                            cand_m = m;
+                            cand1 = m;
+                        } else if (snr > second_snr) {
+                            second_snr = snr;
+                            cand2 = m;
                         }
                     }
                 }
-                if (g_m_ema[g_best_mic] < 1.0f || g_m_ema[cand_m] > g_m_ema[g_best_mic] * 1.20f) {
-                    g_best_mic = cand_m;
+                int speech_now = (best_snr >= 2.2f && g_m_ema[cand1] >= 45.0f);
+                g_speech_focused = speech_now;
+                if (speech_now) {
+                    if (g_m_ema[g_best_mic] < 1.0f || g_m_ema[cand1] > g_m_ema[g_best_mic] * 1.15f) {
+                        g_best_mic = cand1;
+                    }
+                    g_second_mic = (cand2 != g_best_mic) ? cand2 : ((g_best_mic + 1) % VQE_MICS);
+                }
+                float w_sum = 0.0f;
+                for (int m = 0; m < VQE_MICS; m++) {
+                    float tgt = 0.0f;
+                    if (speech_now) {
+                        if (m == g_best_mic) tgt = 0.65f;
+                        else if (m == g_second_mic && healthy[m]) tgt = 0.35f;
+                    } else if (healthy_cnt > 0 && healthy[m]) {
+                        tgt = 1.0f / (float)healthy_cnt;
+                    } else if (m == g_best_mic) {
+                        tgt = 1.0f;
+                    }
+                    float alpha = speech_now ? 0.25f : 0.05f;
+                    g_m_weight[m] += alpha * (tgt - g_m_weight[m]);
+                    w_sum += g_m_weight[m];
+                }
+                if (w_sum > 0.001f) {
+                    for (int m = 0; m < VQE_MICS; m++) g_m_weight[m] /= w_sum;
                 }
 
                 /* Update 480 ms stationary noise floor */

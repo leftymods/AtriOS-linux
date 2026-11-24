@@ -1447,10 +1447,23 @@ fn spawn_wifi_relay_worker() {
                 cached_status = build_status_payload();
                 last_full_status = std::time::Instant::now();
             } else if let Json::Obj(ref mut pairs) = cached_status {
-                // Always inject live ymusic status (~0.05ms file read) so track NEVER flickers back to old!
+                // Always inject live ymusic, volume/mute, and EQ (~0.1ms local reads) so relay NEVER serves stale track/vol/EQ!
                 let live_ym = crate::ymusic::read_status_json();
+                let live_eq = read_eq_info();
+                let live_vol = get_current_volume();
                 if let Some(entry) = pairs.iter_mut().find(|(k, _)| k.as_str() == "ymusic") {
-                    *entry.1 = live_ym;
+                    entry.1 = live_ym;
+                }
+                if let Some(entry) = pairs.iter_mut().find(|(k, _)| k.as_str() == "eq") {
+                    entry.1 = live_eq;
+                }
+                if let Some((_, Json::Obj(ref mut audio_pairs))) = pairs.iter_mut().find(|(k, _)| k.as_str() == "audio") {
+                    if let Some(ve) = audio_pairs.iter_mut().find(|(k, _)| k.as_str() == "volume") {
+                        ve.1 = Json::Num(live_vol as f64);
+                    }
+                    if let Some(me) = audio_pairs.iter_mut().find(|(k, _)| k.as_str() == "mute") {
+                        me.1 = Json::Bool(live_vol == 0);
+                    }
                 }
             }
             let ident = crate::hardware::device_identity();
@@ -1472,12 +1485,17 @@ fn spawn_wifi_relay_worker() {
                 Ok(resp) => {
                     if let Some(cmd_id) = resp.get_str("cmd_id").filter(|s| !s.is_empty()).map(|s| s.to_string()) {
                         if let Some(cmd_payload) = resp.get("payload").cloned() {
-                            // Execute & reply asynchronously so the poll loop re-enters /poll immediately (<20ms)!
+                            let cmd_name = cmd_payload.get_str("cmd").unwrap_or("").to_string();
+                            let is_fast_state_cmd = matches!(
+                                cmd_name.as_str(),
+                                "set_volume" | "volume" | "set_mute" | "mute" | "set_eq" | "ymusic_control" | "ymusic_play"
+                            );
                             let base_c = base.clone();
                             let auth_c = auth.clone();
                             let ident_c = ident.clone();
                             let ca_c = ca_owned.clone();
-                            thread::spawn(move || {
+                            if is_fast_state_cmd {
+                                // Execute fast state mutation inline (~5-90ms) BEFORE re-entering /poll so the very next /poll pushes the NEW track/vol/EQ!
                                 let reply = match process_command(&cmd_payload) {
                                     Ok(r) => r,
                                     Err(e) => obj(vec![
@@ -1485,27 +1503,60 @@ fn spawn_wifi_relay_worker() {
                                         ("error", Json::Str(e)),
                                     ]),
                                 };
-                                let reply_url = format!("{base_c}/relay/v1/device/{}/reply", ident_c.device_id);
-                                let reply_body = obj(vec![
-                                    ("cmd_id", Json::Str(cmd_id)),
-                                    ("reply", reply),
-                                ]);
-                                let hdrs_c = [
-                                    ("Authorization", auth_c.as_str()),
-                                    ("X-Atri-Device-Id", ident_c.device_id.as_str()),
-                                    ("X-Atri-Device-Key", ident_c.device_key.as_str()),
-                                    ("X-Atri-Hw-Hash", ident_c.hw_hash.as_str()),
-                                ];
-                                let _ = crate::https::request_json(
-                                    &reply_url,
-                                    Some(&reply_body),
-                                    &hdrs_c,
-                                    ca_c.as_deref(),
-                                    10,
-                                    256 * 1024,
-                                    None,
-                                );
-                            });
+                                thread::spawn(move || {
+                                    let reply_url = format!("{base_c}/relay/v1/device/{}/reply", ident_c.device_id);
+                                    let reply_body = obj(vec![
+                                        ("cmd_id", Json::Str(cmd_id)),
+                                        ("reply", reply),
+                                    ]);
+                                    let hdrs_c = [
+                                        ("Authorization", auth_c.as_str()),
+                                        ("X-Atri-Device-Id", ident_c.device_id.as_str()),
+                                        ("X-Atri-Device-Key", ident_c.device_key.as_str()),
+                                        ("X-Atri-Hw-Hash", ident_c.hw_hash.as_str()),
+                                    ];
+                                    let _ = crate::https::request_json(
+                                        &reply_url,
+                                        Some(&reply_body),
+                                        &hdrs_c,
+                                        ca_c.as_deref(),
+                                        10,
+                                        256 * 1024,
+                                        None,
+                                    );
+                                });
+                            } else {
+                                // Heavy/network commands run on a background thread so /poll stays responsive
+                                thread::spawn(move || {
+                                    let reply = match process_command(&cmd_payload) {
+                                        Ok(r) => r,
+                                        Err(e) => obj(vec![
+                                            ("type", Json::Str("error".into())),
+                                            ("error", Json::Str(e)),
+                                        ]),
+                                    };
+                                    let reply_url = format!("{base_c}/relay/v1/device/{}/reply", ident_c.device_id);
+                                    let reply_body = obj(vec![
+                                        ("cmd_id", Json::Str(cmd_id)),
+                                        ("reply", reply),
+                                    ]);
+                                    let hdrs_c = [
+                                        ("Authorization", auth_c.as_str()),
+                                        ("X-Atri-Device-Id", ident_c.device_id.as_str()),
+                                        ("X-Atri-Device-Key", ident_c.device_key.as_str()),
+                                        ("X-Atri-Hw-Hash", ident_c.hw_hash.as_str()),
+                                    ];
+                                    let _ = crate::https::request_json(
+                                        &reply_url,
+                                        Some(&reply_body),
+                                        &hdrs_c,
+                                        ca_c.as_deref(),
+                                        10,
+                                        256 * 1024,
+                                        None,
+                                    );
+                                });
+                            }
                         }
                     }
                 }
