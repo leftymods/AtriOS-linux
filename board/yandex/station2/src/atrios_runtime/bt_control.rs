@@ -463,6 +463,22 @@ fn set_screen_mode(mode: &str) {
     let _ = fs::write(SCREEN_MODE_FILE, mode);
 }
 
+fn read_vqe_info() -> Json {
+    if let Ok(txt) = fs::read_to_string("/var/run/atrios/aec_vqe.json") {
+        if let Ok(j) = Json::parse(&txt) {
+            return j;
+        }
+    }
+    obj(vec![
+        ("erle_db", Json::Num(0.0)),
+        ("snr_db", Json::Num(0.0)),
+        ("lag_ms", Json::Num(0.0)),
+        ("best_mic", Json::Num(0.0)),
+        ("barge_in", Json::Bool(false)),
+        ("ref_active", Json::Bool(false)),
+    ])
+}
+
 fn build_status_payload() -> Json {
     let vol = get_current_volume();
     let (dev_name, codename, rev, os_name, fw_ver) = read_device_meta();
@@ -533,6 +549,7 @@ fn build_status_payload() -> Json {
         ),
         ("screen_mode", Json::Str(get_screen_mode())),
         ("ai", get_ai_info()),
+        ("vqe", read_vqe_info()),
         ("ota", crate::ota::read_ota_status_json()),
         ("ymusic", crate::ymusic::read_status_json()),
         (

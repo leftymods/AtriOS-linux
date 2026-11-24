@@ -42,8 +42,150 @@
 #define MAXLAG    60                        /* 600 ms */
 #define REF_SOCK  "/var/run/atrios/aec_ref.sock"
 #define STAT_FILE "/var/run/atrios/aec.stat"
+#define VQE_JSON  "/var/run/atrios/aec_vqe.json"
+#define BARGE_FILE "/var/run/atrios/barge_in"
+#define FFT_N     256
+#define FFT_HALF  129
 #define RING      (1 << 17)
 #define RMASK     (RING - 1)
+
+/* ---- Frequency-Domain STFT-Kalman Residual Echo Suppressor (256-pt FFT, 50% OLA) ---- */
+static float g_hann[FFT_N];
+static float g_e_win[FFT_N];
+static float g_r_win[FFT_N];
+static float g_ola[BLK];
+static float g_srr[FFT_HALF];
+static float g_ser[FFT_HALF];
+static float g_see[FFT_HALF];
+static float g_snr_speech_db = 0.0f;
+static int g_barge_streak = 0;
+static int g_barge_active = 0;
+
+static void init_stft(void) {
+    for (int i = 0; i < FFT_N; i++) {
+        g_hann[i] = 0.5f * (1.0f - cosf(2.0f * 3.14159265f * (float)i / (float)FFT_N));
+    }
+    for (int k = 0; k < FFT_HALF; k++) {
+        g_srr[k] = 1e3f;
+        g_ser[k] = 0.0f;
+        g_see[k] = 1e3f;
+    }
+}
+
+static void fft256(float *re, float *im, int inv) {
+    int j = 0;
+    for (int i = 1; i < FFT_N; i++) {
+        int bit = FFT_N >> 1;
+        for (; j & bit; bit >>= 1) j ^= bit;
+        j ^= bit;
+        if (i < j) {
+            float tr = re[i]; re[i] = re[j]; re[j] = tr;
+            float ti = im[i]; im[i] = im[j]; im[j] = ti;
+        }
+    }
+    for (int len = 2; len <= FFT_N; len <<= 1) {
+        float ang = (inv ? 2.0f : -2.0f) * 3.14159265f / (float)len;
+        float wlen_r = cosf(ang), wlen_i = sinf(ang);
+        for (int i = 0; i < FFT_N; i += len) {
+            float wr = 1.0f, wi = 0.0f;
+            int half = len >> 1;
+            for (int k = 0; k < half; k++) {
+                int u = i + k, v = i + k + half;
+                float vr = re[v] * wr - im[v] * wi;
+                float vi = re[v] * wi + im[v] * wr;
+                re[v] = re[u] - vr; im[v] = im[u] - vi;
+                re[u] += vr;        im[u] += vi;
+                float nwr = wr * wlen_r - wi * wlen_i;
+                wi = wr * wlen_i + wi * wlen_r;
+                wr = nwr;
+            }
+        }
+    }
+    if (inv) {
+        const float inv_n = 1.0f / (float)FFT_N;
+        for (int i = 0; i < FFT_N; i++) {
+            re[i] *= inv_n;
+            im[i] *= inv_n;
+        }
+    }
+}
+
+static void stft_kalman_process_block(float *e_blk, const float *r_blk, int ref_active) {
+    memmove(g_e_win, g_e_win + BLK, BLK * sizeof(float));
+    memcpy(g_e_win + BLK, e_blk, BLK * sizeof(float));
+    memmove(g_r_win, g_r_win + BLK, BLK * sizeof(float));
+    memcpy(g_r_win + BLK, r_blk, BLK * sizeof(float));
+
+    float ere[FFT_N], eim[FFT_N], rre[FFT_N], rim[FFT_N];
+    for (int i = 0; i < FFT_N; i++) {
+        ere[i] = g_e_win[i] * g_hann[i];
+        eim[i] = 0.0f;
+        rre[i] = g_r_win[i] * g_hann[i];
+        rim[i] = 0.0f;
+    }
+    fft256(ere, eim, 0);
+    fft256(rre, rim, 0);
+
+    /* Bins 5..54 correspond to ~312 Hz .. 3375 Hz (SberDevices speech band 300..3400 Hz) */
+    double speech_p = 0.0, resid_p = 0.0;
+    for (int k = 0; k < FFT_HALF; k++) {
+        float pe = ere[k] * ere[k] + eim[k] * eim[k];
+        float pr = rre[k] * rre[k] + rim[k] * rim[k];
+        float xcor = sqrtf(pe * pr);
+        g_see[k] = 0.82f * g_see[k] + 0.18f * pe;
+        g_srr[k] = 0.82f * g_srr[k] + 0.18f * pr;
+        g_ser[k] = 0.86f * g_ser[k] + 0.14f * xcor;
+
+        float gain = 1.0f;
+        if (ref_active && g_srr[k] > 500.0f) {
+            float coh = (g_ser[k] * g_ser[k]) / (g_see[k] * g_srr[k] + 1.0f);
+            if (coh > 1.0f) coh = 1.0f;
+            /* Kalman-Wiener residual echo suppressor: preserves speech, crushes coherent echo */
+            float echo_est = coh * g_see[k] * 1.15f;
+            float clean_est = g_see[k] - echo_est;
+            if (clean_est < 0.0f) clean_est = 0.0f;
+            gain = (clean_est + 0.08f * g_see[k]) / (g_see[k] + 1.0f);
+            if (gain < 0.14f) gain = 0.14f;
+            if (gain > 1.0f) gain = 1.0f;
+        }
+        ere[k] *= gain;
+        eim[k] *= gain;
+        if (k > 0 && k < FFT_N / 2) {
+            ere[FFT_N - k] = ere[k];
+            eim[FFT_N - k] = -eim[k];
+        }
+        if (k >= 5 && k <= 54) {
+            speech_p += (double)(ere[k] * ere[k] + eim[k] * eim[k]);
+            resid_p += (double)(pr * 0.02f + 1.0f);
+        }
+    }
+    fft256(ere, eim, 1);
+    for (int i = 0; i < BLK; i++) {
+        e_blk[i] = g_ola[i] + ere[i];
+        g_ola[i] = ere[i + BLK];
+    }
+
+    /* Speech-band SNR & Barge-In VAD detector */
+    float noise_p = (g_noise_env * g_noise_env) * 50.0f * (float)FFT_N + 1e4f;
+    float snr_lin = (float)(speech_p / (noise_p + 1.0f));
+    float snr_db = 10.0f * log10f(snr_lin + 0.01f);
+    if (snr_db < -10.0f) snr_db = -10.0f;
+    if (snr_db > 45.0f) snr_db = 45.0f;
+    g_snr_speech_db = 0.85f * g_snr_speech_db + 0.15f * snr_db;
+
+    if (ref_active && snr_lin > 4.2f && speech_p > resid_p * 0.25) {
+        if (++g_barge_streak >= 4) {
+            if (!g_barge_active) {
+                g_barge_active = 1;
+                FILE *bf = fopen(BARGE_FILE, "w");
+                if (bf) { fprintf(bf, "%ld\n", (long)time(NULL)); fclose(bf); }
+            }
+        }
+    } else {
+        if (g_barge_streak > 0) g_barge_streak--;
+        if (g_barge_streak == 0) g_barge_active = 0;
+    }
+}
 
 /* ---- VQE mic array state (CIRC_6_PLUS_1_R425) ---- */
 typedef struct {
@@ -199,12 +341,22 @@ static void estimate_delay(void) {
 }
 
 static void write_stat(double ratio_db, int active) {
+    long lag_ms = g_delay * 1000 / SR;
     FILE *f = fopen(STAT_FILE ".tmp", "w");
-    if (!f) return;
-    fprintf(f, "delay_ms=%ld\nreduction_db=%.1f\nref_active=%d\n",
-            g_delay * 1000 / SR, ratio_db, active);
-    fclose(f);
-    rename(STAT_FILE ".tmp", STAT_FILE);
+    if (f) {
+        fprintf(f, "delay_ms=%ld\nreduction_db=%.1f\nref_active=%d\n", lag_ms, ratio_db, active);
+        fclose(f);
+        rename(STAT_FILE ".tmp", STAT_FILE);
+    }
+    FILE *jf = fopen(VQE_JSON ".tmp", "w");
+    if (jf) {
+        fprintf(jf, "{\"erle_db\":%.1f,\"snr_db\":%.1f,\"lag_ms\":%ld,\"best_mic\":%d,\"barge_in\":%s,\"ref_active\":%s}\n",
+                ratio_db, g_snr_speech_db, lag_ms, g_best_mic,
+                g_barge_active ? "true" : "false",
+                active ? "true" : "false");
+        fclose(jf);
+        rename(VQE_JSON ".tmp", VQE_JSON);
+    }
 }
 
 static int spawn_arecord(void) {
@@ -227,6 +379,7 @@ static int spawn_arecord(void) {
 
 int main(int argc, char **argv) {
     int use_stdin = (argc > 1 && strcmp(argv[1], "--stdin") == 0);
+    init_stft();
     signal(SIGTERM, on_sig);
     signal(SIGINT, on_sig);
     signal(SIGPIPE, SIG_DFL);
@@ -281,6 +434,8 @@ int main(int argc, char **argv) {
         if (labs(mp - np) > 3200) mp = np;
 
         const int32_t *in = (const int32_t *)inbuf;
+        float blk_e[BLK], blk_r[BLK], blk_mic[BLK];
+        int blk_ref_active = 0;
         for (int i = 0; i < BLK; i++) {
             const int32_t *fr = in + i * DECIM * CAP_CH;
             float s16[VQE_MICS];
@@ -330,44 +485,11 @@ int main(int argc, char **argv) {
                 float g = mu * e / (float)(g_en + (double)TAPS * 20.0);
                 for (int t = 0; t < TAPS; t++) g_w[t] += g * x[t];
                 ref_active_cnt++;
+                blk_ref_active = 1;
             }
-
-            /* VQE Background Noise Reducer (480 ms history) + smooth speech AGC */
-            float ae = fabsf(e);
-            g_sig_env = (ae > g_sig_env) ? (g_sig_env * 0.85f + ae * 0.15f) : (g_sig_env * 0.992f + ae * 0.008f);
-            float nr_tgt = 1.0f;
-            if (g_sig_env < g_noise_env * 1.85f) {
-                nr_tgt = 0.80f;
-            } else if (g_sig_env < g_noise_env * 2.50f) {
-                float frac = (g_sig_env - g_noise_env * 1.85f) / (g_noise_env * 0.65f + 1.0f);
-                nr_tgt = 0.80f + 0.20f * frac;
-            }
-            g_nr_gain += ((nr_tgt > g_nr_gain) ? 0.15f : 0.01f) * (nr_tgt - g_nr_gain);
-
-            if (g_sig_env > g_noise_env * 2.60f && g_sig_env > 180.0f) {
-                float agc_tgt = 2800.0f / g_sig_env;
-                if (agc_tgt < 1.0f) agc_tgt = 1.0f;
-                if (agc_tgt > 2.6f) agc_tgt = 2.6f;
-                float rate = (agc_tgt < g_agc_gain) ? 0.04f : 0.008f;
-                g_agc_gain += rate * (agc_tgt - g_agc_gain);
-            } else {
-                g_agc_gain += 0.01f * (1.0f - g_agc_gain);
-            }
-
-            float o = e * g_nr_gain * g_agc_gain;
-            if (fabsf(o) > 26000.f) o = 26000.f * tanhf(o / 26000.f);
-            if (o > 32767.f) o = 32767.f;
-            if (o < -32768.f) o = -32768.f;
-            outbuf[outn++] = (int16_t)o;
-            if (outn == OUT_BLK) {
-                fwrite(outbuf, 2, OUT_BLK, stdout);
-                fflush(stdout);
-                outn = 0;
-            }
-
-            pw_in += (double)mic * mic;
-            pw_out += (double)o * o;
-            g_post_acc += (double)ae;
+            blk_e[i] = e;
+            blk_r[i] = r;
+            blk_mic[i] = mic;
 
             g_macc += fabsf(mic);
             g_racc_env += fabsf(rraw);
@@ -421,11 +543,52 @@ int main(int argc, char **argv) {
             mp++;
         }
 
+        /* Apply Frequency-Domain STFT-Kalman Residual Echo Suppressor + Barge-In VAD */
+        stft_kalman_process_block(blk_e, blk_r, blk_ref_active);
+
+        for (int i = 0; i < BLK; i++) {
+            float e = blk_e[i];
+            float ae = fabsf(e);
+            g_sig_env = (ae > g_sig_env) ? (g_sig_env * 0.85f + ae * 0.15f) : (g_sig_env * 0.992f + ae * 0.008f);
+            float nr_tgt = 1.0f;
+            if (g_sig_env < g_noise_env * 1.85f) {
+                nr_tgt = 0.80f;
+            } else if (g_sig_env < g_noise_env * 2.50f) {
+                float frac = (g_sig_env - g_noise_env * 1.85f) / (g_noise_env * 0.65f + 1.0f);
+                nr_tgt = 0.80f + 0.20f * frac;
+            }
+            g_nr_gain += ((nr_tgt > g_nr_gain) ? 0.15f : 0.01f) * (nr_tgt - g_nr_gain);
+
+            if (g_sig_env > g_noise_env * 2.60f && g_sig_env > 180.0f) {
+                float agc_tgt = 2800.0f / g_sig_env;
+                if (agc_tgt < 1.0f) agc_tgt = 1.0f;
+                if (agc_tgt > 2.6f) agc_tgt = 2.6f;
+                float rate = (agc_tgt < g_agc_gain) ? 0.04f : 0.008f;
+                g_agc_gain += rate * (agc_tgt - g_agc_gain);
+            } else {
+                g_agc_gain += 0.01f * (1.0f - g_agc_gain);
+            }
+
+            float o = e * g_nr_gain * g_agc_gain;
+            if (fabsf(o) > 26000.f) o = 26000.f * tanhf(o / 26000.f);
+            if (o > 32767.f) o = 32767.f;
+            if (o < -32768.f) o = -32768.f;
+            outbuf[outn++] = (int16_t)o;
+            if (outn == OUT_BLK) {
+                fwrite(outbuf, 2, OUT_BLK, stdout);
+                fflush(stdout);
+                outn = 0;
+            }
+            pw_in += (double)blk_mic[i] * blk_mic[i];
+            pw_out += (double)o * o;
+            g_post_acc += (double)ae;
+        }
+
         stat_cnt += BLK;
-        if (!use_stdin && stat_cnt >= SR * 2) {
+        if (!use_stdin && stat_cnt >= SR / 2) {
             double db = 0;
             if (pw_out > 1.0 && pw_in > 1.0) db = 10.0 * log10(pw_in / pw_out);
-            write_stat(db, ref_active_cnt > SR);
+            write_stat(db, ref_active_cnt > (SR / 8));
             pw_in = pw_out = 0;
             stat_cnt = 0;
             ref_active_cnt = 0;

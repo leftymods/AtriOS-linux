@@ -4,18 +4,39 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 #define INBUF_SZ (64 * 1024)
 #define DUCK_FLAG_FILE "/var/run/atrios/ymusic_duck"
 #define AUDIO_ENV_TMP "/var/run/atrios/ymusic_audio.tmp"
 #define AUDIO_ENV_FILE "/var/run/atrios/ymusic_audio.json"
+#define AEC_REF_SOCK "/var/run/atrios/aec_ref.sock"
+
+static void send_aec_ref(int fd, const struct sockaddr_un *addr, const int16_t *stereo, size_t n_frames) {
+    if (fd < 0 || n_frames == 0) return;
+    const uint8_t *p = (const uint8_t *)stereo;
+    size_t rem = n_frames * 4;
+    while (rem > 0) {
+        size_t chunk = (rem > 4096) ? 4096 : rem;
+        (void)sendto(fd, p, chunk, MSG_DONTWAIT, (const struct sockaddr *)addr, sizeof(*addr));
+        p += chunk;
+        rem -= chunk;
+    }
+}
 
 int main(void) {
     static uint8_t buf[INBUF_SZ];
     static mp3d_sample_t pcm[MINIMP3_MAX_SAMPLES_PER_FRAME];
     mp3dec_t mp3d;
     mp3dec_init(&mp3d);
+
+    int aec_fd = socket(AF_UNIX, SOCK_DGRAM, 0);
+    struct sockaddr_un aec_addr;
+    memset(&aec_addr, 0, sizeof(aec_addr));
+    aec_addr.sun_family = AF_UNIX;
+    strncpy(aec_addr.sun_path, AEC_REF_SOCK, sizeof(aec_addr.sun_path) - 1);
 
     size_t filled = 0;
     int eof = 0;
@@ -124,8 +145,10 @@ int main(void) {
                     stereo[2 * i] = pcm[i];
                     stereo[2 * i + 1] = pcm[i];
                 }
+                send_aec_ref(aec_fd, &aec_addr, stereo, (size_t)samples);
                 fwrite(stereo, sizeof(int16_t), (size_t)samples * 2, stdout);
             } else {
+                send_aec_ref(aec_fd, &aec_addr, pcm, (size_t)samples);
                 fwrite(pcm, sizeof(int16_t), (size_t)samples * (size_t)info.channels, stdout);
             }
         }
