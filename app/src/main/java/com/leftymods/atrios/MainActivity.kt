@@ -1356,6 +1356,90 @@ fun AtriOSApp(
                                                     }
                                                 }
                                             }
+                                            item {
+                                                // Detailed Live Network / Relay / Error Diagnostic Logs Card
+                                                val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
+                                                var logRev by remember { mutableIntStateOf(DebugLogStore.version) }
+                                                DisposableEffect(Unit) {
+                                                    DebugLogStore.onChanged = { logRev = DebugLogStore.version }
+                                                    onDispose { DebugLogStore.onChanged = null }
+                                                }
+                                                val snapshot = remember(logRev) { DebugLogStore.entries.take(60) }
+                                                Surface(
+                                                    shape = RoundedCornerShape(TypeUI.RadiusLg),
+                                                    color = TypeUI.SurfaceElevated,
+                                                    modifier = Modifier.border(1.dp, TypeUI.Hairline, RoundedCornerShape(TypeUI.RadiusLg))
+                                                ) {
+                                                    Column(
+                                                        modifier = Modifier.fillMaxWidth().padding(16.dp),
+                                                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                                                    ) {
+                                                        Row(
+                                                            modifier = Modifier.fillMaxWidth(),
+                                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                                            verticalAlignment = Alignment.CenterVertically
+                                                        ) {
+                                                            Column {
+                                                                Text("Логи диагностики", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                                                                Text(
+                                                                    "Запросов: ${DebugLogStore.totalRequests.get()} · Повторов: ${DebugLogStore.retryCount.get()} · Ошибок: ${DebugLogStore.errorCount.get()}",
+                                                                    color = Color(0xFF9A9AA6),
+                                                                    fontSize = 11.sp
+                                                                )
+                                                            }
+                                                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                                                IconButton(
+                                                                    onClick = {
+                                                                        clipboard.setText(androidx.compose.ui.text.AnnotatedString(DebugLogStore.dumpText()))
+                                                                        scope.launch { snackbarHostState.showSnackbar("Логи скопированы") }
+                                                                    },
+                                                                    modifier = Modifier.size(34.dp).clip(CircleShape).background(OledCard)
+                                                                ) {
+                                                                    Icon(Icons.Rounded.ContentCopy, contentDescription = "Копировать", tint = Color.White, modifier = Modifier.size(16.dp))
+                                                                }
+                                                                IconButton(
+                                                                    onClick = { DebugLogStore.clear() },
+                                                                    modifier = Modifier.size(34.dp).clip(CircleShape).background(OledCard)
+                                                                ) {
+                                                                    Icon(Icons.Rounded.DeleteOutline, contentDescription = "Очистить", tint = Color(0xFFFF6B81), modifier = Modifier.size(16.dp))
+                                                                }
+                                                            }
+                                                        }
+                                                        if (snapshot.isEmpty()) {
+                                                            Text(
+                                                                "Пока нет записей — выполните действие (громкость, трек, коллекция), чтобы увидеть подробный лог с кодами HTTP и задержками.",
+                                                                color = Color(0xFF7A7A86),
+                                                                fontSize = 12.sp
+                                                            )
+                                                        } else {
+                                                            Column(
+                                                                modifier = Modifier
+                                                                    .fillMaxWidth()
+                                                                    .clip(RoundedCornerShape(12.dp))
+                                                                    .background(Color(0xFF0A0A0E))
+                                                                    .padding(10.dp),
+                                                                verticalArrangement = Arrangement.spacedBy(5.dp)
+                                                            ) {
+                                                                snapshot.forEach { entry ->
+                                                                    val col = when (entry.level) {
+                                                                        "ERR" -> Color(0xFFFF5C77)
+                                                                        "WARN" -> Color(0xFFFFC845)
+                                                                        "OK" -> if (entry.tag == "OFFLOAD") Color(0xFF4DD0E1) else Color(0xFF69F0AE)
+                                                                        else -> Color(0xFFB8B8C4)
+                                                                    }
+                                                                    Text(
+                                                                        "${entry.time} [${entry.level}/${entry.tag}] ${entry.message}",
+                                                                        color = col,
+                                                                        fontSize = 11.sp,
+                                                                        lineHeight = 14.sp,
+                                                                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                                                                    )
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
                                             item { TelemetryCard(status = status) }
                                         }
                                         SettingsPage.ROOT -> Unit

@@ -32,7 +32,53 @@ import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.io.OutputStreamWriter
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import java.util.UUID
+import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.atomic.AtomicInteger
+
+data class DebugLogEntry(
+    val time: String,
+    val level: String, // "OK", "INFO", "WARN", "ERR"
+    val tag: String,   // "RELAY", "OFFLOAD", "BT", "SYS"
+    val message: String
+)
+
+object DebugLogStore {
+    private const val MAX_ENTRIES = 150
+    private val timeFmt = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
+    val entries = CopyOnWriteArrayList<DebugLogEntry>()
+    val totalRequests = AtomicInteger(0)
+    val errorCount = AtomicInteger(0)
+    val retryCount = AtomicInteger(0)
+    @Volatile var version: Int = 0
+    @Volatile var onChanged: (() -> Unit)? = null
+
+    fun log(level: String, tag: String, msg: String) {
+        val ts = synchronized(timeFmt) { timeFmt.format(Date()) }
+        entries.add(0, DebugLogEntry(ts, level, tag, msg))
+        while (entries.size > MAX_ENTRIES) {
+            entries.removeAt(entries.size - 1)
+        }
+        if (level == "ERR") errorCount.incrementAndGet()
+        if (level == "WARN") retryCount.incrementAndGet()
+        version++
+        onChanged?.invoke()
+    }
+
+    fun clear() {
+        entries.clear()
+        totalRequests.set(0)
+        errorCount.set(0)
+        retryCount.set(0)
+        version++
+        onChanged?.invoke()
+    }
+
+    fun dumpText(): String = entries.joinToString("\n") { "[${it.time}] [${it.level}] [${it.tag}] ${it.message}" }
+}
 
 class BtControlClient(
     private val scope: CoroutineScope,
@@ -60,6 +106,7 @@ class BtControlClient(
     private var writer: OutputStreamWriter? = null
     private var readJob: Job? = null
     private val writeMutex = Mutex()
+    private val coalescedJobs = java.util.concurrent.ConcurrentHashMap<String, Job>()
     private var activeDevice: BluetoothDevice? = null
     private var relayJob: Job? = null
     @Volatile private var relayGateway: String = ""
@@ -239,6 +286,8 @@ class BtControlClient(
     }
 
     private fun relayHttpPost(urlStr: String, token: String, payload: JSONObject): JSONObject {
+        val t0 = System.currentTimeMillis()
+        DebugLogStore.totalRequests.incrementAndGet()
         val conn = (URL(urlStr).openConnection() as HttpsURLConnection).apply {
             requestMethod = "POST"
             doOutput = true
@@ -253,8 +302,10 @@ class BtControlClient(
             val code = conn.responseCode
             val stream = if (code in 200..299) conn.inputStream else conn.errorStream
             val body = stream?.bufferedReader(Charsets.UTF_8)?.readText().orEmpty()
+            val dt = System.currentTimeMillis() - t0
             if (code !in 200..299) {
-                throw IllegalStateException("HTTP $code")
+                val snippet = body.take(160).replace("\n", " ")
+                throw IllegalStateException("HTTP $code (${dt}ms) $snippet")
             }
             return JSONObject(body)
         } finally {
@@ -263,33 +314,58 @@ class BtControlClient(
     }
 
     fun sendCommand(payload: JSONObject) {
-        scope.launch(Dispatchers.IO) {
+        val cmdName = payload.optString("cmd", "")
+        val isCoalesceable = cmdName == "set_volume" || cmdName == "set_eq"
+        val job = scope.launch(Dispatchers.IO) {
             if (relayActive && writer == null) {
+                val tStart = System.currentTimeMillis()
                 var lastErr: Exception? = null
-                for (attempt in 0..1) {
+                val maxAttempts = if (isCoalesceable) 2 else 3
+                for (attempt in 0 until maxAttempts) {
                     try {
                         val url = "$relayGateway/relay/v1/app/$relayDeviceId/cmd"
                         val resp = relayHttpPost(url, relayToken, payload)
+                        val dt = System.currentTimeMillis() - tStart
                         val reply = resp.optJSONObject("reply")
-                        if (reply != null) {
+                        val rtype = reply?.optString("type", "") ?: ""
+                        if (cmdName != "ymusic_status" && cmdName != "get_status") {
+                            DebugLogStore.log("OK", "RELAY", "cmd=$cmdName -> 200 (${dt}ms) reply=$rtype")
+                        }
+                        if (reply != null && rtype != "coalesced") {
                             handlePacket(reply)
                         }
                         return@launch
+                    } catch (e: kotlinx.coroutines.CancellationException) {
+                        throw e
                     } catch (e: Exception) {
                         lastErr = e
-                        if (attempt == 0) delay(420)
+                        val msg = e.message ?: e.javaClass.simpleName
+                        val isRetryable = msg.contains("HTTP 429") || msg.contains("HTTP 502") ||
+                            msg.contains("HTTP 503") || msg.contains("HTTP 504") ||
+                            e is java.net.SocketTimeoutException || e is java.io.IOException
+                        if (attempt < maxAttempts - 1 && isRetryable) {
+                            val backoffMs = if (msg.contains("HTTP 429")) (450L * (attempt + 1)) else (320L * (attempt + 1))
+                            DebugLogStore.log("WARN", "RELAY", "cmd=$cmdName retry #${attempt + 1} in ${backoffMs}ms: $msg")
+                            delay(backoffMs)
+                        } else {
+                            DebugLogStore.log("ERR", "RELAY", "cmd=$cmdName FAILED: $msg")
+                            break
+                        }
                     }
                 }
-                val cmdName = payload.optString("cmd", "")
-                // Don't spam UI errors on silent background polls (ymusic_status / get_status)
-                if (cmdName != "ymusic_status" && cmdName != "get_status") {
+                // Don't spam UI snackbars on silent background polls or superseded live slider drags
+                if (cmdName != "ymusic_status" && cmdName != "get_status" && !isCoalesceable) {
                     withContext(Dispatchers.Main) {
-                        onMessage("Нет связи с сервером: ${lastErr?.message ?: "таймаут"}", true)
+                        onMessage("Нет связи с сервером ($cmdName): ${lastErr?.message ?: "таймаут"}", true)
                     }
                 }
             } else {
+                DebugLogStore.log("INFO", "BT", "tx cmd=$cmdName")
                 writeJson(payload)
             }
+        }
+        if (isCoalesceable) {
+            coalescedJobs.put(cmdName, job)?.cancel()
         }
     }
 
@@ -396,15 +472,19 @@ class BtControlClient(
         val tok = relayToken.trim()
         if (gw.startsWith("https://") && DEVICE_ID_RE.matches(did) && tok.isNotEmpty()) {
             scope.launch(Dispatchers.IO) {
+                val t0 = System.currentTimeMillis()
                 try {
                     val resp = relayHttpPost("$gw/relay/v1/app/$did/ymusic/$op", tok, fallbackCmd)
+                    val dt = System.currentTimeMillis() - t0
+                    val cached = resp.optBoolean("cached", false)
                     val reply = resp.optJSONObject("reply") ?: resp
                     if (reply.has("type")) {
+                        DebugLogStore.log("OK", "OFFLOAD", "ymusic/$op (${dt}ms, cache=$cached)")
                         handlePacket(reply)
                         return@launch
                     }
-                } catch (_: Exception) {
-                    // Server route not deployed yet (e.g. 404) -> fallback to speaker cached handler
+                } catch (e: Exception) {
+                    DebugLogStore.log("WARN", "OFFLOAD", "ymusic/$op fallback to speaker: ${e.message}")
                 }
                 sendCommand(fallbackCmd)
             }
