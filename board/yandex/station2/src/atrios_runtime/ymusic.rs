@@ -2,9 +2,19 @@ use std::fs;
 use std::os::unix::net::UnixDatagram;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{mpsc, Arc};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+fn now_unix_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or_else(|_| now_unix_i64() * 1000)
+}
+
+static STATUS_SEQ: AtomicU64 = AtomicU64::new(0);
 
 use crate::https::{request_bytes, request_json};
 use crate::json::{obj, Json};
@@ -234,12 +244,15 @@ pub struct YMusicStatus {
     pub liked: bool,
     pub repeat: bool,
     pub error: Option<String>,
+    pub seq: u64,
+    pub updated_ms: i64,
     pub updated_ts: i64,
 }
 
 impl YMusicStatus {
     pub fn default_idle() -> Self {
         let auth = load_auth();
+        let now_ms = now_unix_ms();
         Self {
             logged_in: auth.is_some(),
             login: auth.as_ref().map(|a| a.login.clone()).unwrap_or_default(),
@@ -265,7 +278,9 @@ impl YMusicStatus {
             liked: false,
             repeat: false,
             error: None,
-            updated_ts: now_unix_i64(),
+            seq: 0,
+            updated_ms: now_ms,
+            updated_ts: now_ms / 1000,
         }
     }
 
@@ -322,8 +337,17 @@ impl YMusicStatus {
                 st.error = Some(s.into());
             }
         }
+        if let Some(n) = j.get("seq").and_then(|v| v.as_i64()) {
+            st.seq = n.max(0) as u64;
+        }
+        if let Some(n) = j.get("updated_ms").and_then(|v| v.as_i64()) {
+            st.updated_ms = n;
+        }
         if let Some(n) = j.get("updated_ts").and_then(|v| v.as_i64()) {
             st.updated_ts = n;
+            if st.updated_ms == 0 {
+                st.updated_ms = n * 1000;
+            }
         }
         // Always refresh auth fields from disk so login/logout is authoritative
         if let Some(auth) = load_auth() {
@@ -376,6 +400,8 @@ impl YMusicStatus {
             ("audio_high", Json::Num(if self.state == "playing" { read_audio_envelope().2 } else { 0.0 })),
             ("audio_energy", Json::Num(if self.state == "playing" { read_audio_envelope().3 } else { 0.0 })),
             ("audio_beat", Json::Num(if self.state == "playing" { read_audio_envelope().4 } else { 0.0 })),
+            ("seq", Json::Num(self.seq as f64)),
+            ("updated_ms", Json::Num(self.updated_ms as f64)),
             ("updated_ts", Json::Num(self.updated_ts as f64)),
         ])
     }
@@ -428,21 +454,22 @@ pub fn read_status() -> YMusicStatus {
 pub fn read_status_json() -> Json {
     let mut st = read_status();
     if st.state == "playing" && st.duration_ms > 0 && st.started_ts > 0 {
-        let elapsed = (now_unix_i64() - st.started_ts).max(0) * 1000;
+        let now_ms = now_unix_ms();
+        let start_ms = if st.started_ts > 10_000_000_000 { st.started_ts } else { st.started_ts * 1000 };
+        let elapsed = (now_ms - start_ms).max(0);
         st.position_ms = (st.position_ms + elapsed).clamp(0, st.duration_ms);
-    }
-    if !st.track_id.is_empty() {
-        if let Some(auth) = load_auth() {
-            if let Some(live_liked) = is_track_liked_live(&auth, &st.track_id) {
-                st.liked = live_liked;
-            }
-        }
     }
     st.to_json()
 }
 
 fn write_status(st: &mut YMusicStatus) {
-    st.updated_ts = now_unix_i64();
+    let now_ms = now_unix_ms();
+    let prev = STATUS_SEQ.load(Ordering::SeqCst).max(st.seq);
+    let next_seq = prev.saturating_add(1).max(now_ms.max(0) as u64);
+    STATUS_SEQ.store(next_seq, Ordering::SeqCst);
+    st.seq = next_seq;
+    st.updated_ms = now_ms;
+    st.updated_ts = now_ms / 1000;
     if let Some(p) = Path::new(YMUSIC_STATUS_FILE).parent() {
         let _ = fs::create_dir_all(p);
     }
@@ -748,6 +775,15 @@ fn fetch_user_playlist(auth: &YMusicAuth, query: &str) -> Result<Vec<TrackInfo>,
 }
 
 fn fetch_likes(auth: &YMusicAuth) -> Result<Vec<TrackInfo>, String> {
+    use std::sync::{Mutex, OnceLock};
+    static LIKES_LIST_CACHE: OnceLock<Mutex<(i64, i64, Vec<TrackInfo>)>> = OnceLock::new();
+    let cache = LIKES_LIST_CACHE.get_or_init(|| Mutex::new((0, 0, Vec::new())));
+    let now = now_unix_i64();
+    if let Ok(g) = cache.lock() {
+        if g.0 == auth.uid && now - g.1 < 60 && !g.2.is_empty() {
+            return Ok(g.2.clone());
+        }
+    }
     let ep = format!("/users/{}/likes/tracks", auth.uid);
     let resp = api_get_json(&auth.token, &ep)?;
     let arr = resp
@@ -757,7 +793,7 @@ fn fetch_likes(auth: &YMusicAuth) -> Result<Vec<TrackInfo>, String> {
         .and_then(|t| t.as_arr())
         .ok_or("No liked tracks found")?;
     let mut ids: Vec<String> = Vec::new();
-    for item in arr.iter().take(50) {
+    for item in arr.iter().take(35) {
         if let Some(id) = item.get_str("id") {
             ids.push(id.to_string());
         } else if let Some(n) = item.get("id").and_then(|v| v.as_i64()) {
@@ -773,6 +809,9 @@ fn fetch_likes(auth: &YMusicAuth) -> Result<Vec<TrackInfo>, String> {
     let tracks: Vec<TrackInfo> = list.iter().filter_map(|t| parse_track_json(t, true)).collect();
     if tracks.is_empty() {
         return Err("Could not parse liked tracks".into());
+    }
+    if let Ok(mut g) = cache.lock() {
+        *g = (auth.uid, now, tracks.clone());
     }
     Ok(tracks)
 }
@@ -1477,42 +1516,75 @@ impl ActivePipeline {
     }
 }
 
-// --- Daemon / Player Loop ---
+// --- Daemon / Player Loop (Ynison/Sonata-grade async state machine) ---
+enum DaemonEvent {
+    ModeLoaded {
+        gen: u64,
+        mode: String,
+        batch_id: String,
+        res: Result<Vec<TrackInfo>, String>,
+    },
+    StreamResolved {
+        gen: u64,
+        track_id: String,
+        res: Result<String, String>,
+    },
+    LikedChecked {
+        track_id: String,
+        liked: bool,
+    },
+    WaveAppended {
+        batch_id: String,
+        tracks: Vec<TrackInfo>,
+        auto_play: bool,
+    },
+}
+
 struct PlayerState {
     mode: String,
     batch_id: String,
     queue: Vec<TrackInfo>,
     index: usize,
     pipeline: Option<ActivePipeline>,
-    prefetch: std::sync::Arc<std::sync::Mutex<Option<(String, String)>>>,
+    prefetch: Arc<std::sync::Mutex<Option<(String, String)>>>,
     pending_play_at: Option<std::time::Instant>,
     last_skip_at: Option<std::time::Instant>,
     repeat_one: bool,
+    load_gen: Arc<AtomicU64>,
+    tx: mpsc::Sender<DaemonEvent>,
     status: YMusicStatus,
 }
 
 impl PlayerState {
-    fn new() -> Self {
+    fn new(tx: mpsc::Sender<DaemonEvent>) -> Self {
         Self {
             mode: "none".into(),
             batch_id: String::new(),
             queue: Vec::new(),
             index: 0,
             pipeline: None,
-            prefetch: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            prefetch: Arc::new(std::sync::Mutex::new(None)),
             pending_play_at: None,
             last_skip_at: None,
             repeat_one: false,
+            load_gen: Arc::new(AtomicU64::new(1)),
+            tx,
             status: YMusicStatus::default_idle(),
         }
     }
 
+    fn bump_gen(&self) -> u64 {
+        self.load_gen.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
     fn stop_playback(&mut self) {
+        self.bump_gen();
         self.pending_play_at = None;
         if let Some(p) = self.pipeline.take() {
             p.stop();
         }
         self.status.state = "idle".into();
+        self.status.started_ts = 0;
         self.status.error = None;
         write_status(&mut self.status);
     }
@@ -1543,7 +1615,68 @@ impl PlayerState {
         }
     }
 
+    fn prebuffer_next_in_bg(&self, auth: &YMusicAuth) {
+        if let Some(nxt) = self.queue.get(self.index + 1).cloned() {
+            if mp3_cache_get(&nxt.id).is_some() {
+                return;
+            }
+            let pf = self.prefetch.clone();
+            let auth_c = auth.clone();
+            thread::spawn(move || {
+                if let Ok(u) = resolve_track_stream_url(&auth_c, &nxt.id) {
+                    if let Ok(mut g) = pf.lock() {
+                        *g = Some((nxt.id.clone(), u.clone()));
+                    }
+                    // Pre-download next track MP3 into RAM cache (like Yandex Music mobile) for <40ms skip!
+                    if let Ok(bytes) = request_bytes(&u, None, &[], None, 25, 16 * 1024 * 1024, None) {
+                        mp3_cache_put(nxt.id, bytes);
+                    }
+                }
+            });
+        }
+    }
+
+    fn finish_starting_pipeline(&mut self, track: &TrackInfo, auth: &YMusicAuth, pipe_res: Result<ActivePipeline, String>) {
+        match pipe_res {
+            Ok(pipe) => {
+                self.pipeline = Some(pipe);
+                self.status.state = "playing".into();
+                self.status.position_ms = 0;
+                self.status.started_ts = now_unix_ms();
+                self.status.error = None;
+                write_status(&mut self.status);
+                println!("[ymusic] Playing: {} — {}", track.artist, track.title);
+                self.prebuffer_next_in_bg(auth);
+                if self.mode == "wave" {
+                    let auth_c = auth.clone();
+                    let bid = self.batch_id.clone();
+                    let tid = track.id.clone();
+                    thread::spawn(move || {
+                        send_rotor_feedback(&auth_c, &bid, "trackStarted", Some(&tid));
+                    });
+                }
+                // Background live liked check (never blocks bt-control or command loop!)
+                let auth_l = auth.clone();
+                let tid_l = track.id.clone();
+                let tx_l = self.tx.clone();
+                thread::spawn(move || {
+                    if let Some(liked) = is_track_liked_live(&auth_l, &tid_l) {
+                        let _ = tx_l.send(DaemonEvent::LikedChecked { track_id: tid_l, liked });
+                    }
+                });
+            }
+            Err(e) => {
+                eprintln!("[ymusic] Playback error: {e}");
+                self.status.state = "error".into();
+                self.status.started_ts = 0;
+                self.status.error = Some(e);
+                write_status(&mut self.status);
+            }
+        }
+    }
+
     fn start_current_track(&mut self) {
+        let gen = self.bump_gen();
         self.pending_play_at = None;
         if let Some(p) = self.pipeline.take() {
             p.stop();
@@ -1574,60 +1707,45 @@ impl PlayerState {
         self.status.cover_url = track.cover_url.clone();
         self.sync_neighbors_to_status();
         self.status.duration_ms = track.duration_ms;
+        self.status.position_ms = 0;
+        self.status.started_ts = 0;
         self.status.liked = track.liked;
         self.status.error = None;
         write_status(&mut self.status);
 
-        let pipe_res = if let Some(cached) = mp3_cache_get(&track.id) {
-            ActivePipeline::spawn_from_ram(cached)
-        } else {
-            let cached_url = self.prefetch.lock().ok().and_then(|mut g| {
-                if g.as_ref().map(|(id, _)| id == &track.id).unwrap_or(false) {
-                    g.take().map(|(_, u)| u)
-                } else {
-                    None
-                }
-            });
-            let stream_res = match cached_url {
-                Some(u) => Ok(u),
-                None => resolve_track_stream_url(&auth, &track.id),
-            };
-            stream_res.and_then(|url| ActivePipeline::spawn_with_cache(&track.id, &url))
-        };
-        match pipe_res {
-            Ok(pipe) => {
-                self.pipeline = Some(pipe);
-                self.status.state = "playing".into();
-                self.status.position_ms = 0;
-                self.status.started_ts = now_unix_i64();
-                self.status.error = None;
-                write_status(&mut self.status);
-                println!("[ymusic] Playing: {} — {}", track.artist, track.title);
-                if let Some(nxt) = self.queue.get(self.index + 1).cloned() {
-                    let pf = self.prefetch.clone();
-                    let auth_c = auth.clone();
-                    thread::spawn(move || {
-                        if let Ok(u) = resolve_track_stream_url(&auth_c, &nxt.id) {
-                            if let Ok(mut g) = pf.lock() {
-                                *g = Some((nxt.id, u));
-                            }
-                        }
-                    });
-                }
-                if self.mode == "wave" {
-                    send_rotor_feedback(&auth, &self.batch_id, "trackStarted", Some(&track.id));
-                }
-            }
-            Err(e) => {
-                eprintln!("[ymusic] Playback error: {e}");
-                self.status.state = "error".into();
-                self.status.error = Some(e);
-                write_status(&mut self.status);
-            }
+        // Fast path: already in RAM cache (prev OR pre-buffered next track) -> instant <30ms start!
+        if let Some(cached) = mp3_cache_get(&track.id) {
+            let res = ActivePipeline::spawn_from_ram(cached);
+            self.finish_starting_pipeline(&track, &auth, res);
+            return;
         }
+
+        // Fast path 2: stream URL already prefetched -> spawn immediately!
+        let cached_url = self.prefetch.lock().ok().and_then(|mut g| {
+            if g.as_ref().map(|(id, _)| id == &track.id).unwrap_or(false) {
+                g.take().map(|(_, u)| u)
+            } else {
+                None
+            }
+        });
+        if let Some(url) = cached_url {
+            let res = ActivePipeline::spawn_with_cache(&track.id, &url);
+            self.finish_starting_pipeline(&track, &auth, res);
+            return;
+        }
+
+        // Async path: resolve stream URL on background thread so pause/next/prev are NEVER blocked!
+        let tx = self.tx.clone();
+        let tid = track.id.clone();
+        thread::spawn(move || {
+            let res = resolve_track_stream_url(&auth, &tid);
+            let _ = tx.send(DaemonEvent::StreamResolved { gen, track_id: tid, res });
+        });
     }
 
     fn load_mode(&mut self, mode: &str, query: Option<&str>) {
+        let gen = self.bump_gen();
+        self.pending_play_at = None;
         if let Some(p) = self.pipeline.take() {
             p.stop();
         }
@@ -1641,47 +1759,107 @@ impl PlayerState {
         self.mode = mode.into();
         self.status.mode = mode.into();
         self.status.state = "loading".into();
+        self.status.started_ts = 0;
         self.status.error = None;
         write_status(&mut self.status);
 
-        let res = match mode {
-            "wave" => fetch_my_wave(&auth, None).map(|(bid, tr)| {
-                self.batch_id = bid.clone();
-                send_rotor_feedback(&auth, &bid, "radioStarted", None);
-                tr
-            }),
-            "likes" => fetch_likes(&auth),
-            "chart" => fetch_chart(&auth),
-            "station" => {
-                let st = query.unwrap_or("user:onyourwave");
-                fetch_rotor_station(&auth, st, None).map(|(bid, tr)| {
-                    self.batch_id = bid.clone();
-                    send_rotor_feedback_station(&auth, st, &bid, "radioStarted", None);
+        let mode_s = mode.to_string();
+        let query_s = query.map(|q| q.to_string());
+        let tx = self.tx.clone();
+        thread::spawn(move || {
+            let mut batch_id = String::new();
+            let res = match mode_s.as_str() {
+                "wave" => fetch_my_wave(&auth, None).map(|(bid, tr)| {
+                    batch_id = bid.clone();
+                    send_rotor_feedback(&auth, &bid, "radioStarted", None);
                     tr
-                })
+                }),
+                "likes" => fetch_likes(&auth),
+                "chart" => fetch_chart(&auth),
+                "station" => {
+                    let st = query_s.as_deref().unwrap_or("user:onyourwave");
+                    fetch_rotor_station(&auth, st, None).map(|(bid, tr)| {
+                        batch_id = bid.clone();
+                        send_rotor_feedback_station(&auth, st, &bid, "radioStarted", None);
+                        tr
+                    })
+                }
+                "playlist" => fetch_user_playlist(&auth, query_s.as_deref().unwrap_or("")),
+                "search" => fetch_search(&auth, query_s.as_deref().unwrap_or("")),
+                "track" => fetch_single_track(&auth, query_s.as_deref().unwrap_or("")),
+                "album" => fetch_album_tracks(&auth, query_s.as_deref().unwrap_or("")),
+                _ => Err(format!("Unsupported mode: {mode_s}")),
+            };
+            let _ = tx.send(DaemonEvent::ModeLoaded { gen, mode: mode_s, batch_id, res });
+        });
+    }
+
+    fn handle_event(&mut self, ev: DaemonEvent) {
+        let cur_gen = self.load_gen.load(Ordering::SeqCst);
+        match ev {
+            DaemonEvent::ModeLoaded { gen, mode, batch_id, res } => {
+                if gen != cur_gen {
+                    return; // Stale load superseded by pause/next/new mode!
+                }
+                match res {
+                    Ok(tracks) => {
+                        self.mode = mode;
+                        if !batch_id.is_empty() {
+                            self.batch_id = batch_id;
+                        }
+                        self.queue = tracks;
+                        self.index = 0;
+                        self.start_current_track();
+                    }
+                    Err(e) => {
+                        eprintln!("[ymusic] Load {mode} failed: {e}");
+                        self.status.state = "error".into();
+                        self.status.error = Some(e);
+                        write_status(&mut self.status);
+                    }
+                }
             }
-            "playlist" => fetch_user_playlist(&auth, query.unwrap_or("")),
-            "search" => fetch_search(&auth, query.unwrap_or("")),
-            "track" => fetch_single_track(&auth, query.unwrap_or("")),
-            "album" => fetch_album_tracks(&auth, query.unwrap_or("")),
-            _ => Err(format!("Unsupported mode: {mode}")),
-        };
-        match res {
-            Ok(tracks) => {
-                self.queue = tracks;
-                self.index = 0;
-                self.start_current_track();
+            DaemonEvent::StreamResolved { gen, track_id, res } => {
+                if gen != cur_gen {
+                    return; // User paused or skipped while URL was resolving!
+                }
+                let Some(auth) = load_auth() else { return; };
+                let Some(track) = self.queue.get(self.index).cloned() else { return; };
+                if track.id != track_id {
+                    return;
+                }
+                let pipe_res = res.and_then(|url| ActivePipeline::spawn_with_cache(&track.id, &url));
+                self.finish_starting_pipeline(&track, &auth, pipe_res);
             }
-            Err(e) => {
-                eprintln!("[ymusic] Load {mode} failed: {e}");
-                self.status.state = "error".into();
-                self.status.error = Some(e);
-                write_status(&mut self.status);
+            DaemonEvent::LikedChecked { track_id, liked } => {
+                if self.status.track_id == track_id && self.status.liked != liked {
+                    if let Some(cur) = self.queue.get_mut(self.index) {
+                        if cur.id == track_id {
+                            cur.liked = liked;
+                        }
+                    }
+                    self.status.liked = liked;
+                    write_status(&mut self.status);
+                }
+            }
+            DaemonEvent::WaveAppended { batch_id, tracks, auto_play } => {
+                if !tracks.is_empty() {
+                    self.batch_id = batch_id;
+                    let was_empty = self.queue.is_empty();
+                    self.queue.extend(tracks);
+                    self.sync_neighbors_to_status();
+                    if auto_play && (was_empty || self.status.state == "loading") {
+                        self.start_current_track();
+                    } else {
+                        write_status(&mut self.status);
+                    }
+                }
             }
         }
     }
 
     fn preview_current_track(&mut self) {
+        self.bump_gen();
         if let Some(p) = self.pipeline.take() {
             p.stop();
         }
@@ -1704,52 +1882,53 @@ impl PlayerState {
         self.status.cover_url = track.cover_url;
         self.sync_neighbors_to_status();
         self.status.duration_ms = track.duration_ms;
+        self.status.position_ms = 0;
+        self.status.started_ts = 0;
         self.status.liked = track.liked;
         self.status.error = None;
         write_status(&mut self.status);
     }
 
     fn next_track(&mut self, skipped: bool) {
-        let should_play = !skipped || self.pending_play_at.is_some() || self.pipeline.as_ref().map(|p| !p.paused).unwrap_or(false);
+        let should_play = !skipped
+            || self.pending_play_at.is_some()
+            || self.status.state == "loading"
+            || self.pipeline.as_ref().map(|p| !p.paused).unwrap_or(false);
         if let Some(auth) = load_auth() {
             if self.mode == "wave" {
-                if let Some(cur) = self.queue.get(self.index) {
+                if let Some(cur) = self.queue.get(self.index).cloned() {
+                    let bid = self.batch_id.clone();
                     let kind = if skipped { "skip" } else { "trackFinished" };
-                    send_rotor_feedback(&auth, &self.batch_id, kind, Some(&cur.id));
+                    thread::spawn(move || {
+                        send_rotor_feedback(&auth, &bid, kind, Some(&cur.id));
+                    });
                 }
             }
         }
         if self.queue.is_empty() {
-            if let Some(auth) = load_auth() {
-                if let Ok((bid, more)) = fetch_my_wave(&auth, None) {
-                    self.mode = "wave".into();
-                    self.batch_id = bid;
-                    self.queue = more;
-                    self.index = 0;
-                    if should_play {
-                if skipped {
-                    self.preview_current_track();
-                    self.status.state = "loading".into();
-                    write_status(&mut self.status);
-                    self.pending_play_at = Some(std::time::Instant::now() + Duration::from_millis(320));
-                } else {
-                    self.start_current_track();
-                }
-            } else {
-                self.preview_current_track();
-            }
-                    return;
-                }
-            }
+            self.load_mode("wave", None);
+            return;
         }
         if self.index + 1 < self.queue.len() {
             self.index += 1;
+            // Proactively replenish My Wave near queue tail (like Yandex Music mobile!)
+            if self.mode == "wave" && self.index + 2 >= self.queue.len() {
+                if let Some(auth) = load_auth() {
+                    let last_id = self.queue.last().map(|t| t.id.clone());
+                    let tx = self.tx.clone();
+                    thread::spawn(move || {
+                        if let Ok((bid, more)) = fetch_my_wave(&auth, last_id.as_deref()) {
+                            let _ = tx.send(DaemonEvent::WaveAppended { batch_id: bid, tracks: more, auto_play: false });
+                        }
+                    });
+                }
+            }
             if should_play {
-                if skipped {
+                if skipped && mp3_cache_get(&self.queue[self.index].id).is_none() {
                     self.preview_current_track();
                     self.status.state = "loading".into();
                     write_status(&mut self.status);
-                    self.pending_play_at = Some(std::time::Instant::now() + Duration::from_millis(320));
+                    self.pending_play_at = Some(std::time::Instant::now() + Duration::from_millis(120));
                 } else {
                     self.start_current_track();
                 }
@@ -1759,39 +1938,12 @@ impl PlayerState {
             return;
         }
         if self.mode == "wave" || self.mode == "none" {
-            if let Some(auth) = load_auth() {
-                let last_id = self.queue.last().map(|t| t.id.as_str());
-                if let Ok((bid, more)) = fetch_my_wave(&auth, last_id) {
-                    self.mode = "wave".into();
-                    self.batch_id = bid;
-                    self.queue = more;
-                    self.index = 0;
-                    if should_play {
-                if skipped {
-                    self.preview_current_track();
-                    self.status.state = "loading".into();
-                    write_status(&mut self.status);
-                    self.pending_play_at = Some(std::time::Instant::now() + Duration::from_millis(320));
-                } else {
-                    self.start_current_track();
-                }
-            } else {
-                self.preview_current_track();
-            }
-                    return;
-                }
-            }
+            self.load_mode("wave", None);
+            return;
         } else if !self.queue.is_empty() {
             self.index = 0;
             if should_play {
-                if skipped {
-                    self.preview_current_track();
-                    self.status.state = "loading".into();
-                    write_status(&mut self.status);
-                    self.pending_play_at = Some(std::time::Instant::now() + Duration::from_millis(320));
-                } else {
-                    self.start_current_track();
-                }
+                self.start_current_track();
             } else {
                 self.preview_current_track();
             }
@@ -1801,46 +1953,22 @@ impl PlayerState {
     }
 
     fn prev_track(&mut self) {
-        let should_play = self.pending_play_at.is_some() || self.pipeline.as_ref().map(|p| !p.paused).unwrap_or(false);
+        let should_play = self.pending_play_at.is_some()
+            || self.status.state == "loading"
+            || self.pipeline.as_ref().map(|p| !p.paused).unwrap_or(false);
         if self.queue.is_empty() {
-            if let Some(auth) = load_auth() {
-                if let Ok((bid, more)) = fetch_my_wave(&auth, None) {
-                    self.mode = "wave".into();
-                    self.batch_id = bid;
-                    self.queue = more;
-                    self.index = 0;
-                    if should_play {
-                self.preview_current_track();
-                self.status.state = "loading".into();
-                write_status(&mut self.status);
-                self.pending_play_at = Some(std::time::Instant::now() + Duration::from_millis(320));
-            } else {
-                self.preview_current_track();
-            }
-                    return;
-                }
-            }
+            self.load_mode("wave", None);
+            return;
         }
         if self.index > 0 {
             self.index -= 1;
-            if should_play {
-                self.preview_current_track();
-                self.status.state = "loading".into();
-                write_status(&mut self.status);
-                self.pending_play_at = Some(std::time::Instant::now() + Duration::from_millis(320));
-            } else {
-                self.preview_current_track();
-            }
-        } else if !self.queue.is_empty() {
+        } else {
             self.index = self.queue.len() - 1;
-            if should_play {
-                self.preview_current_track();
-                self.status.state = "loading".into();
-                write_status(&mut self.status);
-                self.pending_play_at = Some(std::time::Instant::now() + Duration::from_millis(320));
-            } else {
-                self.preview_current_track();
-            }
+        }
+        if should_play {
+            self.start_current_track();
+        } else {
+            self.preview_current_track();
         }
     }
 
@@ -1863,33 +1991,40 @@ impl PlayerState {
         } else if let Some(q) = cmd.strip_prefix("play:search:") {
             self.load_mode("search", Some(q));
         } else if cmd == "pause" {
+            self.pending_play_at = None;
+            if self.status.state == "loading" {
+                self.bump_gen();
+            }
             if let Some(ref mut p) = self.pipeline {
                 if !p.paused {
                     p.set_paused(true);
-                    if self.status.started_ts > 0 {
-                        let elapsed = (now_unix_i64() - self.status.started_ts).max(0) * 1000;
-                        self.status.position_ms = (self.status.position_ms + elapsed).clamp(0, self.status.duration_ms.max(0));
-                        self.status.started_ts = 0;
-                    }
-                    self.status.state = "paused".into();
-                    write_status(&mut self.status);
                 }
             }
+            if self.status.started_ts > 0 {
+                let now_ms = now_unix_ms();
+                let start_ms = if self.status.started_ts > 10_000_000_000 { self.status.started_ts } else { self.status.started_ts * 1000 };
+                let elapsed = (now_ms - start_ms).max(0);
+                self.status.position_ms = (self.status.position_ms + elapsed).clamp(0, self.status.duration_ms.max(0));
+                self.status.started_ts = 0;
+            }
+            self.status.state = "paused".into();
+            write_status(&mut self.status);
         } else if cmd == "play" || cmd == "resume" {
             if let Some(ref mut p) = self.pipeline {
                 if p.paused {
                     p.set_paused(false);
-                    self.status.started_ts = now_unix_i64();
+                    self.status.started_ts = now_unix_ms();
                     self.status.state = "playing".into();
                     write_status(&mut self.status);
                 }
             } else if !self.queue.is_empty() {
                 self.start_current_track();
             } else if load_auth().is_some() {
-                self.load_mode("wave", None);
+                let m = if matches!(self.mode.as_str(), "likes" | "chart") { self.mode.clone() } else { "wave".into() };
+                self.load_mode(&m, None);
             }
         } else if cmd == "toggle" {
-            let is_paused = self.pipeline.as_ref().map(|p| p.paused).unwrap_or(true);
+            let is_paused = self.status.state != "playing" && self.status.state != "loading";
             if is_paused {
                 self.handle_command("play");
             } else {
@@ -1910,20 +2045,23 @@ impl PlayerState {
         } else if cmd == "like" {
             if let (Some(auth), Some(cur)) = (load_auth(), self.queue.get_mut(self.index)) {
                 let want_like = !self.status.liked;
-                let ok = if want_like {
-                    api_like_track(&auth, &cur.id, false).is_ok()
-                } else {
-                    api_unlike_track(&auth, &cur.id).is_ok()
-                };
-                if ok {
-                    cur.liked = want_like;
-                    self.status.liked = want_like;
-                    write_status(&mut self.status);
-                }
+                let tid = cur.id.clone();
+                cur.liked = want_like;
+                self.status.liked = want_like;
+                write_status(&mut self.status);
+                thread::spawn(move || {
+                    if want_like {
+                        let _ = api_like_track(&auth, &tid, false);
+                    } else {
+                        let _ = api_unlike_track(&auth, &tid);
+                    }
+                });
             }
         } else if cmd == "dislike" {
-            if let (Some(auth), Some(cur)) = (load_auth(), self.queue.get(self.index)) {
-                let _ = api_like_track(&auth, &cur.id, true);
+            if let (Some(auth), Some(cur)) = (load_auth(), self.queue.get(self.index).cloned()) {
+                thread::spawn(move || {
+                    let _ = api_like_track(&auth, &cur.id, true);
+                });
             }
             self.next_track(true);
         } else if cmd == "repeat" {
@@ -1974,9 +2112,10 @@ fn run_daemon() -> i32 {
             return 1;
         }
     };
-    let _ = sock.set_read_timeout(Some(Duration::from_millis(120)));
+    let _ = sock.set_read_timeout(Some(Duration::from_millis(25)));
 
-    let mut player = PlayerState::new();
+    let (tx, rx) = mpsc::channel::<DaemonEvent>();
+    let mut player = PlayerState::new(tx);
     write_status(&mut player.status);
     let mut buf = [0u8; 2048];
 
@@ -1986,6 +2125,9 @@ fn run_daemon() -> i32 {
                 let line = String::from_utf8_lossy(&buf[..n]).to_string();
                 player.handle_command(&line);
             }
+        }
+        while let Ok(ev) = rx.try_recv() {
+            player.handle_event(ev);
         }
         if let Some(due) = player.pending_play_at {
             if std::time::Instant::now() >= due {
@@ -2094,7 +2236,16 @@ pub fn trigger_control(action: &str) -> Result<YMusicStatus, String> {
         write_status(&mut st);
         return Ok(st);
     }
+    let before = read_status();
     send_or_spawn_command(action)?;
+    // Wait up to 90ms for daemon to apply the command and bump seq so reply never carries stale pre-command state!
+    for _ in 0..9 {
+        thread::sleep(Duration::from_millis(10));
+        let cur = read_status();
+        if cur.seq > before.seq || cur.updated_ms > before.updated_ms {
+            return Ok(cur);
+        }
+    }
     Ok(read_status())
 }
 

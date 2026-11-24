@@ -1277,7 +1277,7 @@ fn handle_client(fd: c_int, mac: String) {
         unsafe { close(fd) };
         return;
     }
-    let tv = Timeval { tv_sec: 0, tv_usec: 500_000 };
+    let tv = Timeval { tv_sec: 0, tv_usec: 150_000 };
     unsafe {
         setsockopt(
             fd,
@@ -1300,7 +1300,7 @@ fn handle_client(fd: c_int, mac: String) {
     };
     let mut last_ym_sig = {
         let y = crate::ymusic::read_status();
-        format!("{}:{}:{}:{}", y.state, y.track_id, y.liked, y.updated_ts)
+        format!("{}:{}:{}:{}:{}", y.state, y.track_id, y.liked, y.seq, y.updated_ms)
     };
 
     loop {
@@ -1385,14 +1385,14 @@ fn handle_client(fd: c_int, mac: String) {
             }
         }
         let cur_ym = crate::ymusic::read_status();
-        let cur_ym_sig = format!("{}:{}:{}:{}", cur_ym.state, cur_ym.track_id, cur_ym.liked, cur_ym.updated_ts);
+        let cur_ym_sig = format!("{}:{}:{}:{}:{}", cur_ym.state, cur_ym.track_id, cur_ym.liked, cur_ym.seq, cur_ym.updated_ms);
         if cur_ym_sig != last_ym_sig {
             last_ym_sig = cur_ym_sig;
             if !send_json_line(
                 fd,
                 &obj(vec![
                     ("type", Json::Str("ymusic_status".into())),
-                    ("ymusic", cur_ym.to_json()),
+                    ("ymusic", crate::ymusic::read_status_json()),
                 ]),
             ) {
                 break;
