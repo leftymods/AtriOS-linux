@@ -197,6 +197,9 @@ fun AtriOSApp(
     val lastUserActionRef = remember { java.util.concurrent.atomic.AtomicLong(0L) }
     val rejectedOldTitleRef = remember { java.util.concurrent.atomic.AtomicReference<String?>(null) }
     val rejectedUntilRef = remember { java.util.concurrent.atomic.AtomicLong(0L) }
+    val pendingPlayStateRef = remember { java.util.concurrent.atomic.AtomicReference<String?>(null) }
+    val pendingPlayStateUntilRef = remember { java.util.concurrent.atomic.AtomicLong(0L) }
+    val lastYmSeqRef = remember { java.util.concurrent.atomic.AtomicLong(0L) }
     val lastVolumeDragRef = remember { java.util.concurrent.atomic.AtomicLong(0L) }
     val lastVolumeSentRef = remember { java.util.concurrent.atomic.AtomicLong(0L) }
     val lastVolumeSentPctRef = remember { java.util.concurrent.atomic.AtomicInteger(-1) }
@@ -231,11 +234,23 @@ fun AtriOSApp(
             scope = scope,
             onStatus = { s ->
                 val nowMs = System.currentTimeMillis()
-                val lockedYm = nowMs - lastUserActionRef.get() < 2200L
+                val staleSeq = s.ymusic.seq > 0L && s.ymusic.seq < lastYmSeqRef.get()
+                val lockedYm = nowMs - lastUserActionRef.get() < 1600L
                 val rejectedOld = nowMs < rejectedUntilRef.get() &&
                     s.ymusic.title.isNotBlank() && s.ymusic.title == rejectedOldTitleRef.get()
                 val lockedVol = nowMs - lastVolumeDragRef.get() < 900L
-                val nextYm = if (lockedYm || rejectedOld) status.ymusic else s.ymusic
+                val nextYm = if (staleSeq || lockedYm || rejectedOld) {
+                    status.ymusic
+                } else {
+                    if (s.ymusic.seq > lastYmSeqRef.get()) lastYmSeqRef.set(s.ymusic.seq)
+                    val wantState = pendingPlayStateRef.get()
+                    if (wantState != null && nowMs < pendingPlayStateUntilRef.get() && s.ymusic.state != wantState) {
+                        s.ymusic.copy(state = wantState)
+                    } else {
+                        if (wantState != null && s.ymusic.state == wantState) pendingPlayStateRef.set(null)
+                        s.ymusic
+                    }
+                }
                 status = if (lockedVol) {
                     s.copy(ymusic = nextYm, volume = sliderVol.toInt(), mute = sliderVol.toInt() == 0)
                 } else {
@@ -272,13 +287,23 @@ fun AtriOSApp(
             onYMusicOrbsUpdate = { orbs -> ymOrbs = orbs },
             onYMusicUpdate = { ym ->
                 val nowMs = System.currentTimeMillis()
+                // Ynison-style monotonic sequence guard: reject older snapshots from in-flight polls!
+                if (ym.seq > 0L && ym.seq < lastYmSeqRef.get()) return@BtControlClient
                 val rejectedOld = nowMs < rejectedUntilRef.get() &&
                     ym.title.isNotBlank() && ym.title == rejectedOldTitleRef.get()
                 if (rejectedOld) return@BtControlClient
-                val locked = nowMs - lastUserActionRef.get() < 2200L
-                if (!locked || (ym.title.isNotBlank() && ym.title != status.ymusic.title) || isTrackTransitioning) {
-                    status = status.copy(ymusic = ym)
-                    if (isTrackTransitioning && ym.trackId.isNotBlank() && !ym.trackId.startsWith("opt_")) {
+                if (ym.seq > lastYmSeqRef.get()) lastYmSeqRef.set(ym.seq)
+                val wantState = pendingPlayStateRef.get()
+                val mergedYm = if (wantState != null && nowMs < pendingPlayStateUntilRef.get() && ym.state != wantState) {
+                    ym.copy(state = wantState)
+                } else {
+                    if (wantState != null && ym.state == wantState) pendingPlayStateRef.set(null)
+                    ym
+                }
+                val locked = nowMs - lastUserActionRef.get() < 1600L
+                if (!locked || (mergedYm.title.isNotBlank() && mergedYm.title != status.ymusic.title) || mergedYm.state == wantState || isTrackTransitioning) {
+                    status = status.copy(ymusic = mergedYm)
+                    if (isTrackTransitioning && mergedYm.trackId.isNotBlank() && !mergedYm.trackId.startsWith("opt_")) {
                         isTrackTransitioning = false
                     }
                 }
@@ -345,8 +370,16 @@ fun AtriOSApp(
         lastUserActionRef.set(nowMs)
         val cur = status.ymusic
         when (action) {
-            "pause" -> status = status.copy(ymusic = cur.copy(state = "paused"))
-            "play" -> status = status.copy(ymusic = cur.copy(state = "playing"))
+            "pause" -> {
+                pendingPlayStateRef.set("paused")
+                pendingPlayStateUntilRef.set(nowMs + 1600L)
+                status = status.copy(ymusic = cur.copy(state = "paused"))
+            }
+            "play" -> {
+                pendingPlayStateRef.set("playing")
+                pendingPlayStateUntilRef.set(nowMs + 1600L)
+                status = status.copy(ymusic = cur.copy(state = "playing"))
+            }
             "repeat" -> status = status.copy(ymusic = cur.copy(repeat = !cur.repeat))
             "like" -> status = status.copy(ymusic = cur.copy(liked = !cur.liked))
             "next" -> {
@@ -843,8 +876,17 @@ fun AtriOSApp(
                                 onRefresh = { client.ymusicStatus(); client.ymusicOrbs() },
                                 onLogin = { tok -> client.ymusicLogin(tok) },
                                 onPlay = { mode, q ->
+                                    val nowMs = System.currentTimeMillis()
+                                    lastUserActionRef.set(nowMs)
+                                    pendingPlayStateRef.set(null)
+                                    status = status.copy(ymusic = status.ymusic.copy(mode = mode, state = "loading", error = null))
                                     client.ymusicPlay(mode, q)
-                                    scope.launch { delay(900); client.ymusicStatus() }
+                                    scope.launch {
+                                        delay(650)
+                                        client.ymusicStatus()
+                                        delay(900)
+                                        client.ymusicStatus()
+                                    }
                                 },
                                 onSearch = { q -> client.ymusicSearch(q) },
                                 onControl = { action -> dispatchYMusicControl(action) },

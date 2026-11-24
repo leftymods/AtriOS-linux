@@ -169,7 +169,7 @@ class BtControlClient(
                 sendCommand(JSONObject().put("cmd", "ymusic_status"))
 
                 while (isActive && relayActive) {
-                    delay(4000)
+                    delay(1500)
                     try {
                         val resp = relayHttpGet("$cleanUrl/relay/v1/app/$cleanDid/status", cleanTok)
                         val st = resp.optJSONObject("status")
@@ -241,7 +241,7 @@ class BtControlClient(
             requestMethod = "POST"
             doOutput = true
             connectTimeout = 8000
-            readTimeout = 15000
+            readTimeout = 20000
             setRequestProperty("Authorization", "Bearer $token")
             setRequestProperty("Content-Type", "application/json; charset=utf-8")
             setRequestProperty("Accept", "application/json")
