@@ -114,10 +114,12 @@ jobs:
           set -euo pipefail
           cd "$RUNNER_TEMP/ota_out"
           gh release create "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
             AtriOS-yndxsttion53-ota.tar.gz \
             AtriOS-yndxsttion53-ota.tar.gz.sha256 \
             --title "AtriOS $RELEASE_TAG" \
             --notes "Signed runtime OTA $RELEASE_TAG: atomic relay sync, instant 26ms EQ, 7-mic proximity speech focusing, Ynison async ymusic engine, dynamic Collection API." \
             || gh release upload "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
             AtriOS-yndxsttion53-ota.tar.gz \
             AtriOS-yndxsttion53-ota.tar.gz.sha256 --clobber
