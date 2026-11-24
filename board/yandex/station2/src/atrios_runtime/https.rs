@@ -955,7 +955,6 @@ impl WssClient {
                             frag_buf.extend_from_slice(&payload);
                             if fin {
                                 let out = std::mem::take(&mut frag_buf);
-                                frag_opcode = None;
                                 return Ok(Some(if op == 0x1 {
                                     WsFrame::Text(String::from_utf8_lossy(&out).into_owned())
                                 } else {

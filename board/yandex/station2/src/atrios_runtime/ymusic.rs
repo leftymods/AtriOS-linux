@@ -856,7 +856,8 @@ fn fetch_remote_queue(auth: &YMusicAuth, queue_id: &str) -> Result<(Vec<TrackInf
     if tracks.is_empty() {
         return Err("No playable tracks in remote queue".into());
     }
-    Ok((tracks, rel_idx.min(tracks.len().saturating_sub(1))))
+    let start_idx = rel_idx.min(tracks.len().saturating_sub(1));
+    Ok((tracks, start_idx))
 }
 
 fn fetch_likes(auth: &YMusicAuth) -> Result<Vec<TrackInfo>, String> {
