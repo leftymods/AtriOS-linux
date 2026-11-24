@@ -192,6 +192,10 @@ fun AtriOSApp(
     var ymAlbumResults by remember { mutableStateOf<List<YMusicAlbum>>(emptyList()) }
     var ymOrbs by remember { mutableStateOf<List<YMusicOrb>>(emptyList()) }
     var ymCollection by remember { mutableStateOf(YMusicCollection()) }
+    var termE2eeReady by remember { mutableStateOf(false) }
+    var termE2eeStatus by remember { mutableStateOf("E2EE не подключён (X25519 + ChaCha20)") }
+    var termOutputLog by remember { mutableStateOf("") }
+    var termCmdInput by remember { mutableStateOf("") }
     var savedSpeakers by remember { mutableStateOf(storage.loadSpeakers()) }
     var relayConfig by remember { mutableStateOf(storage.loadRelayConfig()) }
 
@@ -369,6 +373,14 @@ fun AtriOSApp(
                 storage.saveRelayConfig(updated)
             },
             onBtSpeakerPush = { enabled -> status = status.copy(btSpeakerMode = enabled) },
+            onTermE2eeState = { ok, msg ->
+                termE2eeReady = ok
+                termE2eeStatus = msg
+            },
+            onTermE2eeOutput = { out ->
+                val combined = (termOutputLog + "\n" + out).trim()
+                termOutputLog = if (combined.length > 6000) combined.takeLast(6000) else combined
+            },
             onMessage = { msg, isError ->
                 if (isError && msg.isNotBlank()) {
                     scope.launch {
@@ -422,6 +434,7 @@ fun AtriOSApp(
             if (isTrackTransitioning || nowMs - lastNextSkipMsRef.get() < 1150L) return
             lastNextSkipMsRef.set(nowMs)
         }
+        if (action == "prev" && !status.ymusic.canPrev) return
         lastUserActionRef.set(nowMs)
         val cur = status.ymusic
         when (action) {
@@ -818,7 +831,7 @@ fun AtriOSApp(
                                 onSwipeNext = { dispatchYMusicControl("next") },
                                 onSwipePrev = { dispatchYMusicControl("prev") },
                                 canSwipeNext = !isTrackTransitioning && status.ymusic.state != "loading",
-                                canSwipePrev = true,
+                                canSwipePrev = status.ymusic.canPrev,
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .padding(horizontal = 16.dp, vertical = 6.dp),
@@ -1397,6 +1410,110 @@ fun AtriOSApp(
                                                 }
                                             }
                                             item {
+                                                // End-to-End Encrypted (X25519 + ChaCha20 + HMAC-SHA256) Station Terminal
+                                                Surface(
+                                                    shape = RoundedCornerShape(TypeUI.RadiusLg),
+                                                    color = TypeUI.SurfaceElevated,
+                                                    modifier = Modifier.border(1.dp, TypeUI.Hairline, RoundedCornerShape(TypeUI.RadiusLg))
+                                                ) {
+                                                    Column(
+                                                        modifier = Modifier.fillMaxWidth().padding(16.dp),
+                                                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                                                    ) {
+                                                        Row(
+                                                            modifier = Modifier.fillMaxWidth(),
+                                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                                            verticalAlignment = Alignment.CenterVertically
+                                                        ) {
+                                                            Column(modifier = Modifier.weight(1f)) {
+                                                                Text("Терминал станции (E2EE)", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                                                                Text(
+                                                                    termE2eeStatus,
+                                                                    color = if (termE2eeReady) Color(0xFF69F0AE) else Color(0xFF9A9AA6),
+                                                                    fontSize = 11.sp
+                                                                )
+                                                            }
+                                                            FilledTonalButton(
+                                                                onClick = { client.termE2eeInit() },
+                                                                shape = RoundedCornerShape(99.dp),
+                                                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                                                            ) {
+                                                                Icon(Icons.Rounded.Lock, contentDescription = null, modifier = Modifier.size(15.dp))
+                                                                Spacer(Modifier.width(4.dp))
+                                                                Text(if (termE2eeReady) "Переключ." else "Подключить", fontSize = 12.sp)
+                                                            }
+                                                        }
+                                                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
+                                                            listOf("uptime", "free -m", "uname -a", "ps | head -n 12").forEach { qc ->
+                                                                Surface(
+                                                                    shape = RoundedCornerShape(99.dp),
+                                                                    color = OledCard,
+                                                                    modifier = Modifier
+                                                                        .border(1.dp, Color(0xFF33333A), RoundedCornerShape(99.dp))
+                                                                        .clickable {
+                                                                            if (!termE2eeReady) client.termE2eeInit()
+                                                                            else {
+                                                                                termOutputLog = (termOutputLog + "\n$ $qc").trim()
+                                                                                client.termE2eeExec(qc)
+                                                                            }
+                                                                        }
+                                                                ) {
+                                                                    Text(qc.substringBefore(" "), color = Color(0xFFD0D0DC), fontSize = 11.sp, modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp))
+                                                                }
+                                                            }
+                                                        }
+                                                        Row(
+                                                            verticalAlignment = Alignment.CenterVertically,
+                                                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                                            modifier = Modifier.fillMaxWidth()
+                                                        ) {
+                                                            OutlinedTextField(
+                                                                value = termCmdInput,
+                                                                onValueChange = { termCmdInput = it },
+                                                                placeholder = { Text("sh команда (шифруется E2EE)...", fontSize = 12.sp) },
+                                                                singleLine = true,
+                                                                modifier = Modifier.weight(1f),
+                                                                shape = RoundedCornerShape(12.dp)
+                                                            )
+                                                            IconButton(
+                                                                onClick = {
+                                                                    val cmd = termCmdInput.trim()
+                                                                    if (cmd.isNotEmpty()) {
+                                                                        if (!termE2eeReady) {
+                                                                            client.termE2eeInit()
+                                                                        } else {
+                                                                            termOutputLog = (termOutputLog + "\n$ $cmd").trim()
+                                                                            client.termE2eeExec(cmd)
+                                                                            termCmdInput = ""
+                                                                        }
+                                                                    }
+                                                                },
+                                                                modifier = Modifier.size(44.dp).clip(CircleShape).background(palette.accent)
+                                                            ) {
+                                                                Icon(Icons.Rounded.PlayArrow, contentDescription = "Выполнить", tint = palette.onAccent)
+                                                            }
+                                                        }
+                                                        if (termOutputLog.isNotBlank()) {
+                                                            Column(
+                                                                modifier = Modifier
+                                                                    .fillMaxWidth()
+                                                                    .clip(RoundedCornerShape(10.dp))
+                                                                    .background(Color(0xFF070A08))
+                                                                    .padding(10.dp)
+                                                            ) {
+                                                                Text(
+                                                                    termOutputLog,
+                                                                    color = Color(0xFF7CFF9E),
+                                                                    fontSize = 11.sp,
+                                                                    lineHeight = 14.sp,
+                                                                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                                                                )
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            item {
                                                 // Detailed Live Network / Relay / Error Diagnostic Logs Card
                                                 val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
                                                 var logRev by remember { mutableIntStateOf(DebugLogStore.version) }
@@ -1556,7 +1673,7 @@ fun AtriOSApp(
                     onDismiss = { showBigPlayer = false },
                     onOpenEqualizer = { showEqSheet = true },
                     canSwipeNext = !isTrackTransitioning && status.ymusic.state != "loading",
-                    canSwipePrev = true
+                    canSwipePrev = status.ymusic.canPrev
                 )
             }
         }

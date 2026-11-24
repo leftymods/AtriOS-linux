@@ -94,6 +94,8 @@ class BtControlClient(
     private val onAlarmsUpdate: (List<AlarmItem>) -> Unit = {},
     private val onBtSpeakerPush: (Boolean) -> Unit = {},
     private val onRelayInfo: (String, String, String) -> Unit = { _, _, _ -> },
+    private val onTermE2eeState: (Boolean, String) -> Unit = { _, _ -> },
+    private val onTermE2eeOutput: (String) -> Unit = {},
     private val onMessage: (String, Boolean) -> Unit = { _, _ -> },
     private val onConnectionState: (Boolean, String, BluetoothDevice?) -> Unit
 ) {
@@ -117,6 +119,42 @@ class BtControlClient(
     @Volatile private var lastYmTs: Long = 0L
     @Volatile private var directYmToken: String = ""
     @Volatile private var directYmUid: Long = 0L
+    @Volatile private var termSid: String = ""
+    @Volatile private var termSharedKey: ByteArray? = null
+    @Volatile private var termPhonePubHex: String = ""
+    @Volatile private var termPhonePriv: ByteArray? = null
+
+    fun termE2eeInit() {
+        val priv = E2eeCrypto.randomBytes(32)
+        val pub = E2eeCrypto.x25519PublicKey(priv)
+        termPhonePriv = priv
+        termPhonePubHex = E2eeCrypto.hexEncode(pub)
+        termSid = ""
+        termSharedKey = null
+        sendCommand(JSONObject().put("cmd", "term_e2ee_init"))
+    }
+
+    fun termE2eeExec(command: String) {
+        val sid = termSid
+        val shared = termSharedKey
+        val pubHex = termPhonePubHex
+        if (sid.isBlank() || shared == null || pubHex.isBlank()) {
+            onTermE2eeState(false, "Сначала нажмите «Подключить E2EE»")
+            return
+        }
+        val iv = E2eeCrypto.randomBytes(12)
+        val (ct, mac) = E2eeCrypto.encrypt(shared, iv, command.toByteArray(Charsets.UTF_8))
+        DebugLogStore.log("INFO", "E2EE", "tx encrypted cmd (${ct.size}B ciphertext; relay cannot read)")
+        sendCommand(
+            JSONObject()
+                .put("cmd", "term_e2ee_exec")
+                .put("sid", sid)
+                .put("pub", pubHex)
+                .put("iv", E2eeCrypto.hexEncode(iv))
+                .put("ct", E2eeCrypto.hexEncode(ct))
+                .put("mac", E2eeCrypto.hexEncode(mac))
+        )
+    }
 
     fun setDirectYMusicAuth(token: String, uid: Long = 0L) {
         if (token.isNotBlank()) directYmToken = token.trim().removePrefix("OAuth ").trim()
@@ -354,15 +392,19 @@ class BtControlClient(
                     } catch (e: Exception) {
                         lastErr = e
                         val msg = e.message ?: e.javaClass.simpleName
-                        val isRetryable = msg.contains("HTTP 429") || msg.contains("HTTP 502") ||
+                        val isSilentPoll = cmdName == "ymusic_status" || cmdName == "get_status"
+                        val isDnsOffline = e is java.net.UnknownHostException || msg.contains("Unable to resolve host")
+                        val isRetryable = !isDnsOffline && (msg.contains("HTTP 429") || msg.contains("HTTP 502") ||
                             msg.contains("HTTP 503") || msg.contains("HTTP 504") ||
-                            e is java.net.SocketTimeoutException || e is java.io.IOException
-                        if (attempt < maxAttempts - 1 && isRetryable) {
+                            e is java.net.SocketTimeoutException || e is java.io.IOException)
+                        if (attempt < maxAttempts - 1 && isRetryable && !isSilentPoll) {
                             val backoffMs = if (msg.contains("HTTP 429")) (450L * (attempt + 1)) else (320L * (attempt + 1))
                             DebugLogStore.log("WARN", "RELAY", "cmd=$cmdName retry #${attempt + 1} in ${backoffMs}ms: $msg")
                             delay(backoffMs)
                         } else {
-                            DebugLogStore.log("ERR", "RELAY", "cmd=$cmdName FAILED: $msg")
+                            if (!isSilentPoll || !isDnsOffline) {
+                                DebugLogStore.log("ERR", "RELAY", "cmd=$cmdName FAILED: $msg")
+                            }
                             break
                         }
                     }
@@ -810,6 +852,48 @@ class BtControlClient(
                 withContext(Dispatchers.Main) {
                     if (hasSpeakerMode) onBtSpeakerPush(speakerMode)
                     if (msg.isNotBlank()) onMessage(msg, !ok)
+                }
+            }
+            "term_e2ee_init_response" -> {
+                val sid = json.optString("sid", "").trim()
+                val spkPubHex = json.optString("pub", "").trim()
+                val priv = termPhonePriv
+                if (sid.isNotEmpty() && spkPubHex.length == 64 && priv != null) {
+                    try {
+                        val spkPub = E2eeCrypto.hexDecode(spkPubHex)
+                        termSharedKey = E2eeCrypto.x25519(priv, spkPub)
+                        termSid = sid
+                        DebugLogStore.log("OK", "E2EE", "X25519 handshake complete (sid=${sid.take(8)}…)")
+                        withContext(Dispatchers.Main) {
+                            onTermE2eeState(true, "E2EE активен (X25519 + ChaCha20, sid=${sid.take(6)})")
+                        }
+                    } catch (e: Exception) {
+                        withContext(Dispatchers.Main) {
+                            onTermE2eeState(false, "Ошибка E2EE handshake: ${e.message}")
+                        }
+                    }
+                }
+            }
+            "term_e2ee_response" -> {
+                val shared = termSharedKey
+                val ivHex = json.optString("iv", "")
+                val ctHex = json.optString("ct", "")
+                val macHex = json.optString("mac", "")
+                if (shared != null && ivHex.length == 24 && macHex.length == 64) {
+                    try {
+                        val pt = E2eeCrypto.decrypt(
+                            shared,
+                            E2eeCrypto.hexDecode(ivHex),
+                            E2eeCrypto.hexDecode(ctHex),
+                            E2eeCrypto.hexDecode(macHex)
+                        )
+                        val text = String(pt, Charsets.UTF_8)
+                        DebugLogStore.log("OK", "E2EE", "rx decrypted ${pt.size}B output")
+                        withContext(Dispatchers.Main) { onTermE2eeOutput(text) }
+                    } catch (e: Exception) {
+                        DebugLogStore.log("ERR", "E2EE", "MAC/decrypt failed: ${e.message}")
+                        withContext(Dispatchers.Main) { onTermE2eeOutput("[E2EE ERROR] ${e.message}") }
+                    }
                 }
             }
             "relay_info" -> {

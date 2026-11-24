@@ -549,14 +549,24 @@ fun YandexWaveFullScreen(
                             horizontalArrangement = Arrangement.spacedBy(if (palette.isYandexOriginal) 16.dp else 26.dp)
                         ) {
                             IconButton(
-                                onClick = { onControl("prev") },
+                                onClick = { if (canSwipePrev) onControl("prev") },
+                                enabled = canSwipePrev,
                                 modifier = Modifier
                                     .size(46.dp)
                                     .clip(CircleShape)
-                                    .background(if (palette.isYandexOriginal) Color(0xCC1A1A1A) else Color.Black.copy(alpha = 0.34f))
+                                    .background(
+                                        if (!canSwipePrev) Color(0x661A1A1A)
+                                        else if (palette.isYandexOriginal) Color(0xCC1A1A1A)
+                                        else Color.Black.copy(alpha = 0.34f)
+                                    )
                                     .then(if (palette.isYandexOriginal) Modifier.border(1.dp, Color(0xFF333333), CircleShape) else Modifier)
                             ) {
-                                Icon(painterResource(R.drawable.ic_ym_prev), contentDescription = "Назад", tint = Color.White, modifier = Modifier.size(22.dp))
+                                Icon(
+                                    painterResource(R.drawable.ic_ym_prev),
+                                    contentDescription = "Назад",
+                                    tint = if (canSwipePrev) Color.White else Color.White.copy(alpha = 0.28f),
+                                    modifier = Modifier.size(22.dp)
+                                )
                             }
 
                             val onMainPlayClick = {

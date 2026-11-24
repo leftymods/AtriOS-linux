@@ -3,7 +3,21 @@ package com.leftymods.atrios.ui
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import kotlin.math.PI
+import kotlin.math.sin
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
@@ -261,14 +275,59 @@ fun BigPlayerOverlay(
                     }
                 }
 
+                // Material 3 Expressive Wavy Animated Progress Bar (inspired by Material-3-Music-Player)
                 Column(modifier = Modifier.fillMaxWidth()) {
-                    LinearProgressIndicator(
-                        progress = { (elapsedSec.toFloat() / totalSec.toFloat()).coerceIn(0f, 1f) },
-                        modifier = Modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(99.dp)),
-                        color = Color.White,
-                        trackColor = Color.White.copy(alpha = 0.22f)
+                    val progressFrac = (elapsedSec.toFloat() / totalSec.toFloat()).coerceIn(0f, 1f)
+                    val waveInf = rememberInfiniteTransition(label = "m3Wave")
+                    val wavePhase by waveInf.animateFloat(
+                        initialValue = 0f,
+                        targetValue = (2.0 * PI).toFloat(),
+                        animationSpec = infiniteRepeatable(tween(1500, easing = LinearEasing), RepeatMode.Restart),
+                        label = "phase"
                     )
-                    Spacer(Modifier.height(6.dp))
+                    val waveAmp by animateFloatAsState(
+                        targetValue = if (ymusic.state == "playing") 1f else 0f,
+                        animationSpec = tween(320),
+                        label = "amp"
+                    )
+                    Canvas(modifier = Modifier.fillMaxWidth().height(16.dp)) {
+                        val cy = size.height / 2f
+                        val activeW = size.width * progressFrac
+                        // Inactive track
+                        drawLine(
+                            color = Color.White.copy(alpha = 0.22f),
+                            start = Offset(activeW, cy),
+                            end = Offset(size.width, cy),
+                            strokeWidth = 3.5.dp.toPx(),
+                            cap = StrokeCap.Round
+                        )
+                        // Active M3 wavy track
+                        if (activeW > 1f) {
+                            val ampPx = 3.2.dp.toPx() * waveAmp
+                            val freq = 0.055f
+                            val p = Path()
+                            var x = 0f
+                            p.moveTo(0f, cy + sin(wavePhase) * ampPx)
+                            while (x <= activeW) {
+                                val y = cy + sin(x * freq + wavePhase) * ampPx
+                                p.lineTo(x, y)
+                                x += 4f
+                            }
+                            p.lineTo(activeW, cy + sin(activeW * freq + wavePhase) * ampPx)
+                            drawPath(
+                                path = p,
+                                color = palette.accent,
+                                style = Stroke(width = 3.5.dp.toPx(), cap = StrokeCap.Round)
+                            )
+                            // M3 thumb dot
+                            drawCircle(
+                                color = Color.White,
+                                radius = 5.5.dp.toPx(),
+                                center = Offset(activeW, cy + sin(activeW * freq + wavePhase) * ampPx)
+                            )
+                        }
+                    }
+                    Spacer(Modifier.height(4.dp))
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                         Text("%d:%02d".format(elapsedSec / 60, elapsedSec % 60), color = Color.White.copy(alpha = 0.68f), fontSize = 12.sp)
                         Text("%d:%02d".format(totalSec / 60, totalSec % 60), color = Color.White.copy(alpha = 0.68f), fontSize = 12.sp)
@@ -283,13 +342,27 @@ fun BigPlayerOverlay(
                     IconButton(onClick = { onControl("dislike") }) {
                         Icon(painterResource(R.drawable.ic_ym_dislike), contentDescription = "Не нравится", tint = Color.White.copy(alpha = 0.78f), modifier = Modifier.size(24.dp))
                     }
-                    IconButton(onClick = { coverDir = -1; elapsedSec = 0; onControl("prev") }) {
-                        Icon(painterResource(R.drawable.ic_ym_prev), contentDescription = "Предыдущий", tint = Color.White, modifier = Modifier.size(30.dp))
+                    IconButton(
+                        onClick = { if (canSwipePrev) { coverDir = -1; elapsedSec = 0; onControl("prev") } },
+                        enabled = canSwipePrev
+                    ) {
+                        Icon(
+                            painterResource(R.drawable.ic_ym_prev),
+                            contentDescription = "Предыдущий",
+                            tint = if (canSwipePrev) Color.White else Color.White.copy(alpha = 0.28f),
+                            modifier = Modifier.size(30.dp)
+                        )
                     }
+                    // Material 3 Expressive Morphing Squircle-to-Circle Play/Pause button
+                    val playCorner by animateDpAsState(
+                        targetValue = if (ymusic.state == "playing") 22.dp else 38.dp,
+                        animationSpec = tween(240),
+                        label = "m3PlayMorph"
+                    )
                     Box(
                         modifier = Modifier
                             .size(76.dp)
-                            .clip(CircleShape)
+                            .clip(RoundedCornerShape(playCorner))
                             .background(palette.accent)
                             .clickable {
                                 when (ymusic.state) {

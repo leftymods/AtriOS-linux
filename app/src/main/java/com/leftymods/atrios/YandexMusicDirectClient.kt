@@ -181,13 +181,13 @@ object YandexMusicDirectClient {
                 .optJSONObject("result")?.optJSONObject("library")?.optJSONArray("tracks") ?: JSONArray()
             likesCount = arr.length()
             val ids = buildList {
-                for (i in 0 until minOf(arr.length(), 30)) {
+                for (i in 0 until minOf(arr.length(), 300)) {
                     val id = arr.optJSONObject(i)?.optString("id", "")?.trim().orEmpty()
                     if (id.isNotEmpty()) add(id)
                 }
             }
-            if (ids.isNotEmpty()) {
-                val det = apiPostForm(token, "/tracks", "track-ids=${URLEncoder.encode(ids.joinToString(","), "UTF-8")}")
+            for (chunk in ids.chunked(100)) {
+                val det = apiPostForm(token, "/tracks", "track-ids=${URLEncoder.encode(chunk.joinToString(","), "UTF-8")}")
                 val list = det.optJSONArray("result") ?: JSONArray()
                 for (i in 0 until list.length()) {
                     list.optJSONObject(i)?.let { parseTrack(it)?.let(likedTracks::add) }
