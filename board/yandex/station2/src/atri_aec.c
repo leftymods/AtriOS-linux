@@ -50,6 +50,7 @@
 #define RMASK     (RING - 1)
 
 /* ---- Frequency-Domain STFT-Kalman Residual Echo Suppressor (256-pt FFT, 50% OLA) ---- */
+static float g_noise_env = 40.0f;
 static float g_hann[FFT_N];
 static float g_e_win[FFT_N];
 static float g_r_win[FFT_N];
@@ -212,7 +213,6 @@ static int g_best_mic = 0;
 /* ---- BNR + speech AGC state ---- */
 static float g_nr_hist[NR_HOPS];
 static int g_nr_idx = 0, g_nr_fill = 0;
-static float g_noise_env = 40.0f;
 static double g_post_acc = 0.0;
 static float g_sig_env = 0.0f;
 static float g_nr_gain = 1.0f;
