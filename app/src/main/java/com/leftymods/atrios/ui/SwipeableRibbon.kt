@@ -29,6 +29,7 @@ fun SwipeableTwoCardRibbon(
     onSwipeNext: () -> Unit,
     onSwipePrev: () -> Unit,
     modifier: Modifier = Modifier,
+    swipeEnabled: Boolean = true,
     currentCard: @Composable () -> Unit,
     nextCard: @Composable () -> Unit,
     prevCard: @Composable () -> Unit
@@ -41,6 +42,7 @@ fun SwipeableTwoCardRibbon(
 
     val latestNext by rememberUpdatedState(onSwipeNext)
     val latestPrev by rememberUpdatedState(onSwipePrev)
+    val latestEnabled by rememberUpdatedState(swipeEnabled)
 
     // Only reset offset when a new track arrives and the user is NOT actively holding/dragging
     LaunchedEffect(trackKey) {
@@ -67,13 +69,13 @@ fun SwipeableTwoCardRibbon(
                         val cur = offsetX.value
                         val thresh = span * 0.28f
                         scope.launch {
-                            if (cur < -thresh) {
+                            if (latestEnabled && cur < -thresh) {
                                 settling = true
                                 offsetX.animateTo(-span, tween(210, easing = FastOutSlowInEasing))
                                 latestNext()
                                 offsetX.snapTo(0f)
                                 settling = false
-                            } else if (cur > thresh) {
+                            } else if (latestEnabled && cur > thresh) {
                                 settling = true
                                 offsetX.animateTo(span, tween(210, easing = FastOutSlowInEasing))
                                 latestPrev()
@@ -96,8 +98,10 @@ fun SwipeableTwoCardRibbon(
                         if (!settling) {
                             change.consume()
                             val curSpan = (widthPx + 24).toFloat().coerceAtLeast(300f)
+                            val delta = if (latestEnabled) dragAmount else dragAmount * 0.20f
+                            val limit = if (latestEnabled) curSpan else curSpan * 0.16f
                             scope.launch {
-                                offsetX.snapTo((offsetX.value + dragAmount).coerceIn(-curSpan, curSpan))
+                                offsetX.snapTo((offsetX.value + delta).coerceIn(-limit, limit))
                             }
                         }
                     }

@@ -56,7 +56,8 @@ fun BigPlayerOverlay(
     onVolumeCommit: (Int) -> Unit,
     onControl: (String) -> Unit,
     onPlayWave: () -> Unit,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    swipeEnabled: Boolean = true
 ) {
     var artistSheetName by remember { mutableStateOf<String?>(null) }
     var artistLoading by remember { mutableStateOf(false) }
@@ -151,6 +152,7 @@ fun BigPlayerOverlay(
                 trackKey = ymusic.trackId,
                 onSwipeNext = { coverDir = 1; elapsedSec = 0; onControl("next") },
                 onSwipePrev = { coverDir = -1; elapsedSec = 0; onControl("prev") },
+                swipeEnabled = swipeEnabled,
                 modifier = Modifier
                     .fillMaxWidth(0.88f)
                     .aspectRatio(1f),

@@ -145,7 +145,8 @@ fun YandexWaveFullScreen(
     onOpenBigPlayer: () -> Unit = {},
     onOpenVolumeSheet: () -> Unit = {},
     volume: Float = 50f,
-    mute: Boolean = false
+    mute: Boolean = false,
+    swipeEnabled: Boolean = true
 ) {
     var searchOpen by remember { mutableStateOf(false) }
     var searchQuery by remember { mutableStateOf("") }
@@ -639,6 +640,7 @@ fun YandexWaveFullScreen(
                             trackKey = ymusic.trackId,
                             onSwipeNext = { onControl("next") },
                             onSwipePrev = { onControl("prev") },
+                            swipeEnabled = swipeEnabled,
                             modifier = Modifier.fillMaxWidth(0.92f),
                             currentCard = {
                                 WavePillCard(ymusic.title, ymusic.artist, ymusic.coverUrl, ymusic.liked, interactive = true)

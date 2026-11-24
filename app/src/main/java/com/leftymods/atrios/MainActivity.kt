@@ -198,6 +198,8 @@ fun AtriOSApp(
     val rejectedUntilRef = remember { java.util.concurrent.atomic.AtomicLong(0L) }
     val lastVolumeDragRef = remember { java.util.concurrent.atomic.AtomicLong(0L) }
     val lastVolumeSentRef = remember { java.util.concurrent.atomic.AtomicLong(0L) }
+    val lastVolumeSentPctRef = remember { java.util.concurrent.atomic.AtomicInteger(-1) }
+    var isTrackTransitioning by remember { mutableStateOf(false) }
     var showVolumeSheet by remember { mutableStateOf(false) }
     var checkingAppUpdate by remember { mutableStateOf(false) }
     var appUpdateStatusMsg by remember { mutableStateOf<String?>(null) }
@@ -259,8 +261,11 @@ fun AtriOSApp(
                     ym.title.isNotBlank() && ym.title == rejectedOldTitleRef.get()
                 if (rejectedOld) return@BtControlClient
                 val locked = nowMs - lastUserActionRef.get() < 2200L
-                if (!locked || (ym.title.isNotBlank() && ym.title != status.ymusic.title)) {
+                if (!locked || (ym.title.isNotBlank() && ym.title != status.ymusic.title) || isTrackTransitioning) {
                     status = status.copy(ymusic = ym)
+                    if (isTrackTransitioning && ym.trackId.isNotBlank() && !ym.trackId.startsWith("opt_")) {
+                        isTrackTransitioning = false
+                    }
                 }
             },
             onTimersUpdate = { list -> timers = list },
@@ -307,13 +312,16 @@ fun AtriOSApp(
         val pct = clamped.toInt()
         sliderVol = clamped
         status = status.copy(volume = pct, mute = pct == 0)
-        if (forceCommit || nowMs - lastVolumeSentRef.get() >= 110L) {
+        val changed = pct != lastVolumeSentPctRef.get()
+        if (changed && (forceCommit || nowMs - lastVolumeSentRef.get() >= 160L)) {
             lastVolumeSentRef.set(nowMs)
+            lastVolumeSentPctRef.set(pct)
             client.setVolume(pct)
         }
     }
 
     fun dispatchYMusicControl(action: String) {
+        if ((action == "next" || action == "prev") && isTrackTransitioning) return
         val nowMs = System.currentTimeMillis()
         lastUserActionRef.set(nowMs)
         val cur = status.ymusic
@@ -323,6 +331,7 @@ fun AtriOSApp(
             "repeat" -> status = status.copy(ymusic = cur.copy(repeat = !cur.repeat))
             "like" -> status = status.copy(ymusic = cur.copy(liked = !cur.liked))
             "next" -> {
+                isTrackTransitioning = true
                 if (cur.title.isNotBlank()) {
                     rejectedOldTitleRef.set(cur.title)
                     rejectedUntilRef.set(nowMs + 2800L)
@@ -342,6 +351,7 @@ fun AtriOSApp(
                 }
             }
             "prev" -> {
+                isTrackTransitioning = true
                 if (cur.title.isNotBlank()) {
                     rejectedOldTitleRef.set(cur.title)
                     rejectedUntilRef.set(nowMs + 2800L)
@@ -366,6 +376,8 @@ fun AtriOSApp(
             scope.launch {
                 delay(750)
                 client.ymusicStatus()
+                delay(1800)
+                isTrackTransitioning = false
             }
         }
     }
@@ -661,6 +673,7 @@ fun AtriOSApp(
                                 trackKey = ym.trackId,
                                 onSwipeNext = { dispatchYMusicControl("next") },
                                 onSwipePrev = { dispatchYMusicControl("prev") },
+                                swipeEnabled = !isTrackTransitioning,
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .padding(horizontal = 16.dp, vertical = 6.dp),
@@ -786,7 +799,8 @@ fun AtriOSApp(
                                 onOpenBigPlayer = { showBigPlayer = true },
                                 onOpenVolumeSheet = { showVolumeSheet = true },
                                 volume = sliderVol,
-                                mute = status.mute
+                                mute = status.mute,
+                                swipeEnabled = !isTrackTransitioning
                             )
                         }
 
@@ -1207,7 +1221,8 @@ fun AtriOSApp(
                     onVolumeCommit = { dispatchVolumeLive(it.toFloat(), forceCommit = true) },
                     onControl = { action -> dispatchYMusicControl(action) },
                     onPlayWave = { client.ymusicPlay("wave", null) },
-                    onDismiss = { showBigPlayer = false }
+                    onDismiss = { showBigPlayer = false },
+                    swipeEnabled = !isTrackTransitioning
                 )
             }
         }
