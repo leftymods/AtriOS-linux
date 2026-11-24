@@ -19,8 +19,9 @@ import kotlinx.coroutines.launch
 /**
  * Synchronous 2-card continuous ribbon:
  * As the user drags the current card horizontally, the incoming next/previous card
- * is rendered right next to it and moves in lockstep. Releasing past threshold
- * completes the slide to center and triggers onSwipeNext / onSwipePrev.
+ * moves in lockstep. The card NEVER switches mid-drag — you can freely drag left/right
+ * back and forth while holding your finger, and it ONLY commits when you release past
+ * the threshold (onDragEnd).
  */
 @Composable
 fun SwipeableTwoCardRibbon(
@@ -36,11 +37,16 @@ fun SwipeableTwoCardRibbon(
     val offsetX = remember { Animatable(0f) }
     var widthPx by remember { mutableIntStateOf(900) }
     var settling by remember { mutableStateOf(false) }
+    var isDragging by remember { mutableStateOf(false) }
 
-    // Reset offset cleanly when the new track arrives from speaker
+    val latestNext by rememberUpdatedState(onSwipeNext)
+    val latestPrev by rememberUpdatedState(onSwipePrev)
+
+    // Only reset offset when a new track arrives and the user is NOT actively holding/dragging
     LaunchedEffect(trackKey) {
-        offsetX.snapTo(0f)
-        settling = false
+        if (!isDragging && !settling) {
+            offsetX.snapTo(0f)
+        }
     }
 
     val span = (widthPx + 24).toFloat().coerceAtLeast(300f)
@@ -50,23 +56,27 @@ fun SwipeableTwoCardRibbon(
             .fillMaxWidth()
             .clipToBounds()
             .onSizeChanged { if (it.width > 0) widthPx = it.width }
-            .pointerInput(trackKey) {
+            .pointerInput(Unit) {
                 detectHorizontalDragGestures(
+                    onDragStart = {
+                        if (!settling) isDragging = true
+                    },
                     onDragEnd = {
+                        isDragging = false
                         if (settling) return@detectHorizontalDragGestures
                         val cur = offsetX.value
-                        val thresh = span * 0.24f
+                        val thresh = span * 0.28f
                         scope.launch {
                             if (cur < -thresh) {
                                 settling = true
                                 offsetX.animateTo(-span, tween(210, easing = FastOutSlowInEasing))
-                                onSwipeNext()
+                                latestNext()
                                 offsetX.snapTo(0f)
                                 settling = false
                             } else if (cur > thresh) {
                                 settling = true
                                 offsetX.animateTo(span, tween(210, easing = FastOutSlowInEasing))
-                                onSwipePrev()
+                                latestPrev()
                                 offsetX.snapTo(0f)
                                 settling = false
                             } else {
@@ -75,14 +85,19 @@ fun SwipeableTwoCardRibbon(
                         }
                     },
                     onDragCancel = {
-                        scope.launch {
-                            offsetX.animateTo(0f, spring(dampingRatio = 0.82f, stiffness = Spring.StiffnessMedium))
-                        }
-                    },
-                    onHorizontalDrag = { _, dragAmount ->
+                        isDragging = false
                         if (!settling) {
                             scope.launch {
-                                offsetX.snapTo((offsetX.value + dragAmount).coerceIn(-span, span))
+                                offsetX.animateTo(0f, spring(dampingRatio = 0.82f, stiffness = Spring.StiffnessMedium))
+                            }
+                        }
+                    },
+                    onHorizontalDrag = { change, dragAmount ->
+                        if (!settling) {
+                            change.consume()
+                            val curSpan = (widthPx + 24).toFloat().coerceAtLeast(300f)
+                            scope.launch {
+                                offsetX.snapTo((offsetX.value + dragAmount).coerceIn(-curSpan, curSpan))
                             }
                         }
                     }

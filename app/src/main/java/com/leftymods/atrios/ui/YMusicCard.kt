@@ -111,7 +111,9 @@ fun MyWaveAnimatedAura(
     coverUrl: String = "",
     audioBass: Float = 0f,
     audioMid: Float = 0f,
+    audioHigh: Float = 0f,
     audioEnergy: Float = 0f,
+    audioBeat: Float = 0f,
     modifier: Modifier = Modifier
 ) {
     SingleLiquidBlobShaderAura(
@@ -120,7 +122,9 @@ fun MyWaveAnimatedAura(
         coverUrl = coverUrl,
         audioBass = audioBass,
         audioMid = audioMid,
+        audioHigh = audioHigh,
         audioEnergy = audioEnergy,
+        audioBeat = audioBeat,
         modifier = modifier
     )
 }
@@ -188,7 +192,9 @@ fun YandexWaveFullScreen(
             coverUrl = ymusic.coverUrl,
             audioBass = ymusic.audioBass,
             audioMid = ymusic.audioMid,
+            audioHigh = ymusic.audioHigh,
             audioEnergy = ymusic.audioEnergy,
+            audioBeat = ymusic.audioBeat,
             modifier = Modifier
                 .fillMaxWidth()
                 .fillMaxHeight(0.74f)
@@ -225,7 +231,15 @@ fun YandexWaveFullScreen(
                     OutlinedTextField(
                         value = searchQuery,
                         onValueChange = { searchQuery = it },
-                        placeholder = { Text("Трек, альбом или артист...", color = Color(0xFF7A7A85)) },
+                        placeholder = {
+                            Text(
+                                "Трек, альбом, артист",
+                                color = Color(0xFF7A7A85),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                fontSize = 14.sp
+                            )
+                        },
                         singleLine = true,
                         shape = RoundedCornerShape(99.dp),
                         modifier = Modifier.weight(1f).focusRequester(focusRequester),
@@ -672,15 +686,15 @@ fun YandexWaveFullScreen(
                     }
                 }
 
-                // Infinite Circular Carousel of Artist & Genre Orbs with TRUE native fling inertia!
+                // Infinite Circular Carousel of Artist & Genre Orbs with strong curved arc & native fling inertia!
                 val orbCount = displayOrbs.size.coerceAtLeast(1)
                 val startIdx = remember(orbCount) { 5000 - (5000 % orbCount) }
                 val orbListState = rememberLazyListState(initialFirstVisibleItemIndex = startIdx)
                 LazyRow(
                     state = orbListState,
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
                     contentPadding = PaddingValues(horizontal = 36.dp),
-                    modifier = Modifier.fillMaxWidth().height(156.dp)
+                    modifier = Modifier.fillMaxWidth().height(172.dp)
                 ) {
                     items(count = 10000, key = { it }) { index ->
                         val orb = displayOrbs[((index % orbCount) + orbCount) % orbCount]
@@ -689,24 +703,27 @@ fun YandexWaveFullScreen(
                         val distFromCenter = if (itemInfo != null && layoutInfo.viewportEndOffset > 0) {
                             val vpCenter = (layoutInfo.viewportStartOffset + layoutInfo.viewportEndOffset) * 0.5f
                             val itemCenter = itemInfo.offset + itemInfo.size * 0.5f
-                            ((itemCenter - vpCenter) / (itemInfo.size.coerceAtLeast(1) * 1.15f)).coerceIn(-1.5f, 1.5f)
+                            ((itemCenter - vpCenter) / (itemInfo.size.coerceAtLeast(1) * 1.1f)).coerceIn(-1.6f, 1.6f)
                         } else 0f
                         val absDist = distFromCenter.absoluteValue
                         val isSelectedOrb = activePreset == orb.title
-                        val baseScale = 1.18f - 0.24f * absDist.coerceIn(0f, 1f)
+                        val baseScale = 1.20f - 0.28f * absDist.coerceIn(0f, 1.15f)
                         val scale = if (isSelectedOrb) baseScale + 0.06f else baseScale
-                        val arcDropPx = (34f * absDist * absDist) - (if (isSelectedOrb || absDist < 0.35f) 22f * (1f - absDist.coerceIn(0f, 1f)) else 0f)
-                        val alphaVal = (1f - 0.30f * absDist).coerceIn(0.55f, 1f)
+                        // Strong circular curvature: pronounced arc drop + tangent wheel tilt + center pop-up
+                        val arcDropPx = (74f * absDist * absDist) - (if (isSelectedOrb || absDist < 0.35f) 24f * (1f - absDist.coerceIn(0f, 1f)) else 0f)
+                        val wheelTiltDeg = distFromCenter * 13f
+                        val alphaVal = (1f - 0.34f * absDist).coerceIn(0.48f, 1f)
                         val orbColor = parseHexColor(orb.colorHex, palette.aura2)
 
                         Box(
                             modifier = Modifier
-                                .width(130.dp)
-                                .height(158.dp)
+                                .width(126.dp)
+                                .height(166.dp)
                                 .graphicsLayer {
                                     scaleX = scale
                                     scaleY = scale
                                     translationY = arcDropPx
+                                    rotationZ = wheelTiltDeg
                                     alpha = alphaVal
                                 }
                                 .clickable {
@@ -718,14 +735,20 @@ fun YandexWaveFullScreen(
                             Box(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .height(114.dp)
-                                    .clip(RoundedCornerShape(topStart = 60.dp, topEnd = 60.dp, bottomStart = 20.dp, bottomEnd = 20.dp))
-                                    .then(if (isSelectedOrb) Modifier.border(1.5.dp, palette.accent, RoundedCornerShape(topStart = 60.dp, topEnd = 60.dp, bottomStart = 20.dp, bottomEnd = 20.dp)) else Modifier)
+                                    .height(122.dp)
+                                    .clip(RoundedCornerShape(topStart = 64.dp, topEnd = 64.dp, bottomStart = 44.dp, bottomEnd = 44.dp))
+                                    .then(
+                                        if (isSelectedOrb) Modifier.border(
+                                            1.5.dp,
+                                            palette.accent,
+                                            RoundedCornerShape(topStart = 64.dp, topEnd = 64.dp, bottomStart = 44.dp, bottomEnd = 44.dp)
+                                        ) else Modifier
+                                    )
                                     .background(
                                         Brush.verticalGradient(
                                             listOf(
-                                                orbColor.copy(alpha = 0.80f),
-                                                orbColor.copy(alpha = 0.28f),
+                                                orbColor.copy(alpha = 0.84f),
+                                                orbColor.copy(alpha = 0.30f),
                                                 Color.Transparent
                                             )
                                         )

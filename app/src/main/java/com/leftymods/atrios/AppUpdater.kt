@@ -26,6 +26,7 @@ data class AppReleaseInfo(
 
 object AppUpdater {
     private const val RELEASES_API = "https://api.github.com/repos/leftymods/AtriOS-linux/releases?per_page=15"
+    private const val RELEASES_HTML = "https://github.com/leftymods/AtriOS-linux/releases"
 
     fun currentVersionName(context: Context): String {
         return try {
@@ -60,6 +61,8 @@ object AppUpdater {
         isValidApkFile(cachedApkFile(context, release), release.apkSize)
 
     suspend fun checkForUpdate(context: Context): AppReleaseInfo? = withContext(Dispatchers.IO) {
+        val current = currentVersionName(context)
+        // 1. Try GitHub API first
         try {
             val conn = (URL(RELEASES_API).openConnection() as HttpURLConnection).apply {
                 requestMethod = "GET"
@@ -68,53 +71,92 @@ object AppUpdater {
                 setRequestProperty("Accept", "application/vnd.github+json")
                 setRequestProperty("User-Agent", "AtriOS-Control")
             }
-            if (conn.responseCode != 200) return@withContext null
-            val body = conn.inputStream.bufferedReader().use { it.readText() }
-            conn.disconnect()
+            val code = conn.responseCode
+            if (code == 200) {
+                val body = conn.inputStream.bufferedReader().use { it.readText() }
+                conn.disconnect()
+                val arr = JSONArray(body)
+                var best: AppReleaseInfo? = null
+                for (i in 0 until arr.length()) {
+                    val rel = arr.getJSONObject(i)
+                    if (rel.optBoolean("draft", false) || rel.optBoolean("prerelease", false)) continue
+                    val tag = rel.optString("tag_name", "")
+                    if (!tag.startsWith("app-v")) continue
+                    val ver = tag.removePrefix("app-v").trim()
+                    if (compareVersions(ver, current) <= 0) continue
 
-            val current = currentVersionName(context)
-            val arr = JSONArray(body)
-            var best: AppReleaseInfo? = null
+                    val assets = rel.optJSONArray("assets") ?: continue
+                    var apkUrl = ""
+                    var apkName = ""
+                    var apkSize = 0L
+                    for (j in 0 until assets.length()) {
+                        val a = assets.getJSONObject(j)
+                        val name = a.optString("name", "")
+                        if (name.endsWith(".apk")) {
+                            apkUrl = a.optString("browser_download_url", "")
+                            apkName = name
+                            apkSize = a.optLong("size", 0L)
+                            break
+                        }
+                    }
+                    if (apkUrl.isBlank()) continue
 
-            for (i in 0 until arr.length()) {
-                val rel = arr.getJSONObject(i)
-                if (rel.optBoolean("draft", false) || rel.optBoolean("prerelease", false)) continue
-                val tag = rel.optString("tag_name", "")
-                if (!tag.startsWith("app-v")) continue
-                val ver = tag.removePrefix("app-v").trim()
-                if (compareVersions(ver, current) <= 0) continue
-
-                val assets = rel.optJSONArray("assets") ?: continue
-                var apkUrl = ""
-                var apkName = ""
-                var apkSize = 0L
-                for (j in 0 until assets.length()) {
-                    val a = assets.getJSONObject(j)
-                    val name = a.optString("name", "")
-                    if (name.endsWith(".apk")) {
-                        apkUrl = a.optString("browser_download_url", "")
-                        apkName = name
-                        apkSize = a.optLong("size", 0L)
-                        break
+                    if (best == null || compareVersions(ver, best.version) > 0) {
+                        best = AppReleaseInfo(
+                            version = ver,
+                            tagName = tag,
+                            notes = rel.optString("body", ""),
+                            apkUrl = apkUrl,
+                            apkName = apkName,
+                            apkSize = apkSize
+                        )
                     }
                 }
-                if (apkUrl.isBlank()) continue
+                return@withContext best
+            } else {
+                conn.disconnect()
+            }
+        } catch (_: Exception) {
+            // Fall through to HTML fallback (avoids GitHub API 403 rate limits)
+        }
 
-                if (best == null || compareVersions(ver, best.version) > 0) {
-                    best = AppReleaseInfo(
-                        version = ver,
-                        tagName = tag,
-                        notes = rel.optString("body", ""),
-                        apkUrl = apkUrl,
-                        apkName = apkName,
-                        apkSize = apkSize
-                    )
+        // 2. Fallback: scrape GitHub Releases HTML (zero API rate limit!)
+        try {
+            val conn = (URL(RELEASES_HTML).openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 8000
+                readTimeout = 8000
+                setRequestProperty("User-Agent", "AtriOS-Control")
+            }
+            if (conn.responseCode != 200) {
+                conn.disconnect()
+                return@withContext null
+            }
+            val html = conn.inputStream.bufferedReader().use { it.readText() }
+            conn.disconnect()
+            val matches = Regex("""/releases/tag/app-v([0-9]+(?:\.[0-9]+)*)""").findAll(html)
+            var bestVer: String? = null
+            for (m in matches) {
+                val ver = m.groupValues[1].trim()
+                if (compareVersions(ver, current) > 0 && (bestVer == null || compareVersions(ver, bestVer) > 0)) {
+                    bestVer = ver
                 }
             }
-            best
+            if (bestVer != null) {
+                val tag = "app-v$bestVer"
+                val apkName = "AtriOS-Control-v$bestVer.apk"
+                return@withContext AppReleaseInfo(
+                    version = bestVer,
+                    tagName = tag,
+                    notes = "Обновление AtriOS Control v$bestVer",
+                    apkUrl = "https://github.com/leftymods/AtriOS-linux/releases/download/$tag/$apkName",
+                    apkName = apkName,
+                    apkSize = 0L
+                )
+            }
         } catch (_: Exception) {
-            null
         }
+        null
     }
 
     suspend fun downloadAndInstall(

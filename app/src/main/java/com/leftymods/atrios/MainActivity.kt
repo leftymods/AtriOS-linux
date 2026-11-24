@@ -194,7 +194,13 @@ fun AtriOSApp(
     var settingsPage by remember { mutableStateOf(SettingsPage.ROOT) }
     var showBigPlayer by remember { mutableStateOf(false) }
     val lastUserActionRef = remember { java.util.concurrent.atomic.AtomicLong(0L) }
+    val rejectedOldTitleRef = remember { java.util.concurrent.atomic.AtomicReference<String?>(null) }
+    val rejectedUntilRef = remember { java.util.concurrent.atomic.AtomicLong(0L) }
+    val lastVolumeDragRef = remember { java.util.concurrent.atomic.AtomicLong(0L) }
+    val lastVolumeSentRef = remember { java.util.concurrent.atomic.AtomicLong(0L) }
     var showVolumeSheet by remember { mutableStateOf(false) }
+    var checkingAppUpdate by remember { mutableStateOf(false) }
+    var appUpdateStatusMsg by remember { mutableStateOf<String?>(null) }
     var showRebootDialog by remember { mutableStateOf(false) }
     var availableAppUpdate by remember { mutableStateOf<AppReleaseInfo?>(null) }
     var appUpdateProgress by remember { mutableStateOf<Float?>(null) }
@@ -207,9 +213,18 @@ fun AtriOSApp(
         BtControlClient(
             scope = scope,
             onStatus = { s ->
-                val locked = System.currentTimeMillis() - lastUserActionRef.get() < 1600L
-                status = if (locked) s.copy(ymusic = status.ymusic) else s
-                sliderVol = s.volume.toFloat()
+                val nowMs = System.currentTimeMillis()
+                val lockedYm = nowMs - lastUserActionRef.get() < 2200L
+                val rejectedOld = nowMs < rejectedUntilRef.get() &&
+                    s.ymusic.title.isNotBlank() && s.ymusic.title == rejectedOldTitleRef.get()
+                val lockedVol = nowMs - lastVolumeDragRef.get() < 900L
+                val nextYm = if (lockedYm || rejectedOld) status.ymusic else s.ymusic
+                status = if (lockedVol) {
+                    s.copy(ymusic = nextYm, volume = sliderVol.toInt(), mute = sliderVol.toInt() == 0)
+                } else {
+                    sliderVol = s.volume.toFloat()
+                    s.copy(ymusic = nextYm)
+                }
                 activeDevice?.let { dev ->
                     savedSpeakers = storage.upsertSpeaker(
                         SavedSpeaker(
@@ -224,8 +239,10 @@ fun AtriOSApp(
                 }
             },
             onVolumePush = { v, m ->
-                sliderVol = v.toFloat()
-                status = status.copy(volume = v, mute = m)
+                if (System.currentTimeMillis() - lastVolumeDragRef.get() >= 900L) {
+                    sliderVol = v.toFloat()
+                    status = status.copy(volume = v, mute = m)
+                }
             },
             onButtonsPush = { ap, mm ->
                 status = status.copy(actionPressed = ap, micMuted = mm)
@@ -237,7 +254,11 @@ fun AtriOSApp(
             },
             onYMusicOrbsUpdate = { orbs -> ymOrbs = orbs },
             onYMusicUpdate = { ym ->
-                val locked = System.currentTimeMillis() - lastUserActionRef.get() < 1600L
+                val nowMs = System.currentTimeMillis()
+                val rejectedOld = nowMs < rejectedUntilRef.get() &&
+                    ym.title.isNotBlank() && ym.title == rejectedOldTitleRef.get()
+                if (rejectedOld) return@BtControlClient
+                val locked = nowMs - lastUserActionRef.get() < 2200L
                 if (!locked || (ym.title.isNotBlank() && ym.title != status.ymusic.title)) {
                     status = status.copy(ymusic = ym)
                 }
@@ -279,6 +300,19 @@ fun AtriOSApp(
         }
     }
 
+    fun dispatchVolumeLive(vol: Float, forceCommit: Boolean = false) {
+        val nowMs = System.currentTimeMillis()
+        lastVolumeDragRef.set(nowMs)
+        val clamped = vol.coerceIn(0f, 100f)
+        val pct = clamped.toInt()
+        sliderVol = clamped
+        status = status.copy(volume = pct, mute = pct == 0)
+        if (forceCommit || nowMs - lastVolumeSentRef.get() >= 110L) {
+            lastVolumeSentRef.set(nowMs)
+            client.setVolume(pct)
+        }
+    }
+
     fun dispatchYMusicControl(action: String) {
         val nowMs = System.currentTimeMillis()
         lastUserActionRef.set(nowMs)
@@ -289,6 +323,10 @@ fun AtriOSApp(
             "repeat" -> status = status.copy(ymusic = cur.copy(repeat = !cur.repeat))
             "like" -> status = status.copy(ymusic = cur.copy(liked = !cur.liked))
             "next" -> {
+                if (cur.title.isNotBlank()) {
+                    rejectedOldTitleRef.set(cur.title)
+                    rejectedUntilRef.set(nowMs + 2800L)
+                }
                 if (cur.nextTitle.isNotBlank()) {
                     status = status.copy(
                         ymusic = cur.copy(
@@ -304,6 +342,10 @@ fun AtriOSApp(
                 }
             }
             "prev" -> {
+                if (cur.title.isNotBlank()) {
+                    rejectedOldTitleRef.set(cur.title)
+                    rejectedUntilRef.set(nowMs + 2800L)
+                }
                 if (cur.prevTitle.isNotBlank()) {
                     status = status.copy(
                         ymusic = cur.copy(
@@ -322,7 +364,7 @@ fun AtriOSApp(
         client.ymusicControl(action)
         if (action == "next" || action == "prev") {
             scope.launch {
-                delay(550)
+                delay(750)
                 client.ymusicStatus()
             }
         }
@@ -538,11 +580,31 @@ fun AtriOSApp(
                 contentWindowInsets = WindowInsets(0, 0, 0, 0),
                 snackbarHost = {
                     SnackbarHost(snackbarHostState) { data ->
-                        Snackbar(
-                            snackbarData = data,
-                            containerColor = Color(0xFF2B121A),
-                            contentColor = Color(0xFFFFD6DC),
-                            shape = RoundedCornerShape(14.dp)
+                        val dismissState = rememberSwipeToDismissBoxState(
+                            confirmValueChange = { value ->
+                                if (value != SwipeToDismissBoxValue.Settled) {
+                                    data.dismiss()
+                                    true
+                                } else false
+                            }
+                        )
+                        SwipeToDismissBox(
+                            state = dismissState,
+                            backgroundContent = {},
+                            content = {
+                                Snackbar(
+                                    containerColor = Color(0xFF2B121A),
+                                    contentColor = Color(0xFFFFD6DC),
+                                    shape = RoundedCornerShape(14.dp),
+                                    dismissAction = {
+                                        IconButton(onClick = { data.dismiss() }) {
+                                            Icon(Icons.Rounded.Close, contentDescription = "Закрыть", tint = Color(0xFFFFD6DC), modifier = Modifier.size(18.dp))
+                                        }
+                                    }
+                                ) {
+                                    Text(data.visuals.message, color = Color(0xFFFFD6DC), fontSize = 13.sp)
+                                }
+                            }
                         )
                     }
                 },
@@ -982,7 +1044,18 @@ fun AtriOSApp(
                                             item {
                                                 Surface(shape = RoundedCornerShape(22.dp), color = OledCard) {
                                                     Column(Modifier.fillMaxWidth().padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                                                        Text("Приложение AtriOS Control", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                                                        val curAppVer = remember { AppUpdater.currentVersionName(context) }
+                                                        Row(
+                                                            modifier = Modifier.fillMaxWidth(),
+                                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                                            verticalAlignment = Alignment.CenterVertically
+                                                        ) {
+                                                            Text("Приложение AtriOS Control", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                                                            Text("v$curAppVer", color = palette.accent, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                                                        }
+                                                        if (appUpdateStatusMsg != null) {
+                                                            Text(appUpdateStatusMsg!!, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
+                                                        }
                                                         val rel = availableAppUpdate
                                                         if (rel != null) {
                                                             val prog = appUpdateProgress
@@ -1008,10 +1081,28 @@ fun AtriOSApp(
                                                             }
                                                         } else {
                                                             FilledTonalButton(
-                                                                onClick = { scope.launch { availableAppUpdate = AppUpdater.checkForUpdate(context) } },
+                                                                enabled = !checkingAppUpdate,
+                                                                onClick = {
+                                                                    scope.launch {
+                                                                        checkingAppUpdate = true
+                                                                        appUpdateStatusMsg = "Проверка обновлений..."
+                                                                        val found = AppUpdater.checkForUpdate(context)
+                                                                        availableAppUpdate = found
+                                                                        checkingAppUpdate = false
+                                                                        appUpdateStatusMsg = if (found != null) {
+                                                                            "Доступна новая версия v${found.version}"
+                                                                        } else {
+                                                                            "Установлена актуальная версия v$curAppVer"
+                                                                        }
+                                                                    }
+                                                                },
                                                                 shape = RoundedCornerShape(99.dp)
                                                             ) {
-                                                                Icon(Icons.Rounded.Refresh, contentDescription = null)
+                                                                if (checkingAppUpdate) {
+                                                                    CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                                                                } else {
+                                                                    Icon(Icons.Rounded.Refresh, contentDescription = null)
+                                                                }
                                                                 Spacer(Modifier.width(6.dp))
                                                                 Text("Проверить обновления приложения")
                                                             }
@@ -1084,10 +1175,11 @@ fun AtriOSApp(
                             volume = sliderVol,
                             mute = status.mute,
                             speakersDesc = status.speakersDesc,
-                            onVolumeChange = { sliderVol = it },
-                            onVolumeCommit = { client.setVolume(it) },
+                            onVolumeChange = { dispatchVolumeLive(it, forceCommit = false) },
+                            onVolumeCommit = { dispatchVolumeLive(it.toFloat(), forceCommit = true) },
                             onToggleMute = { client.setMute(!status.mute) },
-                            onAudioTest = { client.audioTest() }
+                            onAudioTest = { client.audioTest() },
+                            showAudioTest = false
                         )
                     }
                 }
@@ -1104,15 +1196,16 @@ fun AtriOSApp(
                     palette = palette,
                     volume = sliderVol,
                     mute = status.mute,
-                    onVolumeChange = { sliderVol = it },
-                    onVolumeCommit = { client.setVolume(it) },
-                    onControl = { action ->
-                        if (action == "pause" || action == "play") {
-                            status = status.copy(ymusic = status.ymusic.copy(state = if (action == "pause") "paused" else "playing"))
-                        }
-                        client.ymusicControl(action)
-                                    if (action == "next" || action == "prev") scope.launch { delay(350); client.ymusicStatus() }
+                    searchResults = ymSearchResults,
+                    albumResults = ymAlbumResults,
+                    onSearch = { q -> client.ymusicSearch(q) },
+                    onPlay = { mode, q ->
+                        client.ymusicPlay(mode, q)
+                        scope.launch { delay(900); client.ymusicStatus() }
                     },
+                    onVolumeChange = { dispatchVolumeLive(it, forceCommit = false) },
+                    onVolumeCommit = { dispatchVolumeLive(it.toFloat(), forceCommit = true) },
+                    onControl = { action -> dispatchYMusicControl(action) },
                     onPlayWave = { client.ymusicPlay("wave", null) },
                     onDismiss = { showBigPlayer = false }
                 )

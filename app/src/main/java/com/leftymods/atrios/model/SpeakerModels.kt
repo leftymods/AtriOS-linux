@@ -364,7 +364,9 @@ data class YMusicStatus(
     val error: String? = null,
     val audioBass: Float = 0f,
     val audioMid: Float = 0f,
+    val audioHigh: Float = 0f,
     val audioEnergy: Float = 0f,
+    val audioBeat: Float = 0f,
     val updatedTs: Long = 0L
 ) {
     val isActive: Boolean
@@ -411,7 +413,9 @@ data class YMusicStatus(
                 error = if (obj.isNull("error")) null else obj.optString("error").ifBlank { null },
                 audioBass = obj.optDouble("audio_bass", 0.0).toFloat().coerceIn(0f, 1f),
                 audioMid = obj.optDouble("audio_mid", 0.0).toFloat().coerceIn(0f, 1f),
+                audioHigh = obj.optDouble("audio_high", 0.0).toFloat().coerceIn(0f, 1f),
                 audioEnergy = obj.optDouble("audio_energy", 0.0).toFloat().coerceIn(0f, 1f),
+                audioBeat = obj.optDouble("audio_beat", 0.0).toFloat().coerceIn(0f, 1f),
                 updatedTs = obj.optLong("updated_ts", 0L)
             )
         }

@@ -142,8 +142,10 @@ fun AudioCard(
                 FilledTonalButton(onClick = onToggleMute) {
                     Text(if (mute) "Вкл. звук" else "Без звука")
                 }
-                FilledTonalButton(onClick = onAudioTest) {
-                    Text("Тест звука")
+                if (showAudioTest) {
+                    FilledTonalButton(onClick = onAudioTest) {
+                        Text("Тест звука")
+                    }
                 }
             }
         }
