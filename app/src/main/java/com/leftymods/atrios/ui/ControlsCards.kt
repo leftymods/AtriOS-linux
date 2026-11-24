@@ -19,6 +19,7 @@ import com.leftymods.atrios.model.AlarmItem
 import com.leftymods.atrios.model.DeviceCapabilities
 import com.leftymods.atrios.model.SpeakerStatus
 import com.leftymods.atrios.model.TimerItem
+import kotlinx.coroutines.delay
 import java.util.TimeZone
 
 @Composable
@@ -38,7 +39,8 @@ fun TelemetryCard(status: SpeakerStatus) {
             ) {
                 Text(
                     buildString {
-                        append(status.os)
+                        val cleanOs = status.os.replace(Regex("\\s*\\(v[^)]+\\)"), "").trim()
+                        append(cleanOs.ifBlank { status.os })
                         if (status.fwVersion.isNotBlank()) append(" v${status.fwVersion}")
                     },
                     style = MaterialTheme.typography.titleSmall,
@@ -280,31 +282,43 @@ fun TimersAndAlarmsCard(
     onAddTimer: (Int) -> Unit,
     onCancelTimer: (Int?) -> Unit,
     onAddAlarm: (Int, Int) -> Unit,
-    onCancelAlarm: (Int?) -> Unit
+    onCancelAlarm: (Int?) -> Unit,
+    showHeader: Boolean = true
 ) {
     var customMinutes by remember { mutableStateOf("5") }
     var alarmHour by remember { mutableStateOf("07") }
     var alarmMinute by remember { mutableStateOf("30") }
+    var tickElapsed by remember(timers) { mutableIntStateOf(0) }
+    LaunchedEffect(timers) {
+        if (timers.isNotEmpty()) {
+            while (true) {
+                delay(1000)
+                tickElapsed += 1
+            }
+        }
+    }
 
     ElevatedCard(shape = RoundedCornerShape(24.dp)) {
         Column(
             modifier = Modifier.fillMaxWidth().padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
+            if (showHeader) {
                 Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Icon(Icons.Rounded.Timer, contentDescription = null)
-                    Text("Таймеры и будильники", style = MaterialTheme.typography.titleMedium)
-                }
-                IconButton(onClick = onRefresh) {
-                    Icon(Icons.Rounded.Refresh, contentDescription = "Обновить")
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(Icons.Rounded.Timer, contentDescription = null)
+                        Text("Таймеры и будильники", style = MaterialTheme.typography.titleMedium)
+                    }
+                    IconButton(onClick = onRefresh) {
+                        Icon(Icons.Rounded.Refresh, contentDescription = "Обновить")
+                    }
                 }
             }
 
@@ -329,8 +343,9 @@ fun TimersAndAlarmsCard(
                         ) {
                             Column {
                                 Text("Таймер #${t.id}", fontWeight = FontWeight.Medium)
+                                val liveRem = (t.remainingSecs - tickElapsed).coerceAtLeast(0)
                                 Text(
-                                    "Осталось: ${formatDuration(t.remainingSecs)} из ${formatDuration(t.totalSecs)}",
+                                    "Осталось: ${formatDuration(liveRem)} из ${formatDuration(t.totalSecs)}",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )

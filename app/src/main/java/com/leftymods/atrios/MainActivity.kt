@@ -91,8 +91,10 @@ import com.leftymods.atrios.ui.theme.AtriOSTheme
 import com.leftymods.atrios.ui.theme.OledBlack
 import com.leftymods.atrios.ui.theme.OledCard
 import com.leftymods.atrios.ui.theme.OledCardHigh
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -217,6 +219,8 @@ fun AtriOSApp(
     val lastVolumeSentRef = remember { java.util.concurrent.atomic.AtomicLong(0L) }
     val lastVolumeSentPctRef = remember { java.util.concurrent.atomic.AtomicInteger(-1) }
     val lastNextSkipMsRef = remember { java.util.concurrent.atomic.AtomicLong(0L) }
+    val trackTransitionJobRef = remember { java.util.concurrent.atomic.AtomicReference<Job?>(null) }
+    val lastSavedSpeakerKeyRef = remember { java.util.concurrent.atomic.AtomicReference<String>("") }
     var isTrackTransitioning by remember { mutableStateOf(false) }
     var showVolumeSheet by remember { mutableStateOf(false) }
     var showEqSheet by remember { mutableStateOf(false) }
@@ -225,11 +229,13 @@ fun AtriOSApp(
         val srv = status.ymusic.positionMs.coerceAtLeast(0L)
         if (kotlin.math.abs(srv - liveElapsedMs) >= 2000L) liveElapsedMs = srv
     }
-    LaunchedEffect(status.ymusic.trackId, status.ymusic.state) {
-        while (status.ymusic.state == "playing") {
-            delay(500)
-            val dur = status.ymusic.durationMs
-            liveElapsedMs = if (dur > 0L) (liveElapsedMs + 500L).coerceAtMost(dur) else (liveElapsedMs + 500L)
+    LaunchedEffect(status.ymusic.trackId, status.ymusic.state, selectedTab, showBigPlayer, palette.isYandexOriginal) {
+        if (selectedTab != AppTab.WAVE && !showBigPlayer && palette.isYandexOriginal) {
+            while (status.ymusic.state == "playing") {
+                delay(500)
+                val dur = status.ymusic.durationMs
+                liveElapsedMs = if (dur > 0L) (liveElapsedMs + 500L).coerceAtMost(dur) else (liveElapsedMs + 500L)
+            }
         }
     }
     var checkingAppUpdate by remember { mutableStateOf(false) }
@@ -248,7 +254,7 @@ fun AtriOSApp(
                 appUpdateProgress = null
                 dl.onSuccess { apkFile ->
                     DebugLogStore.log("OK", "UPDATER", "APK v${rel.version} скачан (${apkFile.length() / 1024} КБ) — запуск установки")
-                    AppUpdater.downloadAndInstall(context, rel) { p -> appUpdateProgress = p }
+                    AppUpdater.installApk(context, apkFile)
                 }.onFailure { err ->
                     DebugLogStore.log("WARN", "UPDATER", "Ошибка автозагрузки v${rel.version}: ${err.message}")
                 }
@@ -297,22 +303,28 @@ fun AtriOSApp(
                 }
                 val nextEq = if (lockedEq) status.eq else s.eq
                 status = if (lockedVol) {
-                    s.copy(ymusic = nextYm, eq = nextEq, volume = sliderVol.toInt(), mute = sliderVol.toInt() == 0)
+                    val curPct = sliderVol.roundToInt()
+                    s.copy(ymusic = nextYm, eq = nextEq, volume = curPct, mute = curPct == 0)
                 } else {
                     sliderVol = s.volume.toFloat()
+                    latestSliderPctRef.set(s.volume)
                     s.copy(ymusic = nextYm, eq = nextEq)
                 }
                 activeDevice?.let { dev ->
-                    savedSpeakers = storage.upsertSpeaker(
-                        SavedSpeaker(
-                            mac = dev.address,
-                            name = dev.name ?: s.model,
-                            model = s.model,
-                            codename = s.codename,
-                            fwVersion = s.fwVersion.ifBlank { s.ota.currentVersion },
-                            lastSeenTs = System.currentTimeMillis()
+                    val fw = s.fwVersion.ifBlank { s.ota.currentVersion }
+                    val spkKey = "${dev.address}|${dev.name}|${s.model}|${s.codename}|$fw"
+                    if (lastSavedSpeakerKeyRef.getAndSet(spkKey) != spkKey) {
+                        savedSpeakers = storage.upsertSpeaker(
+                            SavedSpeaker(
+                                mac = dev.address,
+                                name = dev.name ?: s.model,
+                                model = s.model,
+                                codename = s.codename,
+                                fwVersion = fw,
+                                lastSeenTs = System.currentTimeMillis()
+                            )
                         )
-                    )
+                    }
                 }
             },
             onVolumePush = { v, m ->
@@ -323,6 +335,7 @@ fun AtriOSApp(
                     (wantVol >= 0 && nowMs < pendingVolUntilRef.get() && v != wantVol)
                 if (!stale) {
                     sliderVol = v.toFloat()
+                    latestSliderPctRef.set(v)
                     status = status.copy(volume = v, mute = m)
                 }
             },
@@ -400,6 +413,8 @@ fun AtriOSApp(
                     ymSearchResults = emptyList()
                     ymAlbumResults = emptyList()
                     ymCollection = YMusicCollection()
+                    termE2eeReady = false
+                    termE2eeStatus = "E2EE не подключён (X25519 + ChaCha20)"
                 }
             }
         ).also { c ->
@@ -413,17 +428,31 @@ fun AtriOSApp(
         val nowMs = System.currentTimeMillis()
         lastVolumeDragRef.set(nowMs)
         val clamped = vol.coerceIn(0f, 100f)
-        val pct = clamped.toInt()
+        val pct = clamped.roundToInt()
         latestSliderPctRef.set(pct)
         sliderVol = clamped
         pendingVolRef.set(pct)
         pendingVolUntilRef.set(nowMs + 3500L)
         status = status.copy(volume = pct, mute = pct == 0)
         val changed = pct != lastVolumeSentPctRef.get()
-        if (forceCommit || pct == 0 || (changed && nowMs - lastVolumeSentRef.get() >= 110L)) {
+        if ((forceCommit && changed) || (pct == 0 && changed) || (changed && nowMs - lastVolumeSentRef.get() >= 110L)) {
             lastVolumeSentRef.set(nowMs)
             lastVolumeSentPctRef.set(pct)
             client.setVolume(pct)
+        }
+    }
+
+    fun dispatchYMusicPlay(mode: String, query: String? = null) {
+        val nowMs = System.currentTimeMillis()
+        lastUserActionRef.set(nowMs)
+        pendingPlayStateRef.set(null)
+        status = status.copy(ymusic = status.ymusic.copy(mode = mode, state = "loading", error = null))
+        client.ymusicPlay(mode, query)
+        if (!client.isRelayActive()) {
+            scope.launch {
+                delay(750)
+                client.ymusicStatus()
+            }
         }
     }
 
@@ -500,12 +529,14 @@ fun AtriOSApp(
         }
         client.ymusicControl(action)
         if (action == "next" || action == "prev") {
-            scope.launch {
-                delay(750)
-                client.ymusicStatus()
-                delay(1800)
-                isTrackTransitioning = false
-            }
+            trackTransitionJobRef.getAndSet(
+                scope.launch {
+                    delay(750)
+                    if (!client.isRelayActive()) client.ymusicStatus()
+                    delay(1800)
+                    isTrackTransitioning = false
+                }
+            )?.cancel()
         }
     }
 
@@ -555,15 +586,14 @@ fun AtriOSApp(
 
     LaunchedEffect(connected) {
         if (connected) {
-            client.ymusicStatus()
+            // BtControlClient.connect() and startRelayLoop() already fetch get_status, get_timers, get_alarms
             client.ymusicOrbs()
-            client.getTimers()
-            client.getAlarms()
         }
     }
 
     LaunchedEffect(connected, status.ymusic.isActive) {
-        while (connected && status.ymusic.isActive) {
+        // Only poll ymusic_status on BT transport; Relay already polls full /status (with ymusic) every 1.5s
+        while (connected && status.ymusic.isActive && !client.isRelayActive()) {
             delay(1800)
             client.ymusicStatus()
         }
@@ -758,73 +788,9 @@ fun AtriOSApp(
                         // Synchronous 2-card ribbon bottom mini-player (entire card + cover + text + heart + pause drags, with next/prev card right behind!)
                         val ym = status.ymusic
                         if (selectedTab != AppTab.WAVE && (ym.isActive || ym.title.isNotBlank())) {
-                            @Composable
-                            fun MiniPlayerCard(title: String, artist: String, coverUrl: String, liked: Boolean, playing: Boolean, interactive: Boolean) {
-                                Surface(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .then(
-                                            if (palette.isYandexOriginal) {
-                                                Modifier.border(1.dp, Color(0xFF333333), RoundedCornerShape(18.dp))
-                                            } else Modifier
-                                        )
-                                        .then(if (interactive) Modifier.clickable { showBigPlayer = true } else Modifier),
-                                    shape = RoundedCornerShape(if (palette.isYandexOriginal) 18.dp else 22.dp),
-                                    color = if (palette.isYandexOriginal) Color(0xFF141414) else Color(0xFF1A1A1F)
-                                ) {
-                                    Column(modifier = Modifier.fillMaxWidth()) {
-                                        if (palette.isYandexOriginal) {
-                                            Box(
-                                                modifier = Modifier
-                                                    .fillMaxWidth()
-                                                    .height(2.5.dp)
-                                                    .background(Color(0xFF2B2B2B))
-                                            ) {
-                                                val frac = if (ym.durationMs > 0L) {
-                                                    (liveElapsedMs.toFloat() / ym.durationMs.toFloat()).coerceIn(0f, 1f)
-                                                } else 0f
-                                                Box(
-                                                    modifier = Modifier
-                                                        .fillMaxWidth(frac)
-                                                        .fillMaxHeight()
-                                                        .background(palette.accent)
-                                                )
-                                            }
-                                        }
-                                        Row(
-                                            modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp),
-                                            verticalAlignment = Alignment.CenterVertically,
-                                            horizontalArrangement = Arrangement.spacedBy(10.dp)
-                                        ) {
-                                            AsyncCoverArt(url = coverUrl, shape = RoundedCornerShape(10.dp), modifier = Modifier.size(42.dp))
-                                            Column(modifier = Modifier.weight(1f)) {
-                                                Text(title.ifBlank { "Моя волна" }, color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                                if (artist.isNotBlank()) {
-                                                    Text(artist, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                                }
-                                            }
-                                            IconButton(onClick = { if (interactive) dispatchYMusicControl("like") }, modifier = Modifier.size(32.dp)) {
-                                                Icon(if (liked) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder, contentDescription = null, tint = if (liked) Color(0xFFFF2E7A) else Color.White, modifier = Modifier.size(20.dp))
-                                            }
-                                            IconButton(
-                                                onClick = {
-                                                    if (interactive) {
-                                                        dispatchYMusicControl(if (playing) "pause" else "play")
-                                                    }
-                                                },
-                                                modifier = Modifier.size(34.dp)
-                                            ) {
-                                                Icon(
-                                                    if (playing) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
-                                                    contentDescription = null,
-                                                    tint = if (palette.isYandexOriginal) palette.accent else Color.White,
-                                                    modifier = Modifier.size(26.dp)
-                                                )
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+                            val progressFrac = if (ym.durationMs > 0L) {
+                                (liveElapsedMs.toFloat() / ym.durationMs.toFloat()).coerceIn(0f, 1f)
+                            } else 0f
 
                             SwipeableTwoCardRibbon(
                                 trackKey = ym.trackId,
@@ -836,26 +802,48 @@ fun AtriOSApp(
                                     .fillMaxWidth()
                                     .padding(horizontal = 16.dp, vertical = 6.dp),
                                 currentCard = {
-                                    MiniPlayerCard(ym.title, ym.artist, ym.coverUrl, ym.liked, ym.state == "playing", interactive = true)
+                                    MiniPlayerCard(
+                                        title = ym.title,
+                                        artist = ym.artist,
+                                        coverUrl = ym.coverUrl,
+                                        liked = ym.liked,
+                                        playing = ym.state == "playing",
+                                        progressFrac = progressFrac,
+                                        palette = palette,
+                                        interactive = true,
+                                        onOpenBigPlayer = { showBigPlayer = true },
+                                        onLike = { dispatchYMusicControl("like") },
+                                        onTogglePlay = { dispatchYMusicControl(if (ym.state == "playing") "pause" else "play") }
+                                    )
                                 },
                                 nextCard = {
                                     MiniPlayerCard(
-                                        ym.nextTitle.ifBlank { "Следующий трек" },
-                                        ym.nextArtist,
-                                        ym.nextCoverUrl,
-                                        false,
-                                        ym.state == "playing",
-                                        interactive = false
+                                        title = ym.nextTitle.ifBlank { "Следующий трек" },
+                                        artist = ym.nextArtist,
+                                        coverUrl = ym.nextCoverUrl,
+                                        liked = false,
+                                        playing = ym.state == "playing",
+                                        progressFrac = 0f,
+                                        palette = palette,
+                                        interactive = false,
+                                        onOpenBigPlayer = {},
+                                        onLike = {},
+                                        onTogglePlay = {}
                                     )
                                 },
                                 prevCard = {
                                     MiniPlayerCard(
-                                        ym.prevTitle.ifBlank { "Предыдущий трек" },
-                                        ym.prevArtist,
-                                        ym.prevCoverUrl,
-                                        false,
-                                        ym.state == "playing",
-                                        interactive = false
+                                        title = ym.prevTitle.ifBlank { "Предыдущий трек" },
+                                        artist = ym.prevArtist,
+                                        coverUrl = ym.prevCoverUrl,
+                                        liked = false,
+                                        playing = ym.state == "playing",
+                                        progressFrac = 0f,
+                                        palette = palette,
+                                        interactive = false,
+                                        onOpenBigPlayer = {},
+                                        onLike = {},
+                                        onTogglePlay = {}
                                     )
                                 }
                             )
@@ -949,19 +937,7 @@ fun AtriOSApp(
                                     client.setDirectYMusicAuth(tok)
                                     client.ymusicLogin(tok)
                                 },
-                                onPlay = { mode, q ->
-                                    val nowMs = System.currentTimeMillis()
-                                    lastUserActionRef.set(nowMs)
-                                    pendingPlayStateRef.set(null)
-                                    status = status.copy(ymusic = status.ymusic.copy(mode = mode, state = "loading", error = null))
-                                    client.ymusicPlay(mode, q)
-                                    scope.launch {
-                                        delay(650)
-                                        client.ymusicStatus()
-                                        delay(900)
-                                        client.ymusicStatus()
-                                    }
-                                },
+                                onPlay = { mode, q -> dispatchYMusicPlay(mode, q) },
                                 onSearch = { q -> client.ymusicSearch(q) },
                                 onControl = { action -> dispatchYMusicControl(action) },
                                 onOpenAccountSettings = {
@@ -974,7 +950,7 @@ fun AtriOSApp(
                                 volume = sliderVol,
                                 mute = status.mute,
                                 canSwipeNext = !isTrackTransitioning && status.ymusic.state != "loading",
-                                canSwipePrev = true
+                                canSwipePrev = status.ymusic.canPrev
                             )
                         }
                         AppTab.COLLECTION -> {
@@ -982,20 +958,8 @@ fun AtriOSApp(
                                 ymusic = status.ymusic,
                                 collection = ymCollection,
                                 palette = palette,
-                                onRefresh = { client.ymusicCollection() },
-                                onPlay = { mode, q ->
-                                    val nowMs = System.currentTimeMillis()
-                                    lastUserActionRef.set(nowMs)
-                                    pendingPlayStateRef.set(null)
-                                    status = status.copy(ymusic = status.ymusic.copy(mode = mode, state = "loading", error = null))
-                                    client.ymusicPlay(mode, q)
-                                    scope.launch {
-                                        delay(650)
-                                        client.ymusicStatus()
-                                        delay(900)
-                                        client.ymusicStatus()
-                                    }
-                                },
+                                onRefresh = { client.ymusicCollection(force = true) },
+                                onPlay = { mode, q -> dispatchYMusicPlay(mode, q) },
                                 onOpenAccountSettings = {
                                     selectedTab = AppTab.SETTINGS
                                     settingsPage = SettingsPage.ACCOUNT
@@ -1010,7 +974,16 @@ fun AtriOSApp(
                                 contentPadding = PaddingValues(vertical = 14.dp)
                             ) {
                                 item {
-                                    Text("Таймеры и будильники", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 24.sp)
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text("Таймеры и будильники", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 24.sp)
+                                        IconButton(onClick = { client.getTimers(); client.getAlarms() }) {
+                                            Icon(Icons.Rounded.Refresh, contentDescription = "Обновить", tint = Color.White)
+                                        }
+                                    }
                                 }
                                 item {
                                     TimersAndAlarmsCard(
@@ -1028,7 +1001,8 @@ fun AtriOSApp(
                                             client.cancelTimers(id)
                                         },
                                         onAddAlarm = { h, m -> client.setAlarm(h, m) },
-                                        onCancelAlarm = { id -> client.cancelAlarms(id) }
+                                        onCancelAlarm = { id -> client.cancelAlarms(id) },
+                                        showHeader = false
                                     )
                                 }
                             }
@@ -1143,7 +1117,14 @@ fun AtriOSApp(
                                     client.setDirectYMusicAuth(tok)
                                     client.ymusicLogin(tok)
                                 },
-                                                    onLogout = { client.ymusicLogout() },
+                                                    onLogout = {
+                                                        storage.saveYMusicToken("")
+                                                        ymOrbs = emptyList()
+                                                        ymCollection = YMusicCollection()
+                                                        ymSearchResults = emptyList()
+                                                        ymAlbumResults = emptyList()
+                                                        client.ymusicLogout()
+                                                    },
                                                     onRefresh = { client.ymusicStatus(); client.ymusicOrbs() }
                                                 )
                                             }
@@ -1451,11 +1432,8 @@ fun AtriOSApp(
                                                                     modifier = Modifier
                                                                         .border(1.dp, Color(0xFF33333A), RoundedCornerShape(99.dp))
                                                                         .clickable {
-                                                                            if (!termE2eeReady) client.termE2eeInit()
-                                                                            else {
-                                                                                termOutputLog = (termOutputLog + "\n$ $qc").trim()
-                                                                                client.termE2eeExec(qc)
-                                                                            }
+                                                                            termOutputLog = (termOutputLog + "\n$ $qc").trim()
+                                                                            client.termE2eeExec(qc)
                                                                         }
                                                                 ) {
                                                                     Text(qc.substringBefore(" "), color = Color(0xFFD0D0DC), fontSize = 11.sp, modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp))
@@ -1479,13 +1457,9 @@ fun AtriOSApp(
                                                                 onClick = {
                                                                     val cmd = termCmdInput.trim()
                                                                     if (cmd.isNotEmpty()) {
-                                                                        if (!termE2eeReady) {
-                                                                            client.termE2eeInit()
-                                                                        } else {
-                                                                            termOutputLog = (termOutputLog + "\n$ $cmd").trim()
-                                                                            client.termE2eeExec(cmd)
-                                                                            termCmdInput = ""
-                                                                        }
+                                                                        termOutputLog = (termOutputLog + "\n$ $cmd").trim()
+                                                                        client.termE2eeExec(cmd)
+                                                                        termCmdInput = ""
                                                                     }
                                                                 },
                                                                 modifier = Modifier.size(44.dp).clip(CircleShape).background(palette.accent)
@@ -1622,7 +1596,22 @@ fun AtriOSApp(
                             speakersDesc = status.speakersDesc,
                             onVolumeChange = { dispatchVolumeLive(it, forceCommit = false) },
                             onVolumeCommit = { dispatchVolumeLive(latestSliderPctRef.get().toFloat(), forceCommit = true) },
-                            onToggleMute = { client.setMute(!status.mute) },
+                            onToggleMute = {
+                                val nextMute = !status.mute
+                                val nowMs = System.currentTimeMillis()
+                                lastVolumeDragRef.set(nowMs)
+                                pendingVolUntilRef.set(nowMs + 2500L)
+                                if (nextMute) {
+                                    pendingVolRef.set(0)
+                                    latestSliderPctRef.set(0)
+                                    sliderVol = 0f
+                                    status = status.copy(volume = 0, mute = true)
+                                } else {
+                                    pendingVolRef.set(-1)
+                                    status = status.copy(mute = false)
+                                }
+                                client.setMute(nextMute)
+                            },
                             onAudioTest = { client.audioTest() },
                             showAudioTest = false
                         )
@@ -1632,8 +1621,10 @@ fun AtriOSApp(
 
             // 5-Band Live Equalizer Bottom Sheet!
             if (showEqSheet) {
+                val eqSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
                 ModalBottomSheet(
                     onDismissRequest = { showEqSheet = false },
+                    sheetState = eqSheetState,
                     containerColor = Color(0xFF141418)
                 ) {
                     EqualizerPanel(
@@ -1662,14 +1653,11 @@ fun AtriOSApp(
                     searchResults = ymSearchResults,
                     albumResults = ymAlbumResults,
                     onSearch = { q -> client.ymusicSearch(q) },
-                    onPlay = { mode, q ->
-                        client.ymusicPlay(mode, q)
-                        scope.launch { delay(900); client.ymusicStatus() }
-                    },
+                    onPlay = { mode, q -> dispatchYMusicPlay(mode, q) },
                     onVolumeChange = { dispatchVolumeLive(it, forceCommit = false) },
                     onVolumeCommit = { dispatchVolumeLive(latestSliderPctRef.get().toFloat(), forceCommit = true) },
                     onControl = { action -> dispatchYMusicControl(action) },
-                    onPlayWave = { client.ymusicPlay("wave", null) },
+                    onPlayWave = { dispatchYMusicPlay("wave", null) },
                     onDismiss = { showBigPlayer = false },
                     onOpenEqualizer = { showEqSheet = true },
                     canSwipeNext = !isTrackTransitioning && status.ymusic.state != "loading",
@@ -1690,6 +1678,79 @@ fun AtriOSApp(
                     TextButton(onClick = { showRebootDialog = false }) { Text("Отмена") }
                 }
             )
+        }
+    }
+}
+
+@Composable
+private fun MiniPlayerCard(
+    title: String,
+    artist: String,
+    coverUrl: String,
+    liked: Boolean,
+    playing: Boolean,
+    progressFrac: Float,
+    palette: AppPalette,
+    interactive: Boolean,
+    onOpenBigPlayer: () -> Unit,
+    onLike: () -> Unit,
+    onTogglePlay: () -> Unit
+) {
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .then(
+                if (palette.isYandexOriginal) {
+                    Modifier.border(1.dp, Color(0xFF333333), RoundedCornerShape(18.dp))
+                } else Modifier
+            )
+            .then(if (interactive) Modifier.clickable { onOpenBigPlayer() } else Modifier),
+        shape = RoundedCornerShape(if (palette.isYandexOriginal) 18.dp else 22.dp),
+        color = if (palette.isYandexOriginal) Color(0xFF141414) else Color(0xFF1A1A1F)
+    ) {
+        Column(modifier = Modifier.fillMaxWidth()) {
+            if (palette.isYandexOriginal) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(2.5.dp)
+                        .background(Color(0xFF2B2B2B))
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth(progressFrac)
+                            .fillMaxHeight()
+                            .background(palette.accent)
+                    )
+                }
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                AsyncCoverArt(url = coverUrl, shape = RoundedCornerShape(10.dp), modifier = Modifier.size(42.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(title.ifBlank { "Моя волна" }, color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    if (artist.isNotBlank()) {
+                        Text(artist, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                }
+                IconButton(onClick = { if (interactive) onLike() }, modifier = Modifier.size(32.dp)) {
+                    Icon(if (liked) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder, contentDescription = null, tint = if (liked) Color(0xFFFF2E7A) else Color.White, modifier = Modifier.size(20.dp))
+                }
+                IconButton(
+                    onClick = { if (interactive) onTogglePlay() },
+                    modifier = Modifier.size(34.dp)
+                ) {
+                    Icon(
+                        if (playing) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
+                        contentDescription = null,
+                        tint = if (palette.isYandexOriginal) palette.accent else Color.White,
+                        modifier = Modifier.size(26.dp)
+                    )
+                }
+            }
         }
     }
 }

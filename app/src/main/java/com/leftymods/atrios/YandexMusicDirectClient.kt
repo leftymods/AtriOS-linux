@@ -24,16 +24,22 @@ object YandexMusicDirectClient {
     @Volatile private var cachedUid: Long = 0L
     @Volatile private var cachedUidToken: String = ""
     @Volatile private var cachedCollectionTs: Long = 0L
+    @Volatile private var cachedCollectionToken: String = ""
     @Volatile private var cachedCollection: YMusicCollection? = null
     @Volatile private var cachedOrbsTs: Long = 0L
+    @Volatile private var cachedOrbsToken: String = ""
     @Volatile private var cachedOrbs: List<YMusicOrb>? = null
+    private val collectionLock = Any()
+    private val orbsLock = Any()
 
     fun clearCache() {
         cachedUid = 0L
         cachedUidToken = ""
         cachedCollectionTs = 0L
+        cachedCollectionToken = ""
         cachedCollection = null
         cachedOrbsTs = 0L
+        cachedOrbsToken = ""
         cachedOrbs = null
     }
 
@@ -165,9 +171,9 @@ object YandexMusicDirectClient {
         return tracks to albums
     }
 
-    fun fetchCollection(token: String, hintUid: Long, force: Boolean = false): YMusicCollection {
+    fun fetchCollection(token: String, hintUid: Long, force: Boolean = false): YMusicCollection = synchronized(collectionLock) {
         val now = System.currentTimeMillis()
-        if (!force && cachedCollection != null && now - cachedCollectionTs < 300_000L) {
+        if (!force && cachedCollection != null && cachedCollectionToken == token && now - cachedCollectionTs < 300_000L) {
             return cachedCollection!!
         }
         val t0 = System.currentTimeMillis()
@@ -289,14 +295,15 @@ object YandexMusicDirectClient {
             likedAlbums = likedAlbums
         )
         cachedCollection = col
+        cachedCollectionToken = token
         cachedCollectionTs = System.currentTimeMillis()
         DebugLogStore.log("OK", "DIRECT_YM", "collection -> ${likesCount} likes, ${favArtists.size} artists, ${playlists.size} pl (${System.currentTimeMillis() - t0}ms)")
         return col
     }
 
-    fun fetchOrbs(token: String, hintUid: Long): List<YMusicOrb> {
+    fun fetchOrbs(token: String, hintUid: Long): List<YMusicOrb> = synchronized(orbsLock) {
         val now = System.currentTimeMillis()
-        if (cachedOrbs != null && now - cachedOrbsTs < 600_000L) return cachedOrbs!!
+        if (cachedOrbs != null && cachedOrbsToken == token && now - cachedOrbsTs < 600_000L) return cachedOrbs!!
         val t0 = System.currentTimeMillis()
         val palette = listOf("#6D4AFF", "#E65C00", "#FF1F8E", "#00C896", "#3D7EFF", "#FF6D00", "#B24BF3")
         val orbs = mutableListOf<YMusicOrb>()
@@ -325,6 +332,7 @@ object YandexMusicDirectClient {
         }
         if (orbs.isNotEmpty()) {
             cachedOrbs = orbs
+            cachedOrbsToken = token
             cachedOrbsTs = System.currentTimeMillis()
             DebugLogStore.log("OK", "DIRECT_YM", "orbs -> ${orbs.size} items (${System.currentTimeMillis() - t0}ms)")
         }

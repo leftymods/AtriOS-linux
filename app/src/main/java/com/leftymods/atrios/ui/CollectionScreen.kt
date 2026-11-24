@@ -173,14 +173,6 @@ private fun CollectionHeartAura(
                         radius = r * 1.15f
                     )
                 )
-                // Signature dark center notch line (matches reference screenshot!)
-                drawLine(
-                    color = OledBlack.copy(alpha = 0.85f),
-                    start = Offset(cx, cy - r * 0.42f),
-                    end = Offset(cx, cy + r * 0.18f),
-                    strokeWidth = r * 0.085f,
-                    cap = StrokeCap.Round
-                )
             }
         }
         Spacer(Modifier.height(6.dp))
@@ -201,8 +193,7 @@ fun CollectionScreen(
     palette: AppPalette,
     onRefresh: () -> Unit,
     onPlay: (String, String?) -> Unit,
-    onOpenAccountSettings: () -> Unit,
-    onOpenSearch: () -> Unit = {}
+    onOpenAccountSettings: () -> Unit
 ) {
     var subPage by remember { mutableStateOf(CollectionSubPage.MAIN) }
     var showColorInfoSheet by remember { mutableStateOf(false) }
@@ -297,6 +288,7 @@ fun CollectionScreen(
     if (subPage != CollectionSubPage.MAIN) {
         CollectionDetailSubPage(
             subPage = subPage,
+            ymusic = ymusic,
             collection = collection,
             accent = musicAccent,
             onBack = { subPage = CollectionSubPage.MAIN },
@@ -594,7 +586,6 @@ fun CollectionScreen(
                         fontSize = 20.sp,
                         fontWeight = FontWeight.ExtraBold
                     )
-                    Icon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, contentDescription = null, tint = Color.White, modifier = Modifier.size(22.dp))
                 }
                 if (collection.loaded) {
                     Text(
@@ -707,6 +698,7 @@ private fun CollectionTrackRow(
 @Composable
 private fun CollectionDetailSubPage(
     subPage: CollectionSubPage,
+    ymusic: YMusicStatus,
     collection: YMusicCollection,
     accent: Color,
     onBack: () -> Unit,
@@ -759,8 +751,13 @@ private fun CollectionDetailSubPage(
                     if (collection.likedTracks.isEmpty()) {
                         item { Text("Список «Мне нравится» пока пуст", color = Color(0xFF8E8E98)) }
                     } else {
-                        items(collection.likedTracks, key = { it.id }) { tr ->
-                            CollectionTrackRow(track = tr, isPlaying = false, accent = accent, onClick = { onPlay("track", tr.id) })
+                        itemsIndexed(collection.likedTracks, key = { idx, tr -> "${tr.id}_$idx" }) { _, tr ->
+                            CollectionTrackRow(
+                                track = tr,
+                                isPlaying = ymusic.trackId == tr.id && ymusic.state == "playing",
+                                accent = accent,
+                                onClick = { onPlay("track", tr.id) }
+                            )
                         }
                     }
                 }
@@ -821,7 +818,7 @@ private fun CollectionDetailSubPage(
                     if (collection.likedAlbums.isEmpty()) {
                         item { Text("Нет сохранённых альбомов", color = Color(0xFF8E8E98)) }
                     } else {
-                        items(collection.likedAlbums, key = { it.id }) { al ->
+                        itemsIndexed(collection.likedAlbums, key = { idx, al -> "${al.id}_$idx" }) { _, al ->
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()

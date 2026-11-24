@@ -3,6 +3,8 @@ package com.leftymods.atrios
 import android.annotation.SuppressLint
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothSocket
+import android.os.Handler
+import android.os.Looper
 import com.leftymods.atrios.model.AiStatus
 import com.leftymods.atrios.model.AlarmItem
 import com.leftymods.atrios.model.DeviceCapabilities
@@ -48,6 +50,7 @@ data class DebugLogEntry(
 
 object DebugLogStore {
     private const val MAX_ENTRIES = 150
+    private val mainHandler = Handler(Looper.getMainLooper())
     private val timeFmt = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
     val entries = CopyOnWriteArrayList<DebugLogEntry>()
     val totalRequests = AtomicInteger(0)
@@ -55,6 +58,15 @@ object DebugLogStore {
     val retryCount = AtomicInteger(0)
     @Volatile var version: Int = 0
     @Volatile var onChanged: (() -> Unit)? = null
+
+    private fun notifyChangedOnMain() {
+        val cb = onChanged ?: return
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            cb.invoke()
+        } else {
+            mainHandler.post { onChanged?.invoke() }
+        }
+    }
 
     fun log(level: String, tag: String, msg: String) {
         val ts = synchronized(timeFmt) { timeFmt.format(Date()) }
@@ -65,7 +77,7 @@ object DebugLogStore {
         if (level == "ERR") errorCount.incrementAndGet()
         if (level == "WARN") retryCount.incrementAndGet()
         version++
-        onChanged?.invoke()
+        notifyChangedOnMain()
     }
 
     fun clear() {
@@ -74,7 +86,7 @@ object DebugLogStore {
         errorCount.set(0)
         retryCount.set(0)
         version++
-        onChanged?.invoke()
+        notifyChangedOnMain()
     }
 
     fun dumpText(): String = entries.joinToString("\n") { "[${it.time}] [${it.level}] [${it.tag}] ${it.message}" }
@@ -116,15 +128,24 @@ class BtControlClient(
     @Volatile private var relayToken: String = ""
     @Volatile private var relayActive: Boolean = false
     @Volatile private var userDisconnected: Boolean = false
-    @Volatile private var lastYmTs: Long = 0L
     @Volatile private var directYmToken: String = ""
     @Volatile private var directYmUid: Long = 0L
+    @Volatile private var searchJob: Job? = null
     @Volatile private var termSid: String = ""
     @Volatile private var termSharedKey: ByteArray? = null
     @Volatile private var termPhonePubHex: String = ""
     @Volatile private var termPhonePriv: ByteArray? = null
+    @Volatile private var termInitInFlight: Boolean = false
+    @Volatile private var pendingTermCommand: String? = null
 
-    fun termE2eeInit() {
+    fun isRelayActive(): Boolean = relayActive && writer == null
+
+    fun termE2eeInit(queuedCommand: String? = null) {
+        if (!queuedCommand.isNullOrBlank()) {
+            pendingTermCommand = queuedCommand
+        }
+        if (termInitInFlight) return
+        termInitInFlight = true
         val priv = E2eeCrypto.randomBytes(32)
         val pub = E2eeCrypto.x25519PublicKey(priv)
         termPhonePriv = priv
@@ -139,7 +160,8 @@ class BtControlClient(
         val shared = termSharedKey
         val pubHex = termPhonePubHex
         if (sid.isBlank() || shared == null || pubHex.isBlank()) {
-            onTermE2eeState(false, "Сначала нажмите «Подключить E2EE»")
+            termE2eeInit(queuedCommand = command)
+            onTermE2eeState(false, "Подключение E2EE… команда выполнится автоматически")
             return
         }
         val iv = E2eeCrypto.randomBytes(12)
@@ -173,60 +195,58 @@ class BtControlClient(
         userDisconnected = false
         activeDevice = device
         readJob = scope.launch(Dispatchers.IO) {
-            try {
-                withContext(Dispatchers.Main) {
-                    onConnectionState(false, "Подключение к ${device.name ?: device.address}...", device)
-                }
-                val sock = device.createRfcommSocketToServiceRecord(SPP_UUID)
-                sock.connect()
-                socket = sock
-                writer = OutputStreamWriter(sock.outputStream, Charsets.UTF_8)
-                withContext(Dispatchers.Main) {
-                    onConnectionState(true, "Подключено: ${device.name ?: device.address}", device)
-                }
-
-                // Initial sync: status, OTA, Yandex Music, timers, alarms
-                writeJson(JSONObject().put("cmd", "get_status"))
-                writeJson(JSONObject().put("cmd", "ota_status"))
-                writeJson(JSONObject().put("cmd", "ymusic_status"))
-                writeJson(JSONObject().put("cmd", "get_timers"))
-                writeJson(JSONObject().put("cmd", "get_alarms"))
-                writeJson(JSONObject().put("cmd", "get_relay_info"))
-
-                val reader = BufferedReader(InputStreamReader(sock.inputStream, Charsets.UTF_8))
-                while (true) {
-                    val line = reader.readLine() ?: break
-                    if (line.isBlank()) continue
-                    try {
-                        handlePacket(JSONObject(line))
-                    } catch (_: Exception) {
-                        // Ignore malformed frames cleanly
+            while (isActive && !userDisconnected) {
+                try {
+                    withContext(Dispatchers.Main) {
+                        onConnectionState(false, "Подключение к ${device.name ?: device.address}...", device)
                     }
-                }
-                closeQuietly()
-                if (!userDisconnected && trySeamlessRelayFailover()) return@launch
-                if (!userDisconnected) {
+                    val sock = device.createRfcommSocketToServiceRecord(SPP_UUID)
+                    sock.connect()
+                    socket = sock
+                    writer = OutputStreamWriter(sock.outputStream, Charsets.UTF_8)
+                    withContext(Dispatchers.Main) {
+                        onConnectionState(true, "Подключено: ${device.name ?: device.address}", device)
+                    }
+
+                    // Initial sync (get_status already embeds ota & ymusic)
+                    writeJson(JSONObject().put("cmd", "get_status"))
+                    writeJson(JSONObject().put("cmd", "get_timers"))
+                    writeJson(JSONObject().put("cmd", "get_alarms"))
+                    writeJson(JSONObject().put("cmd", "get_relay_info"))
+
+                    val reader = BufferedReader(InputStreamReader(sock.inputStream, Charsets.UTF_8))
+                    while (isActive && !userDisconnected) {
+                        val line = reader.readLine() ?: break
+                        if (line.isBlank()) continue
+                        try {
+                            handlePacket(JSONObject(line))
+                        } catch (_: Exception) {
+                            // Ignore malformed frames cleanly
+                        }
+                    }
+                    closeQuietly()
+                    if (userDisconnected || !isActive) return@launch
+                    if (trySeamlessRelayFailover()) return@launch
                     DebugLogStore.log("WARN", "BT", "RFCOMM disconnected; auto-reconnecting in 3s")
                     withContext(Dispatchers.Main) {
                         onConnectionState(false, "Переподключение к колонке...", device)
                     }
                     delay(3000)
-                    if (!userDisconnected) connect(device)
-                }
-            } catch (e: Exception) {
-                closeQuietly()
-                if (!userDisconnected && trySeamlessRelayFailover()) return@launch
-                if (!userDisconnected) {
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    closeQuietly()
+                    throw e
+                } catch (e: Exception) {
+                    closeQuietly()
+                    if (userDisconnected || !isActive) return@launch
+                    if (trySeamlessRelayFailover()) return@launch
                     DebugLogStore.log("WARN", "BT", "RFCOMM error: ${e.message}; retrying in 3.5s")
                     withContext(Dispatchers.Main) {
                         onConnectionState(false, "Переподключение: ${e.message ?: "ожидание сети"}", device)
                     }
                     delay(3500)
-                    if (!userDisconnected) connect(device)
                 }
-            } finally {
-                closeQuietly()
             }
+            closeQuietly()
         }
     }
 
@@ -275,7 +295,6 @@ class BtControlClient(
                         DebugLogStore.log("OK", "RELAY", "Connected to $cleanDid (online=$online)")
                         sendCommand(JSONObject().put("cmd", "get_timers"))
                         sendCommand(JSONObject().put("cmd", "get_alarms"))
-                        sendCommand(JSONObject().put("cmd", "ymusic_status"))
                     }
                     delay(1500)
                 } catch (e: kotlinx.coroutines.CancellationException) {
@@ -511,21 +530,29 @@ class BtControlClient(
     }
 
     fun ymusicSearch(query: String) {
+        searchJob?.cancel()
+        val trimmed = query.trim()
+        if (trimmed.isEmpty()) {
+            scope.launch(Dispatchers.Main) { onYMusicSearchResults(emptyList(), emptyList()) }
+            return
+        }
         val tok = directYmToken
         if (tok.isNotBlank()) {
-            scope.launch(Dispatchers.IO) {
+            searchJob = scope.launch(Dispatchers.IO) {
                 try {
-                    val (tracks, albums) = YandexMusicDirectClient.searchCatalog(tok, query)
+                    val (tracks, albums) = YandexMusicDirectClient.searchCatalog(tok, trimmed)
                     withContext(Dispatchers.Main) { onYMusicSearchResults(tracks, albums) }
                     return@launch
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
                 } catch (e: Exception) {
                     DebugLogStore.log("WARN", "DIRECT_YM", "search fallback: ${e.message}")
                 }
-                sendServerOffloadOrFallback("search", JSONObject().put("cmd", "ymusic_search").put("query", query))
+                sendServerOffloadOrFallback("search", JSONObject().put("cmd", "ymusic_search").put("query", trimmed))
             }
             return
         }
-        val payload = JSONObject().put("cmd", "ymusic_search").put("query", query)
+        val payload = JSONObject().put("cmd", "ymusic_search").put("query", trimmed)
         sendServerOffloadOrFallback("search", payload)
     }
 
@@ -690,10 +717,19 @@ class BtControlClient(
         relayJob = null
         readJob?.cancel()
         readJob = null
+        searchJob?.cancel()
+        searchJob = null
         activeDevice = null
+        termSid = ""
+        termSharedKey = null
+        termPhonePubHex = ""
+        termPhonePriv = null
+        termInitInFlight = false
+        pendingTermCommand = null
         closeQuietly()
         if (!silent) {
             scope.launch(Dispatchers.Main) {
+                onTermE2eeState(false, "E2EE не подключён (X25519 + ChaCha20)")
                 onConnectionState(false, "Не подключено", null)
             }
         }
@@ -855,6 +891,7 @@ class BtControlClient(
                 }
             }
             "term_e2ee_init_response" -> {
+                termInitInFlight = false
                 val sid = json.optString("sid", "").trim()
                 val spkPubHex = json.optString("pub", "").trim()
                 val priv = termPhonePriv
@@ -864,10 +901,16 @@ class BtControlClient(
                         termSharedKey = E2eeCrypto.x25519(priv, spkPub)
                         termSid = sid
                         DebugLogStore.log("OK", "E2EE", "X25519 handshake complete (sid=${sid.take(8)}…)")
+                        val queued = pendingTermCommand
+                        pendingTermCommand = null
                         withContext(Dispatchers.Main) {
                             onTermE2eeState(true, "E2EE активен (X25519 + ChaCha20, sid=${sid.take(6)})")
                         }
+                        if (!queued.isNullOrBlank()) {
+                            termE2eeExec(queued)
+                        }
                     } catch (e: Exception) {
+                        pendingTermCommand = null
                         withContext(Dispatchers.Main) {
                             onTermE2eeState(false, "Ошибка E2EE handshake: ${e.message}")
                         }

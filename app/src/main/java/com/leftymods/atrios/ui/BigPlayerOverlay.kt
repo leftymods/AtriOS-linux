@@ -33,6 +33,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -103,7 +104,7 @@ fun BigPlayerOverlay(
     var coverDir by remember { mutableIntStateOf(1) }
     val totalSec = remember(ymusic.durationMs) { (ymusic.durationMs / 1000L).toInt().coerceAtLeast(1) }
 
-    LaunchedEffect(ymusic.trackId, ymusic.state) {
+    LaunchedEffect(ymusic.trackId, ymusic.state, totalSec) {
         while (ymusic.state == "playing" && elapsedSec < totalSec) {
             delay(1000)
             elapsedSec += 1
@@ -118,8 +119,8 @@ fun BigPlayerOverlay(
     Box(
         modifier = Modifier
             .fillMaxSize()
+            .background(Color(0xFF0A0A0C))
             .background(Brush.verticalGradient(listOf(bgTop, bgMid, bgBot)))
-            .background(Color.Black.copy(alpha = 0.72f))
             .pointerInput(Unit) {
                 var totalDrag = 0f
                 detectVerticalDragGestures(
@@ -162,13 +163,7 @@ fun BigPlayerOverlay(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
-                IconButton(onClick = { showVolumeRow = !showVolumeRow }) {
-                    Icon(
-                        if (mute || volume.toInt() == 0) Icons.Rounded.VolumeOff else Icons.Rounded.VolumeUp,
-                        contentDescription = "Громкость",
-                        tint = if (showVolumeRow) palette.accent else Color.White
-                    )
-                }
+                Spacer(Modifier.size(48.dp))
             }
 
             // Synchronous 2-Card Ribbon Cover Art (drags freely under finger, ONLY switches when released!)
@@ -278,15 +273,19 @@ fun BigPlayerOverlay(
                 // Material 3 Expressive Wavy Animated Progress Bar (inspired by Material-3-Music-Player)
                 Column(modifier = Modifier.fillMaxWidth()) {
                     val progressFrac = (elapsedSec.toFloat() / totalSec.toFloat()).coerceIn(0f, 1f)
-                    val waveInf = rememberInfiniteTransition(label = "m3Wave")
-                    val wavePhase by waveInf.animateFloat(
-                        initialValue = 0f,
-                        targetValue = (2.0 * PI).toFloat(),
-                        animationSpec = infiniteRepeatable(tween(1500, easing = LinearEasing), RepeatMode.Restart),
-                        label = "phase"
-                    )
+                    val isPlayingNow = ymusic.state == "playing"
+                    val wavePhase = if (isPlayingNow) {
+                        val waveInf = rememberInfiniteTransition(label = "m3Wave")
+                        val p by waveInf.animateFloat(
+                            initialValue = 0f,
+                            targetValue = (2.0 * PI).toFloat(),
+                            animationSpec = infiniteRepeatable(tween(1500, easing = LinearEasing), RepeatMode.Restart),
+                            label = "phase"
+                        )
+                        p
+                    } else 0f
                     val waveAmp by animateFloatAsState(
-                        targetValue = if (ymusic.state == "playing") 1f else 0f,
+                        targetValue = if (isPlayingNow) 1f else 0f,
                         animationSpec = tween(320),
                         label = "amp"
                     )
@@ -424,12 +423,12 @@ fun BigPlayerOverlay(
 
                 Row(
                     modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     Surface(
                         shape = RoundedCornerShape(99.dp),
                         color = if (ymusic.repeat) palette.accent.copy(alpha = 0.24f) else Color.White.copy(alpha = 0.10f),
-                        modifier = Modifier.width(96.dp).height(44.dp).clickable { onControl("repeat") }
+                        modifier = Modifier.weight(1f).height(44.dp).clickable { onControl("repeat") }
                     ) {
                         Box(contentAlignment = Alignment.Center) {
                             Icon(
@@ -439,13 +438,13 @@ fun BigPlayerOverlay(
                             )
                         }
                     }
-                    Surface(shape = RoundedCornerShape(99.dp), color = Color.White.copy(alpha = 0.10f), modifier = Modifier.width(74.dp).height(44.dp).clickable { onOpenEqualizer() }) {
+                    Surface(shape = RoundedCornerShape(99.dp), color = Color.White.copy(alpha = 0.10f), modifier = Modifier.weight(1f).height(44.dp).clickable { onOpenEqualizer() }) {
                         Box(contentAlignment = Alignment.Center) { Icon(Icons.Rounded.Equalizer, contentDescription = "Эквалайзер", tint = Color.White.copy(alpha = 0.85f)) }
                     }
-                    Surface(shape = RoundedCornerShape(99.dp), color = Color.White.copy(alpha = 0.10f), modifier = Modifier.width(74.dp).height(44.dp).clickable { showVolumeRow = !showVolumeRow }) {
+                    Surface(shape = RoundedCornerShape(99.dp), color = Color.White.copy(alpha = 0.10f), modifier = Modifier.weight(1f).height(44.dp).clickable { showVolumeRow = !showVolumeRow }) {
                         Box(contentAlignment = Alignment.Center) { Icon(if (mute || volume.toInt() == 0) Icons.Rounded.VolumeOff else Icons.Rounded.VolumeUp, contentDescription = "Звук", tint = if (showVolumeRow) palette.accent else Color.White.copy(alpha = 0.85f)) }
                     }
-                    Surface(shape = RoundedCornerShape(99.dp), color = Color.White.copy(alpha = 0.10f), modifier = Modifier.width(74.dp).height(44.dp).clickable { onControl("stop"); onDismiss() }) {
+                    Surface(shape = RoundedCornerShape(99.dp), color = Color.White.copy(alpha = 0.10f), modifier = Modifier.weight(1f).height(44.dp).clickable { onControl("stop"); onDismiss() }) {
                         Box(contentAlignment = Alignment.Center) { Icon(Icons.Rounded.Stop, contentDescription = "Стоп", tint = Color.White.copy(alpha = 0.85f)) }
                     }
                 }
@@ -525,7 +524,7 @@ fun BigPlayerOverlay(
                                 }
                                 item {
                                     LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                                        items(albumResults, key = { it.id }) { album ->
+                                        itemsIndexed(albumResults, key = { idx, al -> "${al.id}_$idx" }) { _, album ->
                                             Surface(
                                                 shape = RoundedCornerShape(16.dp),
                                                 color = OledCard,
@@ -558,7 +557,7 @@ fun BigPlayerOverlay(
                                 item {
                                     Text("Треки исполнителя", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 15.sp)
                                 }
-                                items(searchResults, key = { it.id }) { track ->
+                                itemsIndexed(searchResults, key = { idx, tr -> "${tr.id}_$idx" }) { _, track ->
                                     val isCur = track.id == ymusic.trackId || (track.title == ymusic.title && ymusic.title.isNotBlank())
                                     Row(
                                         modifier = Modifier

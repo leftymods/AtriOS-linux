@@ -6,7 +6,9 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Equalizer
 import androidx.compose.material.icons.rounded.RestartAlt
@@ -47,9 +49,19 @@ fun EqualizerPanel(
     var bands by remember { mutableStateOf(if (eq.bands.size == 5) eq.bands else listOf(0f, 0f, 0f, 0f, 0f)) }
     val lastLiveSent = remember { java.util.concurrent.atomic.AtomicLong(0L) }
 
+    LaunchedEffect(eq.enabled, eq.preset, eq.bands) {
+        if (System.currentTimeMillis() - lastLiveSent.get() > 1500L) {
+            enabled = eq.enabled
+            preset = eq.preset
+            if (eq.bands.size == 5) bands = eq.bands
+        }
+    }
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
+            .verticalScroll(rememberScrollState())
+            .navigationBarsPadding()
             .padding(horizontal = 18.dp, vertical = 8.dp)
             .padding(bottom = 26.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
@@ -130,7 +142,7 @@ fun EqualizerPanel(
                         Slider(
                             value = db,
                             onValueChange = { v ->
-                                val rounded = (v * 2f).toInt() / 2f
+                                val rounded = kotlin.math.round(v * 2f) / 2f
                                 val updated = bands.toMutableList().apply { this[idx] = rounded }
                                 bands = updated
                                 enabled = true

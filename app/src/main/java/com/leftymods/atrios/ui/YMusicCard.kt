@@ -38,6 +38,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -160,8 +161,8 @@ fun YandexWaveFullScreen(
     var activePreset by remember { mutableStateOf<String?>(null) }
     var showOAuthDialog by remember { mutableStateOf(false) }
 
-    LaunchedEffect(searchQuery, ymusic.loggedIn) {
-        if (!ymusic.loggedIn) return@LaunchedEffect
+    LaunchedEffect(searchOpen, searchQuery, ymusic.loggedIn) {
+        if (!searchOpen || !ymusic.loggedIn) return@LaunchedEffect
         val q = searchQuery.trim()
         if (q.length < 2) {
             searching = false
@@ -323,7 +324,7 @@ fun YandexWaveFullScreen(
                         }
                         item {
                             LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                                items(albumResults, key = { it.id }) { album ->
+                                itemsIndexed(albumResults, key = { idx, al -> "${al.id}_$idx" }) { _, album ->
                                     Surface(
                                         shape = RoundedCornerShape(18.dp),
                                         color = OledCard,
@@ -365,7 +366,7 @@ fun YandexWaveFullScreen(
                         item {
                             Text("Треки", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
                         }
-                        items(searchResults, key = { it.id }) { track ->
+                        itemsIndexed(searchResults, key = { idx, tr -> "${tr.id}_$idx" }) { _, track ->
                             val isCurrent = track.id == ymusic.trackId || (track.title == ymusic.title && ymusic.title.isNotBlank())
                             Row(
                                 modifier = Modifier
@@ -503,7 +504,7 @@ fun YandexWaveFullScreen(
 
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         IconButton(onClick = onOpenEqualizer) {
-                            Icon(painterResource(R.drawable.ic_ym_eq), contentDescription = "Эквалайзер", tint = Color.White, modifier = Modifier.size(22.dp))
+                            Icon(Icons.Rounded.Equalizer, contentDescription = "Эквалайзер", tint = Color.White, modifier = Modifier.size(24.dp))
                         }
                         IconButton(onClick = onOpenVolumeSheet) {
                             Icon(if (mute || volume.toInt() == 0) Icons.Rounded.VolumeOff else Icons.Rounded.VolumeUp, contentDescription = "Громкость колонки", tint = if (mute || volume.toInt() == 0) Color(0xFFFF5C8A) else Color.White, modifier = Modifier.size(24.dp))
@@ -660,55 +661,6 @@ fun YandexWaveFullScreen(
                         }
 
                         // Synchronous 2-card ribbon track pill (entire pill + cover + text + heart drags, with next/prev pill right behind it!)
-                        @Composable
-                        fun WavePillCard(title: String, artist: String, coverUrl: String, liked: Boolean, interactive: Boolean) {
-                            Surface(
-                                shape = RoundedCornerShape(99.dp),
-                                color = Color(0xAA1C1C22),
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .then(if (interactive) Modifier.clickable { onOpenBigPlayer() } else Modifier)
-                            ) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                                ) {
-                                    if (coverUrl.isNotBlank()) {
-                                        AsyncCoverArt(
-                                            url = coverUrl,
-                                            shape = CircleShape,
-                                            modifier = Modifier.size(34.dp),
-                                            fallbackIcon = Icons.Rounded.MusicNote
-                                        )
-                                    }
-                                    Text(
-                                        if (title.isNotBlank()) {
-                                            if (artist.isNotBlank()) "$artist — $title" else title
-                                        } else "Нажмите ▶ или свайпните для выбора",
-                                        color = Color.White,
-                                        fontWeight = FontWeight.SemiBold,
-                                        fontSize = 14.sp,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                        textAlign = if (coverUrl.isBlank()) TextAlign.Center else TextAlign.Start,
-                                        modifier = Modifier.weight(1f)
-                                    )
-                                    IconButton(
-                                        onClick = { if (interactive) onControl("like") },
-                                        modifier = Modifier.size(30.dp)
-                                    ) {
-                                        Icon(
-                                            if (liked) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
-                                            contentDescription = "Нравится",
-                                            tint = if (liked) Color(0xFFFF2E7A) else Color.White,
-                                            modifier = Modifier.size(22.dp)
-                                        )
-                                    }
-                                }
-                            }
-                        }
-
                         SwipeableTwoCardRibbon(
                             trackKey = ymusic.trackId,
                             onSwipeNext = { onControl("next") },
@@ -717,24 +669,36 @@ fun YandexWaveFullScreen(
                             canSwipePrev = canSwipePrev,
                             modifier = Modifier.fillMaxWidth(0.92f),
                             currentCard = {
-                                WavePillCard(ymusic.title, ymusic.artist, ymusic.coverUrl, ymusic.liked, interactive = true)
+                                WavePillCard(
+                                    title = ymusic.title,
+                                    artist = ymusic.artist,
+                                    coverUrl = ymusic.coverUrl,
+                                    liked = ymusic.liked,
+                                    interactive = true,
+                                    onOpenBigPlayer = onOpenBigPlayer,
+                                    onLike = { onControl("like") }
+                                )
                             },
                             nextCard = {
                                 WavePillCard(
-                                    ymusic.nextTitle.ifBlank { "Следующий трек" },
-                                    ymusic.nextArtist,
-                                    ymusic.nextCoverUrl,
-                                    false,
-                                    interactive = false
+                                    title = ymusic.nextTitle.ifBlank { "Следующий трек" },
+                                    artist = ymusic.nextArtist,
+                                    coverUrl = ymusic.nextCoverUrl,
+                                    liked = false,
+                                    interactive = false,
+                                    onOpenBigPlayer = {},
+                                    onLike = {}
                                 )
                             },
                             prevCard = {
                                 WavePillCard(
-                                    ymusic.prevTitle.ifBlank { "Предыдущий трек" },
-                                    ymusic.prevArtist,
-                                    ymusic.prevCoverUrl,
-                                    false,
-                                    interactive = false
+                                    title = ymusic.prevTitle.ifBlank { "Предыдущий трек" },
+                                    artist = ymusic.prevArtist,
+                                    coverUrl = ymusic.prevCoverUrl,
+                                    liked = false,
+                                    interactive = false,
+                                    onOpenBigPlayer = {},
+                                    onLike = {}
                                 )
                             }
                         )
@@ -809,24 +773,6 @@ fun YandexWaveFullScreen(
                                     }
                                 }
                             }
-                            item {
-                                Surface(
-                                    shape = RoundedCornerShape(99.dp),
-                                    color = Color(0xB81A1A1F),
-                                    modifier = Modifier
-                                        .border(1.dp, Color.White.copy(alpha = 0.14f), RoundedCornerShape(99.dp))
-                                        .clickable { onOpenEqualizer() }
-                                ) {
-                                    Row(
-                                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                    ) {
-                                        Icon(Icons.Rounded.Equalizer, contentDescription = null, tint = palette.accent, modifier = Modifier.size(16.dp))
-                                        Text("EQ", color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
-                                    }
-                                }
-                            }
                         }
                     }
                 }
@@ -843,21 +789,7 @@ fun YandexWaveFullScreen(
                 ) {
                     items(count = 10000, key = { it }) { index ->
                         val orb = displayOrbs[((index % orbCount) + orbCount) % orbCount]
-                        val layoutInfo = orbListState.layoutInfo
-                        val itemInfo = layoutInfo.visibleItemsInfo.firstOrNull { it.index == index }
-                        val distFromCenter = if (itemInfo != null && layoutInfo.viewportEndOffset > 0) {
-                            val vpCenter = (layoutInfo.viewportStartOffset + layoutInfo.viewportEndOffset) * 0.5f
-                            val itemCenter = itemInfo.offset + itemInfo.size * 0.5f
-                            ((itemCenter - vpCenter) / (itemInfo.size.coerceAtLeast(1) * 1.1f)).coerceIn(-1.6f, 1.6f)
-                        } else 0f
-                        val absDist = distFromCenter.absoluteValue
                         val isSelectedOrb = activePreset == orb.title
-                        val baseScale = 1.20f - 0.28f * absDist.coerceIn(0f, 1.15f)
-                        val scale = if (isSelectedOrb) baseScale + 0.06f else baseScale
-                        // Strong circular curvature: pronounced arc drop + tangent wheel tilt + center pop-up
-                        val arcDropPx = (74f * absDist * absDist) - (if (isSelectedOrb || absDist < 0.35f) 24f * (1f - absDist.coerceIn(0f, 1f)) else 0f)
-                        val wheelTiltDeg = distFromCenter * 13f
-                        val alphaVal = (1f - 0.34f * absDist).coerceIn(0.48f, 1f)
                         val orbColor = parseHexColor(orb.colorHex, palette.aura2)
 
                         Box(
@@ -865,11 +797,23 @@ fun YandexWaveFullScreen(
                                 .width(126.dp)
                                 .height(166.dp)
                                 .graphicsLayer {
+                                    // Compute curve transform inside graphicsLayer so scroll never triggers item recomposition
+                                    val layoutInfo = orbListState.layoutInfo
+                                    val itemInfo = layoutInfo.visibleItemsInfo.firstOrNull { it.index == index }
+                                    val distFromCenter = if (itemInfo != null && layoutInfo.viewportEndOffset > 0) {
+                                        val vpCenter = (layoutInfo.viewportStartOffset + layoutInfo.viewportEndOffset) * 0.5f
+                                        val itemCenter = itemInfo.offset + itemInfo.size * 0.5f
+                                        ((itemCenter - vpCenter) / (itemInfo.size.coerceAtLeast(1) * 1.1f)).coerceIn(-1.6f, 1.6f)
+                                    } else 0f
+                                    val absDist = distFromCenter.absoluteValue
+                                    val baseScale = 1.20f - 0.28f * absDist.coerceIn(0f, 1.15f)
+                                    val scale = if (isSelectedOrb) baseScale + 0.06f else baseScale
+                                    val arcDropPx = (74f * absDist * absDist) - (if (isSelectedOrb || absDist < 0.35f) 24f * (1f - absDist.coerceIn(0f, 1f)) else 0f)
                                     scaleX = scale
                                     scaleY = scale
                                     translationY = arcDropPx
-                                    rotationZ = wheelTiltDeg
-                                    alpha = alphaVal
+                                    rotationZ = distFromCenter * 13f
+                                    alpha = (1f - 0.34f * absDist).coerceIn(0.48f, 1f)
                                 }
                                 .clickable {
                                     activePreset = orb.title
@@ -1021,7 +965,7 @@ fun YandexAccountCard(
                 }
                 if (showManualToken) {
                     OutlinedButton(
-                        onClick = { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(YMUSIC_OAUTH_URL))) },
+                        onClick = { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(YMusicStatus.OAUTH_URL))) },
                         modifier = Modifier.fillMaxWidth(),
                         shape = RoundedCornerShape(14.dp)
                     ) {
@@ -1039,7 +983,7 @@ fun YandexAccountCard(
                         trailingIcon = {
                             IconButton(onClick = {
                                 val txt = clipboard.getText()?.text.orEmpty()
-                                tokenInput = extractYMusicToken(txt) ?: txt.trim()
+                                tokenInput = YMusicStatus.extractAccessToken(txt).ifBlank { txt.trim() }
                             }) {
                                 Icon(Icons.Rounded.ContentPaste, contentDescription = "Вставить")
                             }
@@ -1047,7 +991,7 @@ fun YandexAccountCard(
                     )
                     Button(
                         onClick = {
-                            val tok = extractYMusicToken(tokenInput) ?: tokenInput.trim()
+                            val tok = YMusicStatus.extractAccessToken(tokenInput)
                             if (tok.isNotBlank()) {
                                 onLogin(tok)
                                 tokenInput = ""
@@ -1075,22 +1019,66 @@ fun YandexAccountCard(
     }
 }
 
+@Composable
+private fun WavePillCard(
+    title: String,
+    artist: String,
+    coverUrl: String,
+    liked: Boolean,
+    interactive: Boolean,
+    onOpenBigPlayer: () -> Unit,
+    onLike: () -> Unit
+) {
+    Surface(
+        shape = RoundedCornerShape(99.dp),
+        color = Color(0xAA1C1C22),
+        modifier = Modifier
+            .fillMaxWidth()
+            .then(if (interactive) Modifier.clickable { onOpenBigPlayer() } else Modifier)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            if (coverUrl.isNotBlank()) {
+                AsyncCoverArt(
+                    url = coverUrl,
+                    shape = CircleShape,
+                    modifier = Modifier.size(34.dp),
+                    fallbackIcon = Icons.Rounded.MusicNote
+                )
+            }
+            Text(
+                if (title.isNotBlank()) {
+                    if (artist.isNotBlank()) "$artist — $title" else title
+                } else "Нажмите ▶ или свайпните для выбора",
+                color = Color.White,
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 14.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                textAlign = if (coverUrl.isBlank()) TextAlign.Center else TextAlign.Start,
+                modifier = Modifier.weight(1f)
+            )
+            IconButton(
+                onClick = { if (interactive) onLike() },
+                modifier = Modifier.size(30.dp)
+            ) {
+                Icon(
+                    if (liked) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
+                    contentDescription = "Нравится",
+                    tint = if (liked) Color(0xFFFF2E7A) else Color.White,
+                    modifier = Modifier.size(22.dp)
+                )
+            }
+        }
+    }
+}
+
 private fun formatDurationMs(ms: Long): String {
     val totalSec = (ms / 1000).coerceAtLeast(0)
     return "%d:%02d".format(totalSec / 60, totalSec % 60)
-}
-
-private const val YMUSIC_OAUTH_URL =
-    "https://oauth.yandex.ru/authorize?response_type=token&client_id=23cabbbdc6cd418abb4b39c32c41195d"
-
-private fun extractYMusicToken(raw: String): String? {
-    val trimmed = raw.trim()
-    if (trimmed.isEmpty()) return null
-    Regex("""access_token=([^&\s]+)""").find(trimmed)?.groupValues?.getOrNull(1)?.let {
-        if (it.length >= 10) return it
-    }
-    val cleaned = trimmed.removePrefix("OAuth ").trim()
-    return if (cleaned.length >= 10 && !cleaned.contains(' ') && !cleaned.startsWith("http")) cleaned else null
 }
 
 @SuppressLint("SetJavaScriptEnabled")
@@ -1101,10 +1089,22 @@ private fun YandexOAuthWebViewDialog(
 ) {
     val delivered = remember { AtomicBoolean(false) }
     var loading by remember { mutableStateOf(true) }
+    var webViewRef by remember { mutableStateOf<WebView?>(null) }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            webViewRef?.apply {
+                stopLoading()
+                destroy()
+            }
+            webViewRef = null
+        }
+    }
 
     fun maybeCapture(url: String?): Boolean {
         if (url.isNullOrBlank()) return false
-        val tok = extractYMusicToken(url) ?: return false
+        val tok = YMusicStatus.extractAccessToken(url)
+        if (tok.length < 10 || tok.startsWith("http")) return false
         if (delivered.compareAndSet(false, true)) {
             onTokenCaptured(tok)
         }
@@ -1136,6 +1136,7 @@ private fun YandexOAuthWebViewDialog(
                     modifier = Modifier.fillMaxSize(),
                     factory = { ctx ->
                         WebView(ctx).apply {
+                            webViewRef = this
                             settings.javaScriptEnabled = true
                             settings.domStorageEnabled = true
                             CookieManager.getInstance().setAcceptCookie(true)
@@ -1153,7 +1154,7 @@ private fun YandexOAuthWebViewDialog(
                                     maybeCapture(url)
                                 }
                             }
-                            loadUrl(YMUSIC_OAUTH_URL)
+                            loadUrl(YMusicStatus.OAUTH_URL)
                         }
                     }
                 )

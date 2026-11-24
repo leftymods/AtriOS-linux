@@ -220,67 +220,9 @@ object AppUpdater {
         context: Context,
         release: AppReleaseInfo,
         onProgress: (Float) -> Unit
-    ): Result<Unit> = withContext(Dispatchers.IO) {
-        runCatching {
-            val outFile = cachedApkFile(context, release)
-            val dir = outFile.parentFile!!
-
-            // Reuse already-downloaded APK from cache without re-downloading!
-            if (isValidApkFile(outFile, release.apkSize)) {
-                withContext(Dispatchers.Main) {
-                    onProgress(1f)
-                    installApk(context, outFile)
-                }
-                return@runCatching
-            }
-
-            // Clean old cached versions before downloading new one
-            dir.listFiles()?.forEach { f ->
-                if (f.name != outFile.name && f.name.endsWith(".apk") || f.name.endsWith(".part")) {
-                    f.delete()
-                }
-            }
-
-            val partFile = File(dir, "${outFile.name}.part")
-            val conn = (URL(release.apkUrl).openConnection() as HttpURLConnection).apply {
-                instanceFollowRedirects = true
-                connectTimeout = 15000
-                readTimeout = 30000
-                setRequestProperty("User-Agent", "AtriOS-Control")
-            }
-            if (conn.responseCode !in 200..299) {
-                error("HTTP ${conn.responseCode}")
-            }
-            val total = conn.contentLengthLong.coerceAtLeast(release.apkSize).coerceAtLeast(1L)
-            var downloaded = 0L
-            conn.inputStream.use { input ->
-                FileOutputStream(partFile).use { output ->
-                    val buf = ByteArray(16 * 1024)
-                    while (true) {
-                        val read = input.read(buf)
-                        if (read <= 0) break
-                        output.write(buf, 0, read)
-                        downloaded += read
-                        val p = (downloaded.toFloat() / total.toFloat()).coerceIn(0f, 1f)
-                        withContext(Dispatchers.Main) { onProgress(p) }
-                    }
-                }
-            }
-            conn.disconnect()
-
-            if (!isValidApkFile(partFile, release.apkSize)) {
-                partFile.delete()
-                error("Повреждённый APK-файл, попробуйте снова")
-            }
-            if (outFile.exists()) outFile.delete()
-            if (!partFile.renameTo(outFile)) {
-                partFile.copyTo(outFile, overwrite = true)
-                partFile.delete()
-            }
-
-            withContext(Dispatchers.Main) {
-                installApk(context, outFile)
-            }
+    ): Result<Unit> = downloadOnly(context, release, onProgress).mapCatching { apkFile ->
+        withContext(Dispatchers.Main) {
+            installApk(context, apkFile)
         }
     }
 

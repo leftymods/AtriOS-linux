@@ -73,19 +73,25 @@ fun SwipeableTwoCardRibbon(
                         scope.launch {
                             if (latestCanNext && cur < -thresh) {
                                 settling = true
-                                // Smooth slide out -> trigger the exact same skip action as the Next button -> snap cleanly after frame
-                                offsetX.animateTo(-span, tween(190, easing = FastOutSlowInEasing))
-                                latestNext()
-                                withFrameNanos { }
-                                offsetX.snapTo(0f)
-                                settling = false
+                                try {
+                                    // Smooth slide out -> trigger the exact same skip action as the Next button -> snap cleanly after frame
+                                    offsetX.animateTo(-span, tween(190, easing = FastOutSlowInEasing))
+                                    latestNext()
+                                    withFrameNanos { }
+                                    offsetX.snapTo(0f)
+                                } finally {
+                                    settling = false
+                                }
                             } else if (latestCanPrev && cur > thresh) {
                                 settling = true
-                                offsetX.animateTo(span, tween(190, easing = FastOutSlowInEasing))
-                                latestPrev()
-                                withFrameNanos { }
-                                offsetX.snapTo(0f)
-                                settling = false
+                                try {
+                                    offsetX.animateTo(span, tween(190, easing = FastOutSlowInEasing))
+                                    latestPrev()
+                                    withFrameNanos { }
+                                    offsetX.snapTo(0f)
+                                } finally {
+                                    settling = false
+                                }
                             } else {
                                 offsetX.animateTo(0f, spring(dampingRatio = 0.82f, stiffness = Spring.StiffnessMedium))
                             }
