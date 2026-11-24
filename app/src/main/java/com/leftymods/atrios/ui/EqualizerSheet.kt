@@ -136,7 +136,7 @@ fun EqualizerPanel(
                                 enabled = true
                                 preset = "custom"
                                 val now = System.currentTimeMillis()
-                                if (now - lastLiveSent.get() >= 180L) {
+                                if (now - lastLiveSent.get() >= 90L) {
                                     lastLiveSent.set(now)
                                     onApplyEq(true, "custom", updated)
                                 }

@@ -200,10 +200,14 @@ fun AtriOSApp(
     var showBigPlayer by remember { mutableStateOf(false) }
     val lastUserActionRef = remember { java.util.concurrent.atomic.AtomicLong(0L) }
     val rejectedOldTitleRef = remember { java.util.concurrent.atomic.AtomicReference<String?>(null) }
+    val rejectedOldTrackIdRef = remember { java.util.concurrent.atomic.AtomicReference<String?>(null) }
     val rejectedUntilRef = remember { java.util.concurrent.atomic.AtomicLong(0L) }
     val pendingPlayStateRef = remember { java.util.concurrent.atomic.AtomicReference<String?>(null) }
     val pendingPlayStateUntilRef = remember { java.util.concurrent.atomic.AtomicLong(0L) }
     val lastYmSeqRef = remember { java.util.concurrent.atomic.AtomicLong(0L) }
+    val pendingVolRef = remember { java.util.concurrent.atomic.AtomicInteger(-1) }
+    val pendingVolUntilRef = remember { java.util.concurrent.atomic.AtomicLong(0L) }
+    val pendingEqUntilRef = remember { java.util.concurrent.atomic.AtomicLong(0L) }
     val lastVolumeDragRef = remember { java.util.concurrent.atomic.AtomicLong(0L) }
     val lastVolumeSentRef = remember { java.util.concurrent.atomic.AtomicLong(0L) }
     val lastVolumeSentPctRef = remember { java.util.concurrent.atomic.AtomicInteger(-1) }
@@ -239,10 +243,16 @@ fun AtriOSApp(
             onStatus = { s ->
                 val nowMs = System.currentTimeMillis()
                 val staleSeq = s.ymusic.seq > 0L && s.ymusic.seq < lastYmSeqRef.get()
-                val lockedYm = nowMs - lastUserActionRef.get() < 1600L
-                val rejectedOld = nowMs < rejectedUntilRef.get() &&
-                    s.ymusic.title.isNotBlank() && s.ymusic.title == rejectedOldTitleRef.get()
-                val lockedVol = nowMs - lastVolumeDragRef.get() < 900L
+                val lockedYm = nowMs - lastUserActionRef.get() < 1800L
+                val rejectedOld = nowMs < rejectedUntilRef.get() && (
+                    (s.ymusic.title.isNotBlank() && s.ymusic.title == rejectedOldTitleRef.get()) ||
+                    (s.ymusic.trackId.isNotBlank() && s.ymusic.trackId == rejectedOldTrackIdRef.get())
+                )
+                val wantVol = pendingVolRef.get()
+                val volEchoStale = wantVol >= 0 && nowMs < pendingVolUntilRef.get() && s.volume != wantVol
+                if (wantVol >= 0 && s.volume == wantVol) pendingVolRef.set(-1)
+                val lockedVol = (nowMs - lastVolumeDragRef.get() < 1200L) || volEchoStale
+                val lockedEq = nowMs < pendingEqUntilRef.get()
                 val nextYm = if (staleSeq || lockedYm || rejectedOld) {
                     status.ymusic
                 } else {
@@ -255,11 +265,12 @@ fun AtriOSApp(
                         s.ymusic
                     }
                 }
+                val nextEq = if (lockedEq) status.eq else s.eq
                 status = if (lockedVol) {
-                    s.copy(ymusic = nextYm, volume = sliderVol.toInt(), mute = sliderVol.toInt() == 0)
+                    s.copy(ymusic = nextYm, eq = nextEq, volume = sliderVol.toInt(), mute = sliderVol.toInt() == 0)
                 } else {
                     sliderVol = s.volume.toFloat()
-                    s.copy(ymusic = nextYm)
+                    s.copy(ymusic = nextYm, eq = nextEq)
                 }
                 activeDevice?.let { dev ->
                     savedSpeakers = storage.upsertSpeaker(
@@ -275,7 +286,12 @@ fun AtriOSApp(
                 }
             },
             onVolumePush = { v, m ->
-                if (System.currentTimeMillis() - lastVolumeDragRef.get() >= 900L) {
+                val nowMs = System.currentTimeMillis()
+                val wantVol = pendingVolRef.get()
+                if (wantVol >= 0 && v == wantVol) pendingVolRef.set(-1)
+                val stale = (nowMs - lastVolumeDragRef.get() < 1200L) ||
+                    (wantVol >= 0 && nowMs < pendingVolUntilRef.get() && v != wantVol)
+                if (!stale) {
                     sliderVol = v.toFloat()
                     status = status.copy(volume = v, mute = m)
                 }
@@ -294,8 +310,10 @@ fun AtriOSApp(
                 val nowMs = System.currentTimeMillis()
                 // Ynison-style monotonic sequence guard: reject older snapshots from in-flight polls!
                 if (ym.seq > 0L && ym.seq < lastYmSeqRef.get()) return@BtControlClient
-                val rejectedOld = nowMs < rejectedUntilRef.get() &&
-                    ym.title.isNotBlank() && ym.title == rejectedOldTitleRef.get()
+                val rejectedOld = nowMs < rejectedUntilRef.get() && (
+                    (ym.title.isNotBlank() && ym.title == rejectedOldTitleRef.get()) ||
+                    (ym.trackId.isNotBlank() && ym.trackId == rejectedOldTrackIdRef.get())
+                )
                 if (rejectedOld) return@BtControlClient
                 if (ym.seq > lastYmSeqRef.get()) lastYmSeqRef.set(ym.seq)
                 val wantState = pendingPlayStateRef.get()
@@ -357,9 +375,11 @@ fun AtriOSApp(
         val clamped = vol.coerceIn(0f, 100f)
         val pct = clamped.toInt()
         sliderVol = clamped
+        pendingVolRef.set(pct)
+        pendingVolUntilRef.set(nowMs + 2600L)
         status = status.copy(volume = pct, mute = pct == 0)
         val changed = pct != lastVolumeSentPctRef.get()
-        if (changed && (forceCommit || nowMs - lastVolumeSentRef.get() >= 160L)) {
+        if (forceCommit || (changed && nowMs - lastVolumeSentRef.get() >= 75L)) {
             lastVolumeSentRef.set(nowMs)
             lastVolumeSentPctRef.set(pct)
             client.setVolume(pct)
@@ -391,10 +411,9 @@ fun AtriOSApp(
             "next" -> {
                 isTrackTransitioning = true
                 liveElapsedMs = 0L
-                if (cur.title.isNotBlank()) {
-                    rejectedOldTitleRef.set(cur.title)
-                    rejectedUntilRef.set(nowMs + 2800L)
-                }
+                if (cur.title.isNotBlank()) rejectedOldTitleRef.set(cur.title)
+                if (cur.trackId.isNotBlank() && !cur.trackId.startsWith("opt_")) rejectedOldTrackIdRef.set(cur.trackId)
+                rejectedUntilRef.set(nowMs + 5000L)
                 if (cur.nextTitle.isNotBlank()) {
                     status = status.copy(
                         ymusic = cur.copy(
@@ -415,10 +434,9 @@ fun AtriOSApp(
             }
             "prev" -> {
                 liveElapsedMs = 0L
-                if (cur.title.isNotBlank()) {
-                    rejectedOldTitleRef.set(cur.title)
-                    rejectedUntilRef.set(nowMs + 2800L)
-                }
+                if (cur.title.isNotBlank()) rejectedOldTitleRef.set(cur.title)
+                if (cur.trackId.isNotBlank() && !cur.trackId.startsWith("opt_")) rejectedOldTrackIdRef.set(cur.trackId)
+                rejectedUntilRef.set(nowMs + 5000L)
                 if (cur.prevTitle.isNotBlank()) {
                     status = status.copy(
                         ymusic = cur.copy(
@@ -1381,6 +1399,7 @@ fun AtriOSApp(
                         eq = status.eq,
                         palette = palette,
                         onApplyEq = { en, pr, b ->
+                            pendingEqUntilRef.set(System.currentTimeMillis() + 2500L)
                             status = status.copy(eq = status.eq.copy(enabled = en, preset = pr, bands = b))
                             client.setEq(en, pr, b)
                         }
