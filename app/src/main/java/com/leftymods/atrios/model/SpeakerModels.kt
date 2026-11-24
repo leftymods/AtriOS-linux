@@ -339,6 +339,89 @@ data class YMusicOrb(
     }
 }
 
+data class YMusicArtist(
+    val id: String,
+    val name: String,
+    val coverUrl: String = "",
+    val trackCount: Int = 0
+) {
+    companion object {
+        fun fromJsonArray(arr: JSONArray?): List<YMusicArtist> {
+            if (arr == null) return emptyList()
+            return buildList {
+                for (i in 0 until arr.length()) {
+                    val o = arr.optJSONObject(i) ?: continue
+                    val name = o.optString("name", "").trim()
+                    if (name.isNotEmpty()) {
+                        add(
+                            YMusicArtist(
+                                id = o.optString("id", name),
+                                name = name,
+                                coverUrl = o.optString("cover_url", ""),
+                                trackCount = o.optInt("track_count", 0)
+                            )
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+data class YMusicPlaylist(
+    val kind: Int,
+    val title: String,
+    val trackCount: Int = 0,
+    val coverUrl: String = ""
+) {
+    companion object {
+        fun fromJsonArray(arr: JSONArray?): List<YMusicPlaylist> {
+            if (arr == null) return emptyList()
+            return buildList {
+                for (i in 0 until arr.length()) {
+                    val o = arr.optJSONObject(i) ?: continue
+                    val title = o.optString("title", "").trim()
+                    if (title.isNotEmpty()) {
+                        add(
+                            YMusicPlaylist(
+                                kind = o.optInt("kind", i),
+                                title = title,
+                                trackCount = o.optInt("track_count", 0),
+                                coverUrl = o.optString("cover_url", "")
+                            )
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+data class YMusicCollection(
+    val loaded: Boolean = false,
+    val likesCount: Int = 0,
+    val dislikesCount: Int = 0,
+    val likedTracks: List<YMusicTrack> = emptyList(),
+    val favoriteArtists: List<YMusicArtist> = emptyList(),
+    val playlists: List<YMusicPlaylist> = emptyList(),
+    val likedAlbums: List<YMusicAlbum> = emptyList()
+) {
+    companion object {
+        fun fromJson(obj: JSONObject?): YMusicCollection {
+            if (obj == null) return YMusicCollection()
+            return YMusicCollection(
+                loaded = true,
+                likesCount = obj.optInt("likes_count", 0),
+                dislikesCount = obj.optInt("dislikes_count", 0),
+                likedTracks = YMusicTrack.fromJsonArray(obj.optJSONArray("liked_tracks")),
+                favoriteArtists = YMusicArtist.fromJsonArray(obj.optJSONArray("favorite_artists")),
+                playlists = YMusicPlaylist.fromJsonArray(obj.optJSONArray("playlists")),
+                likedAlbums = YMusicAlbum.fromJsonArray(obj.optJSONArray("liked_albums"))
+            )
+        }
+    }
+}
+
 data class YMusicStatus(
     val loggedIn: Boolean = false,
     val login: String = "",

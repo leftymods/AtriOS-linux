@@ -13,6 +13,7 @@ import com.leftymods.atrios.model.TimerItem
 import com.leftymods.atrios.model.VqeStatus
 import com.leftymods.atrios.model.YMusicStatus
 import com.leftymods.atrios.model.YMusicAlbum
+import com.leftymods.atrios.model.YMusicCollection
 import com.leftymods.atrios.model.YMusicOrb
 import com.leftymods.atrios.model.YMusicTrack
 import kotlinx.coroutines.CoroutineScope
@@ -42,6 +43,7 @@ class BtControlClient(
     private val onYMusicUpdate: (YMusicStatus) -> Unit = {},
     private val onYMusicSearchResults: (List<YMusicTrack>, List<YMusicAlbum>) -> Unit = { _, _ -> },
     private val onYMusicOrbsUpdate: (List<YMusicOrb>) -> Unit = {},
+    private val onYMusicCollectionUpdate: (YMusicCollection) -> Unit = {},
     private val onTimersUpdate: (List<TimerItem>) -> Unit = {},
     private val onAlarmsUpdate: (List<AlarmItem>) -> Unit = {},
     private val onBtSpeakerPush: (Boolean) -> Unit = {},
@@ -368,9 +370,48 @@ class BtControlClient(
         sendCommand(obj)
     }
 
-    fun ymusicSearch(query: String) = sendCommand(JSONObject().put("cmd", "ymusic_search").put("query", query))
+    fun ymusicSearch(query: String) {
+        val payload = JSONObject().put("cmd", "ymusic_search").put("query", query)
+        sendServerOffloadOrFallback("search", payload)
+    }
 
-    fun ymusicOrbs() = sendCommand(JSONObject().put("cmd", "ymusic_orbs"))
+    fun ymusicOrbs() {
+        val payload = JSONObject().put("cmd", "ymusic_orbs")
+        sendServerOffloadOrFallback("orbs", payload)
+    }
+
+    fun ymusicCollection() {
+        val payload = JSONObject().put("cmd", "ymusic_collection")
+        sendServerOffloadOrFallback("collection", payload)
+    }
+
+    /**
+     * Offloads routine Yandex Music catalog/collection metadata queries to the relay server
+     * (/relay/v1/app/{deviceId}/ymusic/{op}) so the speaker CPU isn't loaded with UI browsing;
+     * transparently falls back to the speaker's cached handler if the server doesn't expose the route yet.
+     */
+    private fun sendServerOffloadOrFallback(op: String, fallbackCmd: JSONObject) {
+        val gw = relayGateway.trim().trimEnd('/')
+        val did = relayDeviceId.trim()
+        val tok = relayToken.trim()
+        if (gw.startsWith("https://") && DEVICE_ID_RE.matches(did) && tok.isNotEmpty()) {
+            scope.launch(Dispatchers.IO) {
+                try {
+                    val resp = relayHttpPost("$gw/relay/v1/app/$did/ymusic/$op", tok, fallbackCmd)
+                    val reply = resp.optJSONObject("reply") ?: resp
+                    if (reply.has("type")) {
+                        handlePacket(reply)
+                        return@launch
+                    }
+                } catch (_: Exception) {
+                    // Server route not deployed yet (e.g. 404) -> fallback to speaker cached handler
+                }
+                sendCommand(fallbackCmd)
+            }
+        } else {
+            sendCommand(fallbackCmd)
+        }
+    }
 
     fun ymusicControl(action: String) = sendCommand(
         JSONObject().put("cmd", "ymusic_control").put("action", action)
@@ -574,6 +615,15 @@ class BtControlClient(
                 val orbs = YMusicOrb.fromJsonArray(json.optJSONArray("orbs"))
                 withContext(Dispatchers.Main) {
                     onYMusicOrbsUpdate(orbs)
+                }
+            }
+            "ymusic_collection_response" -> {
+                val colObj = json.optJSONObject("collection")
+                if (colObj != null) {
+                    val col = YMusicCollection.fromJson(colObj)
+                    withContext(Dispatchers.Main) {
+                        onYMusicCollectionUpdate(col)
+                    }
                 }
             }
             "ymusic_status", "ymusic_login_response", "ymusic_logout_response",

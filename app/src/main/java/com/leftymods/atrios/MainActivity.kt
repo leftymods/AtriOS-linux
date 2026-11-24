@@ -66,12 +66,14 @@ import com.leftymods.atrios.model.SavedSpeaker
 import com.leftymods.atrios.model.SpeakerStatus
 import com.leftymods.atrios.model.TimerItem
 import com.leftymods.atrios.model.YMusicAlbum
+import com.leftymods.atrios.model.YMusicCollection
 import com.leftymods.atrios.model.YMusicOrb
 import com.leftymods.atrios.model.YMusicTrack
 import com.leftymods.atrios.ui.AiAssistantCard
 import com.leftymods.atrios.ui.AsyncCoverArt
 import com.leftymods.atrios.ui.AudioCard
 import com.leftymods.atrios.ui.BigPlayerOverlay
+import com.leftymods.atrios.ui.CollectionScreen
 import com.leftymods.atrios.ui.EqualizerPanel
 import com.leftymods.atrios.ui.SwipeableTwoCardRibbon
 import com.leftymods.atrios.ui.BluetoothCard
@@ -116,6 +118,7 @@ class MainActivity : ComponentActivity() {
 
 private enum class AppTab(val label: String, val icon: ImageVector) {
     WAVE("Волна", Icons.Rounded.AutoAwesome),
+    COLLECTION("Коллекция", Icons.Rounded.Favorite),
     TIMERS("Таймеры", Icons.Rounded.Timer),
     SETTINGS("Настройки", Icons.Rounded.Tune)
 }
@@ -188,6 +191,7 @@ fun AtriOSApp(
     var ymSearchResults by remember { mutableStateOf<List<YMusicTrack>>(emptyList()) }
     var ymAlbumResults by remember { mutableStateOf<List<YMusicAlbum>>(emptyList()) }
     var ymOrbs by remember { mutableStateOf<List<YMusicOrb>>(emptyList()) }
+    var ymCollection by remember { mutableStateOf(YMusicCollection()) }
     var savedSpeakers by remember { mutableStateOf(storage.loadSpeakers()) }
     var relayConfig by remember { mutableStateOf(storage.loadRelayConfig()) }
 
@@ -285,6 +289,7 @@ fun AtriOSApp(
                 ymAlbumResults = albums
             },
             onYMusicOrbsUpdate = { orbs -> ymOrbs = orbs },
+            onYMusicCollectionUpdate = { col -> ymCollection = col },
             onYMusicUpdate = { ym ->
                 val nowMs = System.currentTimeMillis()
                 // Ynison-style monotonic sequence guard: reject older snapshots from in-flight polls!
@@ -338,6 +343,7 @@ fun AtriOSApp(
                     alarms = emptyList()
                     ymSearchResults = emptyList()
                     ymAlbumResults = emptyList()
+                    ymCollection = YMusicCollection()
                 }
             }
         ).also { c ->
@@ -826,6 +832,7 @@ fun AtriOSApp(
                                                 if (tab == AppTab.SETTINGS) settingsPage = SettingsPage.ROOT
                                                 when (tab) {
                                                     AppTab.WAVE -> { client.ymusicStatus(); if (ymOrbs.isEmpty()) client.ymusicOrbs() }
+                                                    AppTab.COLLECTION -> { if (!ymCollection.loaded) client.ymusicCollection() }
                                                     AppTab.TIMERS -> { client.getTimers(); client.getAlarms() }
                                                     AppTab.SETTINGS -> client.otaStatus()
                                                 }
@@ -901,6 +908,31 @@ fun AtriOSApp(
                                 mute = status.mute,
                                 canSwipeNext = !isTrackTransitioning,
                                 canSwipePrev = true
+                            )
+                        }
+                        AppTab.COLLECTION -> {
+                            CollectionScreen(
+                                ymusic = status.ymusic,
+                                collection = ymCollection,
+                                palette = palette,
+                                onRefresh = { client.ymusicCollection() },
+                                onPlay = { mode, q ->
+                                    val nowMs = System.currentTimeMillis()
+                                    lastUserActionRef.set(nowMs)
+                                    pendingPlayStateRef.set(null)
+                                    status = status.copy(ymusic = status.ymusic.copy(mode = mode, state = "loading", error = null))
+                                    client.ymusicPlay(mode, q)
+                                    scope.launch {
+                                        delay(650)
+                                        client.ymusicStatus()
+                                        delay(900)
+                                        client.ymusicStatus()
+                                    }
+                                },
+                                onOpenAccountSettings = {
+                                    selectedTab = AppTab.SETTINGS
+                                    settingsPage = SettingsPage.ACCOUNT
+                                }
                             )
                         }
 
