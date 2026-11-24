@@ -229,6 +229,7 @@ pub struct YMusicStatus {
     pub prev_artist: String,
     pub prev_cover_url: String,
     pub duration_ms: i64,
+    pub position_ms: i64,
     pub liked: bool,
     pub repeat: bool,
     pub error: Option<String>,
@@ -258,6 +259,7 @@ impl YMusicStatus {
             prev_artist: String::new(),
             prev_cover_url: String::new(),
             duration_ms: 0,
+            position_ms: 0,
             liked: false,
             repeat: false,
             error: None,
@@ -300,6 +302,9 @@ impl YMusicStatus {
         if let Some(s) = j.get_str("prev_cover_url") { st.prev_cover_url = s.into(); }
         if let Some(n) = j.get("duration_ms").and_then(|v| v.as_i64()) {
             st.duration_ms = n.max(0);
+        }
+        if let Some(n) = j.get("position_ms").and_then(|v| v.as_i64()) {
+            st.position_ms = n.max(0);
         }
         if let Some(b) = j.get("liked").and_then(|v| v.as_bool()) {
             st.liked = b;
@@ -353,6 +358,7 @@ impl YMusicStatus {
             ("prev_artist", Json::Str(self.prev_artist.clone())),
             ("prev_cover_url", Json::Str(self.prev_cover_url.clone())),
             ("duration_ms", Json::Num(self.duration_ms as f64)),
+            ("position_ms", Json::Num(self.position_ms as f64)),
             ("liked", Json::Bool(self.liked)),
             ("repeat", Json::Bool(self.repeat)),
             (
@@ -415,6 +421,10 @@ pub fn read_status() -> YMusicStatus {
 
 pub fn read_status_json() -> Json {
     let mut st = read_status();
+    if st.state == "playing" && st.duration_ms > 0 && st.updated_ts > 0 {
+        let elapsed = (now_unix_i64() - st.updated_ts).max(0) * 1000;
+        st.position_ms = (st.position_ms + elapsed).clamp(0, st.duration_ms);
+    }
     if !st.track_id.is_empty() {
         if let Some(auth) = load_auth() {
             if let Some(live_liked) = is_track_liked_live(&auth, &st.track_id) {
@@ -1279,19 +1289,55 @@ impl ActivePipeline {
                     format!("aplay spawn failed: {e}")
                 })?;
             let stream_url = url.to_string();
+            // Full-speed RAM-buffered feeder: drains Yandex CDN in ~0.5s so CDN never times out at 1/4 track!
+            let shared = std::sync::Arc::new((
+                std::sync::Mutex::new((std::collections::VecDeque::<Vec<u8>>::new(), false)),
+                std::sync::Condvar::new(),
+            ));
+            let prod_s = shared.clone();
             thread::spawn(move || {
-                use std::io::Write;
-                let mut w = dec_in;
                 let _ = crate::https::request_stream(
                     &stream_url,
                     None,
                     &[],
                     None,
-                    300,
+                    120,
                     64 * 1024 * 1024,
                     None,
-                    |chunk| w.write_all(chunk).map_err(|e| e.to_string()),
+                    |chunk| {
+                        let (lk, cv) = &*prod_s;
+                        let mut g = lk.lock().unwrap();
+                        g.0.push_back(chunk.to_vec());
+                        cv.notify_one();
+                        Ok(())
+                    },
                 );
+                let (lk, cv) = &*prod_s;
+                let mut g = lk.lock().unwrap();
+                g.1 = true;
+                cv.notify_one();
+            });
+            thread::spawn(move || {
+                use std::io::Write;
+                let mut w = dec_in;
+                let (lk, cv) = &*shared;
+                loop {
+                    let next_chunk = {
+                        let mut g = lk.lock().unwrap();
+                        while g.0.is_empty() && !g.1 {
+                            g = cv.wait(g).unwrap();
+                        }
+                        g.0.pop_front()
+                    };
+                    match next_chunk {
+                        Some(buf) => {
+                            if w.write_all(&buf).is_err() {
+                                break;
+                            }
+                        }
+                        None => break,
+                    }
+                }
             });
             return Ok(Self {
                 decoder: dec,

@@ -463,6 +463,19 @@ fn set_screen_mode(mode: &str) {
     let _ = fs::write(SCREEN_MODE_FILE, mode);
 }
 
+fn read_eq_info() -> Json {
+    if let Ok(txt) = fs::read_to_string("/var/lib/atrios/eq.json") {
+        if let Ok(j) = Json::parse(&txt) {
+            return j;
+        }
+    }
+    obj(vec![
+        ("enabled", Json::Bool(false)),
+        ("preset", Json::Str("flat".into())),
+        ("bands", Json::Arr(vec![Json::Num(0.0), Json::Num(0.0), Json::Num(0.0), Json::Num(0.0), Json::Num(0.0)])),
+    ])
+}
+
 fn read_vqe_info() -> Json {
     if let Ok(txt) = fs::read_to_string("/var/run/atrios/aec_vqe.json") {
         if let Ok(j) = Json::parse(&txt) {
@@ -550,6 +563,7 @@ fn build_status_payload() -> Json {
         ("screen_mode", Json::Str(get_screen_mode())),
         ("ai", get_ai_info()),
         ("vqe", read_vqe_info()),
+        ("eq", read_eq_info()),
         ("ota", crate::ota::read_ota_status_json()),
         ("ymusic", crate::ymusic::read_status_json()),
         (
@@ -626,6 +640,33 @@ pub(crate) fn process_command(cmd_obj: &Json) -> Result<Json, String> {
                 ("type", Json::Str("mute_response".into())),
                 ("success", Json::Bool(true)),
                 ("mute", Json::Bool(get_current_volume() == 0)),
+            ]))
+        }
+        "set_eq" => {
+            let enabled = map.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+            let preset = map.get("preset").and_then(|v| v.as_str()).unwrap_or("custom").to_string();
+            let mut bands = [0.0f64; 5];
+            if let Some(arr) = map.get("bands").and_then(|v| v.as_arr()) {
+                for (i, v) in arr.iter().take(5).enumerate() {
+                    bands[i] = v.as_f64().unwrap_or(0.0).clamp(-12.0, 12.0);
+                }
+            }
+            let eq_j = obj(vec![
+                ("enabled", Json::Bool(enabled)),
+                ("preset", Json::Str(preset)),
+                ("bands", Json::Arr(bands.iter().map(|&b| Json::Num(b)).collect())),
+            ]);
+            let _ = fs::create_dir_all("/var/lib/atrios");
+            let _ = atomic_write_bytes(
+                Path::new("/var/lib/atrios/eq.json"),
+                format!("{}\n", eq_j.to_string_compact()).as_bytes(),
+                0o644,
+                false,
+            );
+            Ok(obj(vec![
+                ("type", Json::Str("eq_response".into())),
+                ("success", Json::Bool(true)),
+                ("eq", eq_j),
             ]))
         }
         "audio_test" => {

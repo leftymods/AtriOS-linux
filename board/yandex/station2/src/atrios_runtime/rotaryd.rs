@@ -52,7 +52,8 @@ pub fn volume_to_raw(pct: i32, zero_db_raw: i32) -> i32 {
     if pct <= 0 {
         return 0;
     }
-    let db = -40.0 * (1.0 - ((pct as f64) / 100.0).powf(0.65));
+    // Wide -60 dB perceptual curve so 1%..5% has crisp, clearly audible steps (1% = whisper quiet)
+    let db = -60.0 * (1.0 - ((pct as f64) / 100.0).powf(0.50));
     let raw = ((zero_db_raw as f64) + 2.0 * db).round() as i32;
     raw.clamp(1, zero_db_raw)
 }
@@ -64,7 +65,9 @@ pub fn woofer_volume_to_raw(pct: i32, zero_db_raw: i32) -> i32 {
     }
     let raw = volume_to_raw(pct, zero_db_raw);
     if pct < 30 {
-        let boost = (16.0 * (1.0 - (pct as f64) / 30.0)).round() as i32;
+        // Ramp loudness boost gently from 0 at 1% so 1%..5% stay whisper-quiet and distinct
+        let ramp = ((pct as f64) / 10.0).min(1.0);
+        let boost = (14.0 * ramp * (1.0 - (pct as f64) / 30.0)).round() as i32;
         return (raw + boost).min(zero_db_raw);
     }
     if pct <= 40 {

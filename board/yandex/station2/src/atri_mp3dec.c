@@ -3,8 +3,10 @@
 #include <math.h>
 #include <stdio.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
 
@@ -12,7 +14,105 @@
 #define DUCK_FLAG_FILE "/var/run/atrios/ymusic_duck"
 #define AUDIO_ENV_TMP "/var/run/atrios/ymusic_audio.tmp"
 #define AUDIO_ENV_FILE "/var/run/atrios/ymusic_audio.json"
+#define EQ_CONFIG_FILE "/var/lib/atrios/eq.json"
 #define AEC_REF_SOCK "/var/run/atrios/aec_ref.sock"
+
+/* ---- 5-Band Stereo Biquad Equalizer (60Hz, 230Hz, 910Hz, 3.6kHz, 14kHz) ---- */
+typedef struct {
+    float b0, b1, b2, a1, a2;
+    float z1[2], z2[2];
+} eq_band_t;
+
+static eq_band_t g_eq[5];
+static int g_eq_enabled = 0;
+static float g_eq_gains[5] = {0.f, 0.f, 0.f, 0.f, 0.f};
+static time_t g_eq_mtime = 0;
+static int g_eq_sr = 44100;
+
+static void eq_calc_coeffs(int sr) {
+    static const float freqs[5] = {60.f, 230.f, 910.f, 3600.f, 14000.f};
+    static const float qs[5] = {0.75f, 1.0f, 1.0f, 1.0f, 0.75f};
+    if (sr < 8000) sr = 44100;
+    g_eq_sr = sr;
+    for (int i = 0; i < 5; i++) {
+        float db = g_eq_gains[i];
+        if (db < -12.f) db = -12.f;
+        if (db > 12.f) db = 12.f;
+        if (fabsf(db) < 0.05f) {
+            g_eq[i].b0 = 1.f; g_eq[i].b1 = 0.f; g_eq[i].b2 = 0.f;
+            g_eq[i].a1 = 0.f; g_eq[i].a2 = 0.f;
+            continue;
+        }
+        float A = powf(10.f, db / 40.f);
+        float w0 = 2.f * 3.14159265f * freqs[i] / (float)sr;
+        if (w0 > 2.95f) w0 = 2.95f;
+        float cw = cosf(w0), sw = sinf(w0);
+        float alpha = sw / (2.f * qs[i]);
+        float b0, b1, b2, a0, a1, a2;
+        if (i == 0) {
+            float s2 = 2.f * sqrtf(A) * alpha;
+            b0 = A * ((A + 1.f) - (A - 1.f) * cw + s2);
+            b1 = 2.f * A * ((A - 1.f) - (A + 1.f) * cw);
+            b2 = A * ((A + 1.f) - (A - 1.f) * cw - s2);
+            a0 = (A + 1.f) + (A - 1.f) * cw + s2;
+            a1 = -2.f * ((A - 1.f) + (A + 1.f) * cw);
+            a2 = (A + 1.f) + (A - 1.f) * cw - s2;
+        } else if (i == 4) {
+            float s2 = 2.f * sqrtf(A) * alpha;
+            b0 = A * ((A + 1.f) + (A - 1.f) * cw + s2);
+            b1 = -2.f * A * ((A - 1.f) + (A + 1.f) * cw);
+            b2 = A * ((A + 1.f) + (A - 1.f) * cw - s2);
+            a0 = (A + 1.f) - (A - 1.f) * cw + s2;
+            a1 = 2.f * ((A - 1.f) - (A + 1.f) * cw);
+            a2 = (A + 1.f) - (A - 1.f) * cw - s2;
+        } else {
+            b0 = 1.f + alpha * A;
+            b1 = -2.f * cw;
+            b2 = 1.f - alpha * A;
+            a0 = 1.f + alpha / A;
+            a1 = -2.f * cw;
+            a2 = 1.f - alpha / A;
+        }
+        g_eq[i].b0 = b0 / a0;
+        g_eq[i].b1 = b1 / a0;
+        g_eq[i].b2 = b2 / a0;
+        g_eq[i].a1 = a1 / a0;
+        g_eq[i].a2 = a2 / a0;
+    }
+}
+
+static void eq_reload_if_changed(int sr) {
+    struct stat st;
+    if (stat(EQ_CONFIG_FILE, &st) != 0) {
+        g_eq_enabled = 0;
+        return;
+    }
+    if (st.st_mtime == g_eq_mtime && sr == g_eq_sr) return;
+    g_eq_mtime = st.st_mtime;
+    FILE *fp = fopen(EQ_CONFIG_FILE, "r");
+    if (!fp) return;
+    char buf[512];
+    size_t n = fread(buf, 1, sizeof(buf) - 1, fp);
+    fclose(fp);
+    buf[n] = '\0';
+    g_eq_enabled = (strstr(buf, "\"enabled\":true") != NULL || strstr(buf, "\"enabled\": true") != NULL) ? 1 : 0;
+    const char *bp = strstr(buf, "\"bands\"");
+    if (bp) {
+        bp = strchr(bp, '[');
+        if (bp) {
+            bp++;
+            for (int i = 0; i < 5; i++) {
+                char *endp = NULL;
+                float val = strtof(bp, &endp);
+                if (endp == bp) break;
+                g_eq_gains[i] = val;
+                bp = endp;
+                while (*bp == ' ' || *bp == ',' || *bp == '\t') bp++;
+            }
+        }
+    }
+    eq_calc_coeffs(sr);
+}
 
 static void send_aec_ref(int fd, const struct sockaddr_un *addr, const int16_t *stereo, size_t n_frames) {
     if (fd < 0 || n_frames == 0) return;
@@ -31,6 +131,7 @@ int main(void) {
     static mp3d_sample_t pcm[MINIMP3_MAX_SAMPLES_PER_FRAME];
     mp3dec_t mp3d;
     mp3dec_init(&mp3d);
+    eq_calc_coeffs(44100);
 
     int aec_fd = socket(AF_UNIX, SOCK_DGRAM, 0);
     struct sockaddr_un aec_addr;
@@ -82,11 +183,32 @@ int main(void) {
         if (samples > 0) {
             int ch = (info.channels == 1) ? 1 : info.channels;
             int total = samples * ch;
+            if ((frame_cnt & 15u) == 0u) {
+                eq_reload_if_changed(info.hz > 0 ? info.hz : 44100);
+            }
 
-            // 4-band full-spectrum + beat transient analyzer for Liquid Plasma blob
+            /* Apply live 5-band stereo EQ before envelope & playback */
+            if (g_eq_enabled) {
+                for (int i = 0; i < samples; i++) {
+                    for (int c = 0; c < ch && c < 2; c++) {
+                        float x = (float)pcm[i * ch + c];
+                        for (int b = 0; b < 5; b++) {
+                            float y = g_eq[b].b0 * x + g_eq[b].z1[c];
+                            g_eq[b].z1[c] = g_eq[b].b1 * x - g_eq[b].a1 * y + g_eq[b].z2[c];
+                            g_eq[b].z2[c] = g_eq[b].b2 * x - g_eq[b].a2 * y;
+                            x = y;
+                        }
+                        if (x > 32767.f) x = 32767.f;
+                        else if (x < -32768.f) x = -32768.f;
+                        pcm[i * ch + c] = (int16_t)x;
+                    }
+                }
+            }
+
+            // 4-band full-spectrum + beat transient analyzer for Vibe shader
             double sum_bass = 0.0, sum_mid = 0.0, sum_high = 0.0, sum_all = 0.0;
-            const float alpha_bass = 0.036f; // ~200Hz LPF
-            const float alpha_mid = 0.28f;   // ~2.4kHz LPF
+            const float alpha_bass = 0.036f;
+            const float alpha_mid = 0.28f;
             for (int i = 0; i < total; i += ch) {
                 float x = (float)pcm[i] / 32768.0f;
                 lp_bass += alpha_bass * (x - lp_bass);
