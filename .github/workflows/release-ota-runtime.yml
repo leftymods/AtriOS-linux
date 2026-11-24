@@ -1,0 +1,123 @@
+name: Release signed runtime OTA
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag (e.g. v1.8.0)
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build-signed-ota:
+    runs-on: ubuntu-22.04
+    env:
+      RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - name: Install aarch64 cross-compile toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross openssl python3
+          rustup target add aarch64-unknown-linux-gnu
+      - name: Cross-compile aarch64 runtime, mp3dec, and aec
+        run: |
+          set -euo pipefail
+          cd board/yandex/station2/src
+          rustc --edition=2021 --test atrios_runtime.rs -o /tmp/atrios_runtime_test
+          /tmp/atrios_runtime_test
+          rustc --edition=2021 -C opt-level=2 --target aarch64-unknown-linux-gnu -C linker=aarch64-linux-gnu-gcc atrios_runtime.rs -o "$RUNNER_TEMP/atrios-runtime"
+          aarch64-linux-gnu-gcc -O2 atri_mp3dec.c -lm -o "$RUNNER_TEMP/atri-mp3dec"
+          aarch64-linux-gnu-gcc -O2 atri_aec.c -lm -o "$RUNNER_TEMP/atri-aec"
+      - name: Build RSA-signed OTA bundle for yndxsttion53
+        env:
+          OTA_SIGNING_KEY: ${{ secrets.OTA_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$OTA_SIGNING_KEY" || { echo 'OTA_SIGNING_KEY secret is required'; exit 1; }
+          VER="${RELEASE_TAG#v}"
+          umask 077
+          printf '%s\n' "$OTA_SIGNING_KEY" > "$RUNNER_TEMP/ota-signing.pem"
+          openssl rsa -in "$RUNNER_TEMP/ota-signing.pem" -check -noout >/dev/null
+          mkdir -p "$RUNNER_TEMP/stage/usr/lib/atrios" "$RUNNER_TEMP/stage/usr/bin" "$RUNNER_TEMP/stage/etc" "$RUNNER_TEMP/ota_out"
+          install -m 755 "$RUNNER_TEMP/atrios-runtime" "$RUNNER_TEMP/stage/usr/lib/atrios/atrios-runtime"
+          install -m 755 "$RUNNER_TEMP/atri-aec" "$RUNNER_TEMP/stage/usr/lib/atrios/atri-aec"
+          install -m 755 "$RUNNER_TEMP/atri-mp3dec" "$RUNNER_TEMP/stage/usr/bin/atri-mp3dec"
+          printf '%s\n' "$VER" > "$RUNNER_TEMP/stage/etc/atrios-version"
+          chmod 644 "$RUNNER_TEMP/stage/etc/atrios-version"
+
+          python3 - "$VER" "$RUNNER_TEMP/stage" "$RUNNER_TEMP/ota-signing.pem" "$RUNNER_TEMP/ota_out" <<'PY'
+          import hashlib, json, os, subprocess, sys, tarfile
+          from pathlib import Path
+
+          ver, stage_dir, key_path, out_dir = sys.argv[1], Path(sys.argv[2]), Path(sys.argv[3]), Path(sys.argv[4])
+          work = out_dir / "work"
+          work.mkdir(parents=True, exist_ok=True)
+          rootfs_tar = work / "rootfs.tar.gz"
+          with tarfile.open(rootfs_tar, "w:gz") as tf:
+              for p in sorted(stage_dir.rglob("*")):
+                  if p.is_file():
+                      rel = p.relative_to(stage_dir).as_posix()
+                      ti = tf.gettarinfo(str(p), arcname=rel)
+                      ti.uid = ti.gid = 0
+                      ti.uname = ti.gname = "root"
+                      with p.open("rb") as f:
+                          tf.addfile(ti, f)
+          sha = hashlib.sha256(rootfs_tar.read_bytes()).hexdigest()
+          manifest = {
+              "schema": 1,
+              "device_id": "yndxsttion53",
+              "version": ver,
+              "files": {
+                  "rootfs": {
+                      "path": "payload/rootfs.tar.gz",
+                      "sha256": sha,
+                  }
+              },
+          }
+          manifest_path = work / "manifest.json"
+          manifest_path.write_bytes((json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n").encode())
+          sig_path = work / "manifest.sig"
+          subprocess.run(
+              ["openssl", "dgst", "-sha256", "-sign", str(key_path), "-sigopt", "rsa_padding_mode:pkcs1", "-out", str(sig_path), str(manifest_path)],
+              check=True,
+          )
+          bundle = out_dir / "AtriOS-yndxsttion53-ota.tar.gz"
+          with tarfile.open(bundle, "w:gz") as tf:
+              for arc, src in [
+                  ("manifest.json", manifest_path),
+                  ("manifest.sig", sig_path),
+                  ("payload/rootfs.tar.gz", rootfs_tar),
+              ]:
+                  ti = tf.gettarinfo(str(src), arcname=arc)
+                  ti.uid = ti.gid = 0
+                  ti.uname = ti.gname = "root"
+                  ti.mode = 0o644
+                  with src.open("rb") as f:
+                      tf.addfile(ti, f)
+          bsha = hashlib.sha256(bundle.read_bytes()).hexdigest()
+          (out_dir / "AtriOS-yndxsttion53-ota.tar.gz.sha256").write_text(f"{bsha}  AtriOS-yndxsttion53-ota.tar.gz\n", encoding="ascii")
+          print("Built signed OTA:", bundle, bundle.stat().st_size, "sha256=", bsha)
+          PY
+          rm -f "$RUNNER_TEMP/ota-signing.pem"
+      - name: Publish signed OTA GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/ota_out"
+          gh release create "$RELEASE_TAG" \
+            AtriOS-yndxsttion53-ota.tar.gz \
+            AtriOS-yndxsttion53-ota.tar.gz.sha256 \
+            --title "AtriOS $RELEASE_TAG" \
+            --notes "Signed runtime OTA $RELEASE_TAG: atomic relay sync, instant 26ms EQ, 7-mic proximity speech focusing, Ynison async ymusic engine, dynamic Collection API." \
+            || gh release upload "$RELEASE_TAG" \
+            AtriOS-yndxsttion53-ota.tar.gz \
+            AtriOS-yndxsttion53-ota.tar.gz.sha256 --clobber
