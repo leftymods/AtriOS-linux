@@ -706,6 +706,7 @@ fn send_rotor_feedback_station(
     batch_id: &str,
     kind: &str,
     track_id: Option<&str>,
+    total_played_sec: Option<f64>,
 ) {
     let st = if station.trim().is_empty() { "user:onyourwave" } else { station.trim() };
     let mut fields = vec![
@@ -714,6 +715,11 @@ fn send_rotor_feedback_station(
     ];
     if let Some(tid) = track_id {
         fields.push(("trackId", Json::Str(tid.into())));
+    }
+    if let Some(secs) = total_played_sec {
+        if secs.is_finite() && secs >= 0.0 {
+            fields.push(("totalPlayedSeconds", Json::Num((secs * 10.0).round() / 10.0)));
+        }
     }
     if kind == "radioStarted" {
         fields.push(("from", Json::Str("AtriOS-speaker".into())));
@@ -726,8 +732,14 @@ fn send_rotor_feedback_station(
     let _ = api_post_json(&auth.token, &ep, &obj(fields));
 }
 
-fn send_rotor_feedback(auth: &YMusicAuth, batch_id: &str, kind: &str, track_id: Option<&str>) {
-    send_rotor_feedback_station(auth, "user:onyourwave", batch_id, kind, track_id);
+fn send_rotor_feedback(
+    auth: &YMusicAuth,
+    batch_id: &str,
+    kind: &str,
+    track_id: Option<&str>,
+    total_played_sec: Option<f64>,
+) {
+    send_rotor_feedback_station(auth, "user:onyourwave", batch_id, kind, track_id, total_played_sec);
 }
 
 /// MarshalX chart(): GET /landing3/chart
@@ -750,25 +762,35 @@ fn fetch_chart(auth: &YMusicAuth) -> Result<Vec<TrackInfo>, String> {
     Ok(tracks)
 }
 
-/// MarshalX users_playlists_list + users_playlists: find user playlist by name and load its tracks
+/// MarshalX users_playlists_list + users_playlists: supports direct "uid:kind" (including /feed generated playlists) or title search
 fn fetch_user_playlist(auth: &YMusicAuth, query: &str) -> Result<Vec<TrackInfo>, String> {
-    let q = query.trim().to_lowercase();
-    let list_ep = format!("/users/{}/playlists/list", auth.uid);
-    let resp = api_get_json(&auth.token, &list_ep)?;
-    let arr = resp
-        .get("result")
-        .and_then(|v| v.as_arr())
-        .ok_or("No playlists found")?;
-    let chosen = arr
-        .iter()
-        .find(|pl| {
-            let title = pl.get_str("title").unwrap_or("").to_lowercase();
-            q.is_empty() || title.contains(&q)
-        })
-        .or_else(|| arr.first())
-        .ok_or("User has no playlists")?;
-    let kind = chosen.get("kind").and_then(|v| v.as_i64()).ok_or("Playlist missing kind")?;
-    let pl_ep = format!("/users/{}/playlists/{kind}", auth.uid);
+    let raw = query.trim();
+    let (owner_uid, kind) = if let Some((u_part, k_part)) = raw.split_once(':') {
+        if let (Ok(u), Ok(k)) = (u_part.trim().parse::<i64>(), k_part.trim().parse::<i64>()) {
+            (u, k)
+        } else {
+            return Err("Invalid playlist uid:kind".into());
+        }
+    } else {
+        let q = raw.to_lowercase();
+        let list_ep = format!("/users/{}/playlists/list", auth.uid);
+        let resp = api_get_json(&auth.token, &list_ep)?;
+        let arr = resp
+            .get("result")
+            .and_then(|v| v.as_arr())
+            .ok_or("No playlists found")?;
+        let chosen = arr
+            .iter()
+            .find(|pl| {
+                let title = pl.get_str("title").unwrap_or("").to_lowercase();
+                q.is_empty() || title.contains(&q)
+            })
+            .or_else(|| arr.first())
+            .ok_or("User has no playlists")?;
+        let k = chosen.get("kind").and_then(|v| v.as_i64()).ok_or("Playlist missing kind")?;
+        (auth.uid, k)
+    };
+    let pl_ep = format!("/users/{owner_uid}/playlists/{kind}");
     let pl_resp = api_get_json(&auth.token, &pl_ep)?;
     let tr_arr = pl_resp
         .get("result")
@@ -777,13 +799,60 @@ fn fetch_user_playlist(auth: &YMusicAuth, query: &str) -> Result<Vec<TrackInfo>,
         .ok_or("Playlist has no tracks")?;
     let tracks: Vec<TrackInfo> = tr_arr
         .iter()
-        .take(50)
+        .take(100)
         .filter_map(|item| item.get("track").and_then(|t| parse_track_json(t, false)))
         .collect();
     if tracks.is_empty() {
         return Err("Playlist is empty".into());
     }
     Ok(tracks)
+}
+
+/// MarshalX queues_list + queue(id): continue playback from another Yandex Music device
+fn fetch_remote_queue(auth: &YMusicAuth, queue_id: &str) -> Result<(Vec<TrackInfo>, usize), String> {
+    let qid = if !queue_id.trim().is_empty() {
+        queue_id.trim().to_string()
+    } else {
+        let list = api_get_json(&auth.token, "/queues")?;
+        list.get("result")
+            .and_then(|r| r.get("queues"))
+            .and_then(|v| v.as_arr())
+            .and_then(|arr| arr.first())
+            .and_then(|q| q.get_str("id"))
+            .map(|s| s.to_string())
+            .ok_or("No active remote queues found")?
+    };
+    let q_resp = api_get_json(&auth.token, &format!("/queues/{}", url_encode(&qid)))?;
+    let res = q_resp.get("result").ok_or("Empty queue response")?;
+    let cur_idx = res.get("currentIndex").and_then(|v| v.as_i64()).unwrap_or(0).max(0) as usize;
+    let raw_ids: Vec<String> = res
+        .get("tracks")
+        .and_then(|v| v.as_arr())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|t| t.get_str("trackId").map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    if raw_ids.is_empty() {
+        return Err("Remote queue is empty".into());
+    }
+    // Window around currentIndex so we stay fast & within 60 tracks
+    let win_start = cur_idx.saturating_sub(5);
+    let win_end = (win_start + 60).min(raw_ids.len());
+    let slice = &raw_ids[win_start..win_end];
+    let rel_idx = cur_idx.saturating_sub(win_start);
+    let form = format!("track-ids={}", url_encode(&slice.join(",")));
+    let det = api_post_form_json(&auth.token, "/tracks", &form)?;
+    let tracks: Vec<TrackInfo> = det
+        .get("result")
+        .and_then(|v| v.as_arr())
+        .map(|arr| arr.iter().filter_map(|t| parse_track_json(t, false)).collect())
+        .unwrap_or_default();
+    if tracks.is_empty() {
+        return Err("No playable tracks in remote queue".into());
+    }
+    Ok((tracks, rel_idx.min(tracks.len().saturating_sub(1))))
 }
 
 fn fetch_likes(auth: &YMusicAuth) -> Result<Vec<TrackInfo>, String> {
@@ -1753,7 +1822,9 @@ enum DaemonEvent {
     ModeLoaded {
         gen: u64,
         mode: String,
+        station: String,
         batch_id: String,
+        start_index: usize,
         res: Result<Vec<TrackInfo>, String>,
     },
     StreamResolved {
@@ -1774,6 +1845,7 @@ enum DaemonEvent {
 
 struct PlayerState {
     mode: String,
+    active_station: String,
     batch_id: String,
     queue: Vec<TrackInfo>,
     index: usize,
@@ -1791,6 +1863,7 @@ impl PlayerState {
     fn new(tx: mpsc::Sender<DaemonEvent>) -> Self {
         Self {
             mode: "none".into(),
+            active_station: "user:onyourwave".into(),
             batch_id: String::new(),
             queue: Vec::new(),
             index: 0,
@@ -1879,12 +1952,13 @@ impl PlayerState {
                 write_status(&mut self.status);
                 println!("[ymusic] Playing: {} — {}", track.artist, track.title);
                 self.prebuffer_next_in_bg(auth);
-                if self.mode == "wave" {
+                if self.mode == "wave" || self.mode == "station" {
                     let auth_c = auth.clone();
+                    let st = self.active_station.clone();
                     let bid = self.batch_id.clone();
                     let tid = track.id.clone();
                     thread::spawn(move || {
-                        send_rotor_feedback(&auth_c, &bid, "trackStarted", Some(&tid));
+                        send_rotor_feedback_station(&auth_c, &st, &bid, "trackStarted", Some(&tid), None);
                     });
                 }
                 // Background live liked check (never blocks bt-control or command loop!)
@@ -2000,47 +2074,55 @@ impl PlayerState {
         let tx = self.tx.clone();
         thread::spawn(move || {
             let mut batch_id = String::new();
+            let mut station = "user:onyourwave".to_string();
+            let mut start_index: usize = 0;
             let res = match mode_s.as_str() {
                 "wave" => fetch_my_wave(&auth, None).map(|(bid, tr)| {
                     batch_id = bid.clone();
-                    send_rotor_feedback(&auth, &bid, "radioStarted", None);
+                    send_rotor_feedback(&auth, &bid, "radioStarted", None, None);
                     tr
                 }),
                 "likes" => fetch_likes(&auth),
                 "chart" => fetch_chart(&auth),
                 "station" => {
                     let st = query_s.as_deref().unwrap_or("user:onyourwave");
+                    station = st.to_string();
                     fetch_rotor_station(&auth, st, None).map(|(bid, tr)| {
                         batch_id = bid.clone();
-                        send_rotor_feedback_station(&auth, st, &bid, "radioStarted", None);
+                        send_rotor_feedback_station(&auth, st, &bid, "radioStarted", None, None);
                         tr
                     })
                 }
                 "playlist" => fetch_user_playlist(&auth, query_s.as_deref().unwrap_or("")),
+                "queue" => fetch_remote_queue(&auth, query_s.as_deref().unwrap_or("")).map(|(tr, idx)| {
+                    start_index = idx;
+                    tr
+                }),
                 "search" => fetch_search(&auth, query_s.as_deref().unwrap_or("")),
                 "track" => fetch_single_track(&auth, query_s.as_deref().unwrap_or("")),
                 "album" => fetch_album_tracks(&auth, query_s.as_deref().unwrap_or("")),
                 _ => Err(format!("Unsupported mode: {mode_s}")),
             };
-            let _ = tx.send(DaemonEvent::ModeLoaded { gen, mode: mode_s, batch_id, res });
+            let _ = tx.send(DaemonEvent::ModeLoaded { gen, mode: mode_s, station, batch_id, start_index, res });
         });
     }
 
     fn handle_event(&mut self, ev: DaemonEvent) {
         let cur_gen = self.load_gen.load(Ordering::SeqCst);
         match ev {
-            DaemonEvent::ModeLoaded { gen, mode, batch_id, res } => {
+            DaemonEvent::ModeLoaded { gen, mode, station, batch_id, start_index, res } => {
                 if gen != cur_gen {
                     return; // Stale load superseded by pause/next/new mode!
                 }
                 match res {
                     Ok(tracks) => {
                         self.mode = mode;
+                        self.active_station = station;
                         if !batch_id.is_empty() {
                             self.batch_id = batch_id;
                         }
                         self.queue = tracks;
-                        self.index = 0;
+                        self.index = start_index.min(self.queue.len().saturating_sub(1));
                         self.start_current_track();
                     }
                     Err(e) => {
@@ -2127,12 +2209,21 @@ impl PlayerState {
             || self.status.state == "loading"
             || self.pipeline.as_ref().map(|p| !p.paused).unwrap_or(false);
         if let Some(auth) = load_auth() {
-            if self.mode == "wave" {
+            if self.mode == "wave" || self.mode == "station" {
                 if let Some(cur) = self.queue.get(self.index).cloned() {
+                    let st = self.active_station.clone();
                     let bid = self.batch_id.clone();
                     let kind = if skipped { "skip" } else { "trackFinished" };
+                    let played_ms = if self.status.started_ts > 0 && self.status.state == "playing" {
+                        self.status.position_ms + (now_unix_ms() - self.status.started_ts).max(0)
+                    } else if !skipped && cur.duration_ms > 0 {
+                        cur.duration_ms
+                    } else {
+                        self.status.position_ms
+                    };
+                    let played_sec = (played_ms as f64 / 1000.0).max(0.0);
                     thread::spawn(move || {
-                        send_rotor_feedback(&auth, &bid, kind, Some(&cur.id));
+                        send_rotor_feedback_station(&auth, &st, &bid, kind, Some(&cur.id), Some(played_sec));
                     });
                 }
             }
@@ -2149,13 +2240,14 @@ impl PlayerState {
                 self.queue.drain(0..drop_n);
                 self.index -= drop_n;
             }
-            // Proactively replenish My Wave near queue tail (like Yandex Music mobile!)
-            if self.mode == "wave" && self.index + 2 >= self.queue.len() {
+            // Proactively replenish My Wave / Station near queue tail (like Yandex Music mobile!)
+            if (self.mode == "wave" || self.mode == "station") && self.index + 2 >= self.queue.len() {
                 if let Some(auth) = load_auth() {
+                    let st = self.active_station.clone();
                     let last_id = self.queue.last().map(|t| t.id.clone());
                     let tx = self.tx.clone();
                     thread::spawn(move || {
-                        if let Ok((bid, more)) = fetch_my_wave(&auth, last_id.as_deref()) {
+                        if let Ok((bid, more)) = fetch_rotor_station(&auth, &st, last_id.as_deref()) {
                             let _ = tx.send(DaemonEvent::WaveAppended { batch_id: bid, tracks: more, auto_play: false });
                         }
                     });
