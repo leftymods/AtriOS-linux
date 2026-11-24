@@ -72,6 +72,7 @@ import com.leftymods.atrios.ui.AiAssistantCard
 import com.leftymods.atrios.ui.AsyncCoverArt
 import com.leftymods.atrios.ui.AudioCard
 import com.leftymods.atrios.ui.BigPlayerOverlay
+import com.leftymods.atrios.ui.EqualizerPanel
 import com.leftymods.atrios.ui.SwipeableTwoCardRibbon
 import com.leftymods.atrios.ui.BluetoothCard
 import com.leftymods.atrios.ui.DevicePickerSection
@@ -201,6 +202,19 @@ fun AtriOSApp(
     val lastVolumeSentPctRef = remember { java.util.concurrent.atomic.AtomicInteger(-1) }
     var isTrackTransitioning by remember { mutableStateOf(false) }
     var showVolumeSheet by remember { mutableStateOf(false) }
+    var showEqSheet by remember { mutableStateOf(false) }
+    var liveElapsedMs by remember(status.ymusic.trackId) { mutableLongStateOf(status.ymusic.positionMs.coerceAtLeast(0L)) }
+    LaunchedEffect(status.ymusic.positionMs) {
+        val srv = status.ymusic.positionMs.coerceAtLeast(0L)
+        if (kotlin.math.abs(srv - liveElapsedMs) >= 2000L) liveElapsedMs = srv
+    }
+    LaunchedEffect(status.ymusic.trackId, status.ymusic.state) {
+        while (status.ymusic.state == "playing") {
+            delay(500)
+            val dur = status.ymusic.durationMs
+            liveElapsedMs = if (dur > 0L) (liveElapsedMs + 500L).coerceAtMost(dur) else (liveElapsedMs + 500L)
+        }
+    }
     var checkingAppUpdate by remember { mutableStateOf(false) }
     var appUpdateStatusMsg by remember { mutableStateOf<String?>(null) }
     var showRebootDialog by remember { mutableStateOf(false) }
@@ -321,7 +335,9 @@ fun AtriOSApp(
     }
 
     fun dispatchYMusicControl(action: String) {
-        if ((action == "next" || action == "prev") && isTrackTransitioning) return
+        // Only block forward skip while an uncached next track is still loading; NEVER block prev!
+        val hasLoadedNext = status.ymusic.nextTitle.isNotBlank() && status.ymusic.nextTitle != status.ymusic.title
+        if (action == "next" && isTrackTransitioning && !hasLoadedNext) return
         val nowMs = System.currentTimeMillis()
         lastUserActionRef.set(nowMs)
         val cur = status.ymusic
@@ -332,6 +348,7 @@ fun AtriOSApp(
             "like" -> status = status.copy(ymusic = cur.copy(liked = !cur.liked))
             "next" -> {
                 isTrackTransitioning = true
+                liveElapsedMs = 0L
                 if (cur.title.isNotBlank()) {
                     rejectedOldTitleRef.set(cur.title)
                     rejectedUntilRef.set(nowMs + 2800L)
@@ -343,15 +360,19 @@ fun AtriOSApp(
                             title = cur.nextTitle,
                             artist = cur.nextArtist,
                             coverUrl = cur.nextCoverUrl.ifBlank { cur.coverUrl },
+                            nextTitle = "",
+                            nextArtist = "",
+                            nextCoverUrl = "",
                             prevTitle = cur.title,
                             prevArtist = cur.artist,
-                            prevCoverUrl = cur.coverUrl
+                            prevCoverUrl = cur.coverUrl,
+                            positionMs = 0L
                         )
                     )
                 }
             }
             "prev" -> {
-                isTrackTransitioning = true
+                liveElapsedMs = 0L
                 if (cur.title.isNotBlank()) {
                     rejectedOldTitleRef.set(cur.title)
                     rejectedUntilRef.set(nowMs + 2800L)
@@ -365,7 +386,8 @@ fun AtriOSApp(
                             coverUrl = cur.prevCoverUrl.ifBlank { cur.coverUrl },
                             nextTitle = cur.title,
                             nextArtist = cur.artist,
-                            nextCoverUrl = cur.coverUrl
+                            nextCoverUrl = cur.coverUrl,
+                            positionMs = 0L
                         )
                     )
                 }
@@ -653,9 +675,12 @@ fun AtriOSApp(
                                                     .height(2.5.dp)
                                                     .background(Color(0xFF2B2B2B))
                                             ) {
+                                                val frac = if (ym.durationMs > 0L) {
+                                                    (liveElapsedMs.toFloat() / ym.durationMs.toFloat()).coerceIn(0f, 1f)
+                                                } else 0f
                                                 Box(
                                                     modifier = Modifier
-                                                        .fillMaxWidth(if (playing) 0.55f else 0.25f)
+                                                        .fillMaxWidth(frac)
                                                         .fillMaxHeight()
                                                         .background(palette.accent)
                                                 )
@@ -696,11 +721,13 @@ fun AtriOSApp(
                                 }
                             }
 
+                            val canNextNow = !(isTrackTransitioning && ym.nextTitle.isBlank())
                             SwipeableTwoCardRibbon(
                                 trackKey = ym.trackId,
                                 onSwipeNext = { dispatchYMusicControl("next") },
                                 onSwipePrev = { dispatchYMusicControl("prev") },
-                                swipeEnabled = !isTrackTransitioning,
+                                canSwipeNext = canNextNow,
+                                canSwipePrev = true,
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .padding(horizontal = 16.dp, vertical = 6.dp),
@@ -825,9 +852,11 @@ fun AtriOSApp(
                                 },
                                 onOpenBigPlayer = { showBigPlayer = true },
                                 onOpenVolumeSheet = { showVolumeSheet = true },
+                                onOpenEqualizer = { showEqSheet = true },
                                 volume = sliderVol,
                                 mute = status.mute,
-                                swipeEnabled = !isTrackTransitioning
+                                canSwipeNext = !(isTrackTransitioning && status.ymusic.nextTitle.isBlank()),
+                                canSwipePrev = true
                             )
                         }
 
@@ -1258,6 +1287,23 @@ fun AtriOSApp(
                 }
             }
 
+            // 5-Band Live Equalizer Bottom Sheet!
+            if (showEqSheet) {
+                ModalBottomSheet(
+                    onDismissRequest = { showEqSheet = false },
+                    containerColor = Color(0xFF141418)
+                ) {
+                    EqualizerPanel(
+                        eq = status.eq,
+                        palette = palette,
+                        onApplyEq = { en, pr, b ->
+                            status = status.copy(eq = status.eq.copy(enabled = en, preset = pr, bands = b))
+                            client.setEq(en, pr, b)
+                        }
+                    )
+                }
+            }
+
             // Full-screen Big Player overlay!
             AnimatedVisibility(
                 visible = showBigPlayer,
@@ -1281,7 +1327,9 @@ fun AtriOSApp(
                     onControl = { action -> dispatchYMusicControl(action) },
                     onPlayWave = { client.ymusicPlay("wave", null) },
                     onDismiss = { showBigPlayer = false },
-                    swipeEnabled = !isTrackTransitioning
+                    onOpenEqualizer = { showEqSheet = true },
+                    canSwipeNext = !(isTrackTransitioning && status.ymusic.nextTitle.isBlank()),
+                    canSwipePrev = true
                 )
             }
         }

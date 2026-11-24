@@ -283,7 +283,7 @@ fun SingleLiquidBlobShaderAura(
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && agslShader != null) {
             agslShader.setFloatUniform("vScreenSize", size.width, size.height)
             agslShader.setFloatUniform("vTime", shaderTime)
-            agslShader.setFloatUniform("vScale", 0.86f + bassSmooth * 0.14f)
+            agslShader.setFloatUniform("vScale", 1.12f + bassSmooth * 0.18f)
             agslShader.setFloatUniform("vCol0", col1.red, col1.green, col1.blue)
             agslShader.setFloatUniform("vCol1", col2.red, col2.green, col2.blue)
             agslShader.setFloatUniform("vCol2", col3.red, col3.green, col3.blue)
@@ -299,7 +299,7 @@ fun SingleLiquidBlobShaderAura(
             // Smooth 3-layer Yandex Vibe fallback for Android <13
             val cx = size.width * 0.5f
             val cy = size.height * 0.44f
-            val baseR = size.minDimension * 0.72f * (1f + bassSmooth * 0.18f + beatSmooth * 0.10f)
+            val baseR = size.minDimension * 0.86f * (1f + bassSmooth * 0.20f + beatSmooth * 0.12f)
             val t = shaderTime
 
             val p0 = Offset(cx + cos(t * 0.7f) * baseR * 0.16f, cy + sin(t * 0.9f) * baseR * 0.14f)

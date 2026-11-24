@@ -57,7 +57,9 @@ fun BigPlayerOverlay(
     onControl: (String) -> Unit,
     onPlayWave: () -> Unit,
     onDismiss: () -> Unit,
-    swipeEnabled: Boolean = true
+    onOpenEqualizer: () -> Unit = {},
+    canSwipeNext: Boolean = true,
+    canSwipePrev: Boolean = true
 ) {
     var artistSheetName by remember { mutableStateOf<String?>(null) }
     var artistLoading by remember { mutableStateOf(false) }
@@ -75,7 +77,13 @@ fun BigPlayerOverlay(
     }
 
     var showVolumeRow by remember { mutableStateOf(false) }
-    var elapsedSec by remember(ymusic.trackId) { mutableIntStateOf(0) }
+    var elapsedSec by remember(ymusic.trackId) { mutableIntStateOf((ymusic.positionMs / 1000L).toInt().coerceAtLeast(0)) }
+    LaunchedEffect(ymusic.positionMs) {
+        val srvSec = (ymusic.positionMs / 1000L).toInt().coerceAtLeast(0)
+        if (kotlin.math.abs(srvSec - elapsedSec) >= 2) {
+            elapsedSec = srvSec
+        }
+    }
     var coverDir by remember { mutableIntStateOf(1) }
     val totalSec = remember(ymusic.durationMs) { (ymusic.durationMs / 1000L).toInt().coerceAtLeast(1) }
 
@@ -152,7 +160,8 @@ fun BigPlayerOverlay(
                 trackKey = ymusic.trackId,
                 onSwipeNext = { coverDir = 1; elapsedSec = 0; onControl("next") },
                 onSwipePrev = { coverDir = -1; elapsedSec = 0; onControl("prev") },
-                swipeEnabled = swipeEnabled,
+                canSwipeNext = canSwipeNext,
+                canSwipePrev = canSwipePrev,
                 modifier = Modifier
                     .fillMaxWidth(0.88f)
                     .aspectRatio(1f),
@@ -347,10 +356,13 @@ fun BigPlayerOverlay(
                             )
                         }
                     }
-                    Surface(shape = RoundedCornerShape(99.dp), color = Color.White.copy(alpha = 0.10f), modifier = Modifier.width(96.dp).height(44.dp).clickable { showVolumeRow = !showVolumeRow }) {
+                    Surface(shape = RoundedCornerShape(99.dp), color = Color.White.copy(alpha = 0.10f), modifier = Modifier.width(74.dp).height(44.dp).clickable { onOpenEqualizer() }) {
+                        Box(contentAlignment = Alignment.Center) { Icon(Icons.Rounded.Equalizer, contentDescription = "Эквалайзер", tint = Color.White.copy(alpha = 0.85f)) }
+                    }
+                    Surface(shape = RoundedCornerShape(99.dp), color = Color.White.copy(alpha = 0.10f), modifier = Modifier.width(74.dp).height(44.dp).clickable { showVolumeRow = !showVolumeRow }) {
                         Box(contentAlignment = Alignment.Center) { Icon(if (mute || volume.toInt() == 0) Icons.Rounded.VolumeOff else Icons.Rounded.VolumeUp, contentDescription = "Звук", tint = if (showVolumeRow) palette.accent else Color.White.copy(alpha = 0.85f)) }
                     }
-                    Surface(shape = RoundedCornerShape(99.dp), color = Color.White.copy(alpha = 0.10f), modifier = Modifier.width(96.dp).height(44.dp).clickable { onControl("stop"); onDismiss() }) {
+                    Surface(shape = RoundedCornerShape(99.dp), color = Color.White.copy(alpha = 0.10f), modifier = Modifier.width(74.dp).height(44.dp).clickable { onControl("stop"); onDismiss() }) {
                         Box(contentAlignment = Alignment.Center) { Icon(Icons.Rounded.Stop, contentDescription = "Стоп", tint = Color.White.copy(alpha = 0.85f)) }
                     }
                 }

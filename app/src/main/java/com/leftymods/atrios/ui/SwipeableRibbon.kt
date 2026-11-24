@@ -29,7 +29,8 @@ fun SwipeableTwoCardRibbon(
     onSwipeNext: () -> Unit,
     onSwipePrev: () -> Unit,
     modifier: Modifier = Modifier,
-    swipeEnabled: Boolean = true,
+    canSwipeNext: Boolean = true,
+    canSwipePrev: Boolean = true,
     currentCard: @Composable () -> Unit,
     nextCard: @Composable () -> Unit,
     prevCard: @Composable () -> Unit
@@ -42,7 +43,8 @@ fun SwipeableTwoCardRibbon(
 
     val latestNext by rememberUpdatedState(onSwipeNext)
     val latestPrev by rememberUpdatedState(onSwipePrev)
-    val latestEnabled by rememberUpdatedState(swipeEnabled)
+    val latestCanNext by rememberUpdatedState(canSwipeNext)
+    val latestCanPrev by rememberUpdatedState(canSwipePrev)
 
     // Only reset offset when a new track arrives and the user is NOT actively holding/dragging
     LaunchedEffect(trackKey) {
@@ -69,13 +71,13 @@ fun SwipeableTwoCardRibbon(
                         val cur = offsetX.value
                         val thresh = span * 0.28f
                         scope.launch {
-                            if (latestEnabled && cur < -thresh) {
+                            if (latestCanNext && cur < -thresh) {
                                 settling = true
                                 offsetX.animateTo(-span, tween(210, easing = FastOutSlowInEasing))
                                 latestNext()
                                 offsetX.snapTo(0f)
                                 settling = false
-                            } else if (latestEnabled && cur > thresh) {
+                            } else if (latestCanPrev && cur > thresh) {
                                 settling = true
                                 offsetX.animateTo(span, tween(210, easing = FastOutSlowInEasing))
                                 latestPrev()
@@ -98,10 +100,13 @@ fun SwipeableTwoCardRibbon(
                         if (!settling) {
                             change.consume()
                             val curSpan = (widthPx + 24).toFloat().coerceAtLeast(300f)
-                            val delta = if (latestEnabled) dragAmount else dragAmount * 0.20f
-                            val limit = if (latestEnabled) curSpan else curSpan * 0.16f
+                            val nextPos = offsetX.value + dragAmount
+                            val allowed = if (nextPos < 0f) latestCanNext else latestCanPrev
+                            val delta = if (allowed) dragAmount else dragAmount * 0.20f
+                            val minLim = if (latestCanNext) -curSpan else -curSpan * 0.16f
+                            val maxLim = if (latestCanPrev) curSpan else curSpan * 0.16f
                             scope.launch {
-                                offsetX.snapTo((offsetX.value + delta).coerceIn(-limit, limit))
+                                offsetX.snapTo((offsetX.value + delta).coerceIn(minLim, maxLim))
                             }
                         }
                     }

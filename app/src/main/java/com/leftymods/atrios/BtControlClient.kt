@@ -6,6 +6,7 @@ import android.bluetooth.BluetoothSocket
 import com.leftymods.atrios.model.AiStatus
 import com.leftymods.atrios.model.AlarmItem
 import com.leftymods.atrios.model.DeviceCapabilities
+import com.leftymods.atrios.model.EqStatus
 import com.leftymods.atrios.model.OtaStatus
 import com.leftymods.atrios.model.SpeakerStatus
 import com.leftymods.atrios.model.TimerItem
@@ -262,16 +263,26 @@ class BtControlClient(
     fun sendCommand(payload: JSONObject) {
         scope.launch(Dispatchers.IO) {
             if (relayActive && writer == null) {
-                try {
-                    val url = "$relayGateway/relay/v1/app/$relayDeviceId/cmd"
-                    val resp = relayHttpPost(url, relayToken, payload)
-                    val reply = resp.optJSONObject("reply")
-                    if (reply != null) {
-                        handlePacket(reply)
+                var lastErr: Exception? = null
+                for (attempt in 0..1) {
+                    try {
+                        val url = "$relayGateway/relay/v1/app/$relayDeviceId/cmd"
+                        val resp = relayHttpPost(url, relayToken, payload)
+                        val reply = resp.optJSONObject("reply")
+                        if (reply != null) {
+                            handlePacket(reply)
+                        }
+                        return@launch
+                    } catch (e: Exception) {
+                        lastErr = e
+                        if (attempt == 0) delay(420)
                     }
-                } catch (e: Exception) {
+                }
+                val cmdName = payload.optString("cmd", "")
+                // Don't spam UI errors on silent background polls (ymusic_status / get_status)
+                if (cmdName != "ymusic_status" && cmdName != "get_status") {
                     withContext(Dispatchers.Main) {
-                        onMessage("Ошибка Wi-Fi команды: ${e.message ?: "таймаут"}", true)
+                        onMessage("Нет связи с сервером: ${lastErr?.message ?: "таймаут"}", true)
                     }
                 }
             } else {
@@ -303,6 +314,18 @@ class BtControlClient(
     fun setMute(mute: Boolean) = sendCommand(
         JSONObject().put("cmd", "set_mute").put("mute", mute)
     )
+
+    fun setEq(enabled: Boolean, preset: String, bands: List<Float>) {
+        val arr = JSONArray()
+        bands.take(5).forEach { arr.put(it.coerceIn(-12f, 12f).toDouble()) }
+        sendCommand(
+            JSONObject()
+                .put("cmd", "set_eq")
+                .put("enabled", enabled)
+                .put("preset", preset)
+                .put("bands", arr)
+        )
+    }
 
     fun audioTest() = sendCommand(JSONObject().put("cmd", "audio_test"))
 
@@ -477,6 +500,7 @@ class BtControlClient(
                 val ota = OtaStatus.fromJson(json.optJSONObject("ota"))
                 val ai = AiStatus.fromJson(json.optJSONObject("ai"))
                 val vqe = VqeStatus.fromJson(json.optJSONObject("vqe"))
+                val eq = EqStatus.fromJson(json.optJSONObject("eq"))
                 val ymusic = YMusicStatus.fromJson(json.optJSONObject("ymusic"))
                 val status = SpeakerStatus(
                     model = model,
@@ -511,6 +535,7 @@ class BtControlClient(
                     pairedDevices = paired,
                     ai = ai,
                     vqe = vqe,
+                    eq = eq,
                     ota = ota,
                     ymusic = ymusic,
                     capabilities = caps

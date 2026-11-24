@@ -359,6 +359,7 @@ data class YMusicStatus(
     val prevArtist: String = "",
     val prevCoverUrl: String = "",
     val durationMs: Long = 0L,
+    val positionMs: Long = 0L,
     val liked: Boolean = false,
     val repeat: Boolean = false,
     val error: String? = null,
@@ -408,6 +409,7 @@ data class YMusicStatus(
                 prevArtist = obj.optString("prev_artist", ""),
                 prevCoverUrl = obj.optString("prev_cover_url", ""),
                 durationMs = obj.optLong("duration_ms", 0L),
+                positionMs = obj.optLong("position_ms", 0L),
                 liked = obj.optBoolean("liked", false),
                 repeat = obj.optBoolean("repeat", false),
                 error = if (obj.isNull("error")) null else obj.optString("error").ifBlank { null },
@@ -417,6 +419,28 @@ data class YMusicStatus(
                 audioEnergy = obj.optDouble("audio_energy", 0.0).toFloat().coerceIn(0f, 1f),
                 audioBeat = obj.optDouble("audio_beat", 0.0).toFloat().coerceIn(0f, 1f),
                 updatedTs = obj.optLong("updated_ts", 0L)
+            )
+        }
+    }
+}
+
+data class EqStatus(
+    val enabled: Boolean = false,
+    val preset: String = "flat",
+    val bands: List<Float> = listOf(0f, 0f, 0f, 0f, 0f)
+) {
+    companion object {
+        fun fromJson(obj: JSONObject?): EqStatus {
+            if (obj == null) return EqStatus()
+            val arr = obj.optJSONArray("bands")
+            val list = List(5) { idx ->
+                if (arr != null && idx < arr.length()) arr.optDouble(idx, 0.0).toFloat().coerceIn(-12f, 12f)
+                else 0f
+            }
+            return EqStatus(
+                enabled = obj.optBoolean("enabled", false),
+                preset = obj.optString("preset", "flat"),
+                bands = list
             )
         }
     }
@@ -478,6 +502,7 @@ data class SpeakerStatus(
     val pairedDevices: List<String> = emptyList(),
     val ai: AiStatus = AiStatus(),
     val vqe: VqeStatus = VqeStatus(),
+    val eq: EqStatus = EqStatus(),
     val ota: OtaStatus = OtaStatus(),
     val ymusic: YMusicStatus = YMusicStatus(),
     val capabilities: DeviceCapabilities = DeviceCapabilities()

@@ -81,18 +81,20 @@ private fun orbFallbackIcon(orb: YMusicOrb): ImageVector {
     val t = (orb.title + " " + orb.query + " " + orb.id).lowercase()
     return when {
         orb.mode == "likes" || "нравит" in t || "влюблен" in t || "влюблён" in t || "романт" in t || "love" in t -> Icons.Rounded.Favorite
-        "радост" in t || "весёл" in t || "весел" in t || "happy" in t -> Icons.Rounded.SentimentVerySatisfied
-        "электрон" in t || "techno" in t || "house" in t || "edm" in t || "брейк" in t || "dnb" in t -> Icons.Rounded.ElectricBolt
-        "вечерин" in t || "party" in t || "танц" in t -> Icons.Rounded.Celebration
+        "радост" in t || "весёл" in t || "весел" in t || "happy" in t -> Icons.Rounded.WbSunny
+        "электрон" in t || "techno" in t || "house" in t || "edm" in t || "брейк" in t || "dnb" in t -> Icons.Rounded.Bolt
+        "вечерин" in t || "party" in t || "танц" in t -> Icons.Rounded.Nightlife
         "бег" in t || "спорт" in t || "тренир" in t || "workout" in t || "run" in t -> Icons.Rounded.DirectionsRun
-        "спокой" in t || "сон" in t || "чил" in t || "calm" in t || "chill" in t || "relax" in t -> Icons.Rounded.SelfImprovement
-        "рок" in t || "метал" in t || "rock" in t || "metal" in t || "панк" in t -> Icons.Rounded.Whatshot
-        "груст" in t || "печал" in t || "sad" in t -> Icons.Rounded.WaterDrop
+        "спокой" in t || "сон" in t || "чил" in t || "calm" in t || "chill" in t || "relax" in t -> Icons.Rounded.Spa
+        "рок" in t || "метал" in t || "rock" in t || "metal" in t || "панк" in t -> Icons.Rounded.LocalFireDepartment
+        "груст" in t || "печал" in t || "sad" in t -> Icons.Rounded.Cloud
         "бодр" in t || "энерг" in t || "energetic" in t -> Icons.Rounded.FlashOn
         "работ" in t || "фокус" in t || "work" in t || "focus" in t -> Icons.Rounded.Headphones
+        "поп" in t || "pop" in t || "хит" in t -> Icons.Rounded.AutoAwesome
+        "рэп" in t || "хип" in t || "rap" in t || "hip" in t || "фонк" in t -> Icons.Rounded.GraphicEq
         orb.mode == "chart" || "тренд" in t || "чарт" in t -> Icons.Rounded.TrendingUp
         orb.subtitle == "Артист" -> Icons.Rounded.Person
-        else -> Icons.Rounded.MusicNote
+        else -> Icons.Rounded.Album
     }
 }
 
@@ -144,9 +146,11 @@ fun YandexWaveFullScreen(
     onOpenAccountSettings: () -> Unit,
     onOpenBigPlayer: () -> Unit = {},
     onOpenVolumeSheet: () -> Unit = {},
+    onOpenEqualizer: () -> Unit = {},
     volume: Float = 50f,
     mute: Boolean = false,
-    swipeEnabled: Boolean = true
+    canSwipeNext: Boolean = true,
+    canSwipePrev: Boolean = true
 ) {
     var searchOpen by remember { mutableStateOf(false) }
     var searchQuery by remember { mutableStateOf("") }
@@ -198,7 +202,7 @@ fun YandexWaveFullScreen(
             audioBeat = ymusic.audioBeat,
             modifier = Modifier
                 .fillMaxWidth()
-                .fillMaxHeight(0.84f)
+                .fillMaxHeight(0.92f)
                 .align(Alignment.TopCenter)
         )
 
@@ -496,6 +500,9 @@ fun YandexWaveFullScreen(
                     }
 
                     Row(verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(onClick = onOpenEqualizer) {
+                            Icon(Icons.Rounded.Equalizer, contentDescription = "Эквалайзер", tint = Color.White, modifier = Modifier.size(24.dp))
+                        }
                         IconButton(onClick = onOpenVolumeSheet) {
                             Icon(if (mute || volume.toInt() == 0) Icons.Rounded.VolumeOff else Icons.Rounded.VolumeUp, contentDescription = "Громкость колонки", tint = if (mute || volume.toInt() == 0) Color(0xFFFF5C8A) else Color.White, modifier = Modifier.size(24.dp))
                         }
@@ -682,7 +689,8 @@ fun YandexWaveFullScreen(
                             trackKey = ymusic.trackId,
                             onSwipeNext = { onControl("next") },
                             onSwipePrev = { onControl("prev") },
-                            swipeEnabled = swipeEnabled,
+                            canSwipeNext = canSwipeNext,
+                            canSwipePrev = canSwipePrev,
                             modifier = Modifier.fillMaxWidth(0.92f),
                             currentCard = {
                                 WavePillCard(ymusic.title, ymusic.artist, ymusic.coverUrl, ymusic.liked, interactive = true)
@@ -707,25 +715,94 @@ fun YandexWaveFullScreen(
                             }
                         )
 
-                        // AI Caption line (like screenshot: "✨ AI  ...")
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
+                        // Quick Yandex Music Actions: Liked Tracks, My Wave, Chart, Equalizer
+                        LazyRow(
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            modifier = Modifier.padding(horizontal = 16.dp)
+                            contentPadding = PaddingValues(horizontal = 4.dp)
                         ) {
-                            Icon(Icons.Rounded.AutoAwesome, contentDescription = null, tint = Color.White.copy(alpha = 0.85f), modifier = Modifier.size(18.dp))
-                            Text(
-                                when {
-                                    ymusic.album.isNotBlank() -> "Альбом «${ymusic.album}» · играет на колонке AtriOS"
-                                    ymusic.state == "playing" -> "Персональный поток подобран по вашим лайкам"
-                                    else -> "Доступно и с телефона, и голосом на колонке"
-                                },
-                                color = Color.White.copy(alpha = 0.82f),
-                                fontSize = 13.sp,
-                                textAlign = TextAlign.Center,
-                                maxLines = 2,
-                                lineHeight = 17.sp
-                            )
+                            item {
+                                val isLikes = ymusic.mode == "likes"
+                                Surface(
+                                    shape = RoundedCornerShape(99.dp),
+                                    color = if (isLikes) Color(0xFFFF2E7A) else Color(0xB81A1A1F),
+                                    modifier = Modifier
+                                        .border(1.dp, if (isLikes) Color(0xFFFF2E7A) else Color.White.copy(alpha = 0.14f), RoundedCornerShape(99.dp))
+                                        .clickable {
+                                            activePreset = "Мне нравится"
+                                            onPlay("likes", null)
+                                        }
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        Icon(Icons.Rounded.Favorite, contentDescription = null, tint = if (isLikes) Color.White else Color(0xFFFF2E7A), modifier = Modifier.size(16.dp))
+                                        Text("Мне нравится", color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                                    }
+                                }
+                            }
+                            item {
+                                val isChart = ymusic.mode == "chart"
+                                Surface(
+                                    shape = RoundedCornerShape(99.dp),
+                                    color = if (isChart) palette.accent else Color(0xB81A1A1F),
+                                    modifier = Modifier
+                                        .border(1.dp, if (isChart) palette.accent else Color.White.copy(alpha = 0.14f), RoundedCornerShape(99.dp))
+                                        .clickable {
+                                            activePreset = "Чарт"
+                                            onPlay("chart", null)
+                                        }
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        Icon(Icons.Rounded.TrendingUp, contentDescription = null, tint = if (isChart) palette.onAccent else palette.accent, modifier = Modifier.size(16.dp))
+                                        Text("Чарт", color = if (isChart) palette.onAccent else Color.White, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                                    }
+                                }
+                            }
+                            item {
+                                Surface(
+                                    shape = RoundedCornerShape(99.dp),
+                                    color = Color(0xB81A1A1F),
+                                    modifier = Modifier
+                                        .border(1.dp, Color.White.copy(alpha = 0.14f), RoundedCornerShape(99.dp))
+                                        .clickable {
+                                            activePreset = "Бодрое"
+                                            onPlay("station", "mood:energetic")
+                                        }
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        Icon(Icons.Rounded.FlashOn, contentDescription = null, tint = palette.accent, modifier = Modifier.size(16.dp))
+                                        Text("Бодрое", color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                                    }
+                                }
+                            }
+                            item {
+                                Surface(
+                                    shape = RoundedCornerShape(99.dp),
+                                    color = Color(0xB81A1A1F),
+                                    modifier = Modifier
+                                        .border(1.dp, Color.White.copy(alpha = 0.14f), RoundedCornerShape(99.dp))
+                                        .clickable { onOpenEqualizer() }
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        Icon(Icons.Rounded.Equalizer, contentDescription = null, tint = palette.accent, modifier = Modifier.size(16.dp))
+                                        Text("EQ", color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                                    }
+                                }
+                            }
                         }
                     }
                 }
