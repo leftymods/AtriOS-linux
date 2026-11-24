@@ -46,12 +46,10 @@ jobs:
           umask 077
           printf '%s\n' "$OTA_SIGNING_KEY" > "$RUNNER_TEMP/ota-signing.pem"
           openssl rsa -in "$RUNNER_TEMP/ota-signing.pem" -check -noout >/dev/null
-          mkdir -p "$RUNNER_TEMP/stage/usr/lib/atrios" "$RUNNER_TEMP/stage/usr/bin" "$RUNNER_TEMP/stage/etc" "$RUNNER_TEMP/ota_out"
+          mkdir -p "$RUNNER_TEMP/stage/usr/lib/atrios" "$RUNNER_TEMP/stage/usr/bin" "$RUNNER_TEMP/ota_out"
           install -m 755 "$RUNNER_TEMP/atrios-runtime" "$RUNNER_TEMP/stage/usr/lib/atrios/atrios-runtime"
           install -m 755 "$RUNNER_TEMP/atri-aec" "$RUNNER_TEMP/stage/usr/lib/atrios/atri-aec"
           install -m 755 "$RUNNER_TEMP/atri-mp3dec" "$RUNNER_TEMP/stage/usr/bin/atri-mp3dec"
-          printf '%s\n' "$VER" > "$RUNNER_TEMP/stage/etc/atrios-version"
-          chmod 644 "$RUNNER_TEMP/stage/etc/atrios-version"
 
           python3 - "$VER" "$RUNNER_TEMP/stage" "$RUNNER_TEMP/ota-signing.pem" "$RUNNER_TEMP/ota_out" <<'PY'
           import hashlib, json, os, subprocess, sys, tarfile
