@@ -56,8 +56,20 @@ object DebugLogStore {
     val totalRequests = AtomicInteger(0)
     val errorCount = AtomicInteger(0)
     val retryCount = AtomicInteger(0)
+    @Volatile var lastLatencyMs: Long = 0L
+    @Volatile var avgLatencyMs: Long = 0L
+    private var latencySamples: Long = 0L
     @Volatile var version: Int = 0
     @Volatile var onChanged: (() -> Unit)? = null
+
+    fun recordLatency(ms: Long) {
+        if (ms < 0L) return
+        lastLatencyMs = ms
+        latencySamples++
+        avgLatencyMs = if (latencySamples == 1L) ms else ((avgLatencyMs * 4L + ms) / 5L)
+        version++
+        notifyChangedOnMain()
+    }
 
     private fun notifyChangedOnMain() {
         val cb = onChanged ?: return
@@ -85,6 +97,9 @@ object DebugLogStore {
         totalRequests.set(0)
         errorCount.set(0)
         retryCount.set(0)
+        lastLatencyMs = 0L
+        avgLatencyMs = 0L
+        latencySamples = 0L
         version++
         notifyChangedOnMain()
     }
@@ -374,6 +389,7 @@ class BtControlClient(
             val stream = if (code in 200..299) conn.inputStream else conn.errorStream
             val body = stream?.bufferedReader(Charsets.UTF_8)?.readText().orEmpty()
             val dt = System.currentTimeMillis() - t0
+            DebugLogStore.recordLatency(dt)
             if (code !in 200..299) {
                 val snippet = body.take(160).replace("\n", " ")
                 throw IllegalStateException("HTTP $code (${dt}ms) $snippet")

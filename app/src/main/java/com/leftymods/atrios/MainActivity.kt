@@ -36,8 +36,11 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.*
 import androidx.compose.material3.*
@@ -289,10 +292,13 @@ fun AtriOSApp(
                 if (wantVol >= 0 && s.volume == wantVol) pendingVolRef.set(-1)
                 val lockedVol = (nowMs - lastVolumeDragRef.get() < 1200L) || volEchoStale
                 val lockedEq = nowMs < pendingEqUntilRef.get()
-                val nextYm = if (staleSeq || lockedYm || rejectedOld) {
+                val incomingTrackReady = isTrackTransitioning && !staleSeq && !rejectedOld &&
+                    s.ymusic.trackId.isNotBlank() && !s.ymusic.trackId.startsWith("opt_") && s.ymusic.state != "loading"
+                val nextYm = if (staleSeq || rejectedOld || (lockedYm && !incomingTrackReady)) {
                     status.ymusic
                 } else {
                     if (s.ymusic.seq > lastYmSeqRef.get()) lastYmSeqRef.set(s.ymusic.seq)
+                    if (incomingTrackReady) isTrackTransitioning = false
                     val wantState = pendingPlayStateRef.get()
                     if (wantState != null && nowMs < pendingPlayStateUntilRef.get() && s.ymusic.state != wantState) {
                         s.ymusic.copy(state = wantState)
@@ -458,12 +464,14 @@ fun AtriOSApp(
 
     fun dispatchYMusicControl(action: String) {
         val nowMs = System.currentTimeMillis()
-        // Strict 1-skip-per-burst on forward skip (1150ms cooldown + lock until speaker confirms new track); NEVER block prev!
+        // Guard forward/backward skip against accidental double-triggers while an optimistic transition is in flight
         if (action == "next") {
-            if (isTrackTransitioning || nowMs - lastNextSkipMsRef.get() < 1150L) return
+            if (isTrackTransitioning || nowMs - lastNextSkipMsRef.get() < 500L) return
             lastNextSkipMsRef.set(nowMs)
         }
-        if (action == "prev" && !status.ymusic.canPrev) return
+        if (action == "prev") {
+            if (!status.ymusic.canPrev || isTrackTransitioning) return
+        }
         lastUserActionRef.set(nowMs)
         val cur = status.ymusic
         when (action) {
@@ -482,9 +490,9 @@ fun AtriOSApp(
             "next" -> {
                 isTrackTransitioning = true
                 liveElapsedMs = 0L
-                if (cur.title.isNotBlank()) rejectedOldTitleRef.set(cur.title)
-                if (cur.trackId.isNotBlank() && !cur.trackId.startsWith("opt_")) rejectedOldTrackIdRef.set(cur.trackId)
-                rejectedUntilRef.set(nowMs + 5000L)
+                rejectedOldTitleRef.set(cur.title.ifBlank { null })
+                rejectedOldTrackIdRef.set(cur.trackId.takeIf { it.isNotBlank() && !it.startsWith("opt_") })
+                rejectedUntilRef.set(nowMs + 4500L)
                 if (cur.nextTitle.isNotBlank()) {
                     status = status.copy(
                         ymusic = cur.copy(
@@ -499,21 +507,25 @@ fun AtriOSApp(
                             prevTitle = cur.title,
                             prevArtist = cur.artist,
                             prevCoverUrl = cur.coverUrl,
+                            canPrev = true,
+                            durationMs = 0L,
                             positionMs = 0L
                         )
                     )
                 } else {
-                    status = status.copy(ymusic = cur.copy(state = "loading", positionMs = 0L))
+                    status = status.copy(ymusic = cur.copy(state = "loading", durationMs = 0L, positionMs = 0L))
                 }
             }
             "prev" -> {
+                isTrackTransitioning = true
                 liveElapsedMs = 0L
-                if (cur.title.isNotBlank()) rejectedOldTitleRef.set(cur.title)
-                if (cur.trackId.isNotBlank() && !cur.trackId.startsWith("opt_")) rejectedOldTrackIdRef.set(cur.trackId)
-                rejectedUntilRef.set(nowMs + 5000L)
+                rejectedOldTitleRef.set(cur.title.ifBlank { null })
+                rejectedOldTrackIdRef.set(cur.trackId.takeIf { it.isNotBlank() && !it.startsWith("opt_") })
+                rejectedUntilRef.set(nowMs + 4500L)
                 if (cur.prevTitle.isNotBlank()) {
                     status = status.copy(
                         ymusic = cur.copy(
+                            state = "loading",
                             trackId = "opt_prev_${nowMs}",
                             title = cur.prevTitle,
                             artist = cur.prevArtist,
@@ -521,9 +533,15 @@ fun AtriOSApp(
                             nextTitle = cur.title,
                             nextArtist = cur.artist,
                             nextCoverUrl = cur.coverUrl,
+                            prevTitle = "",
+                            prevArtist = "",
+                            prevCoverUrl = "",
+                            durationMs = 0L,
                             positionMs = 0L
                         )
                     )
+                } else {
+                    status = status.copy(ymusic = cur.copy(state = "loading", durationMs = 0L, positionMs = 0L))
                 }
             }
         }
@@ -545,10 +563,11 @@ fun AtriOSApp(
     }
 
     // System Back gesture navigates cleanly inside the app instead of closing it!
-    BackHandler(enabled = connected && (showBigPlayer || showVolumeSheet || settingsPage != SettingsPage.ROOT || selectedTab != AppTab.WAVE)) {
+    BackHandler(enabled = connected && (showBigPlayer || showVolumeSheet || showEqSheet || settingsPage != SettingsPage.ROOT || selectedTab != AppTab.WAVE)) {
         when {
-            showBigPlayer -> showBigPlayer = false
+            showEqSheet -> showEqSheet = false
             showVolumeSheet -> showVolumeSheet = false
+            showBigPlayer -> showBigPlayer = false
             selectedTab == AppTab.SETTINGS && settingsPage != SettingsPage.ROOT -> settingsPage = SettingsPage.ROOT
             selectedTab != AppTab.WAVE -> selectedTab = AppTab.WAVE
         }
@@ -796,8 +815,8 @@ fun AtriOSApp(
                                 trackKey = ym.trackId,
                                 onSwipeNext = { dispatchYMusicControl("next") },
                                 onSwipePrev = { dispatchYMusicControl("prev") },
-                                canSwipeNext = !isTrackTransitioning && status.ymusic.state != "loading",
-                                canSwipePrev = status.ymusic.canPrev,
+                                canSwipeNext = !isTrackTransitioning && status.ymusic.state != "loading" && status.ymusic.canNext,
+                                canSwipePrev = status.ymusic.canPrev && !isTrackTransitioning,
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .padding(horizontal = 16.dp, vertical = 6.dp),
@@ -949,8 +968,8 @@ fun AtriOSApp(
                                 onOpenEqualizer = { showEqSheet = true },
                                 volume = sliderVol,
                                 mute = status.mute,
-                                canSwipeNext = !isTrackTransitioning && status.ymusic.state != "loading",
-                                canSwipePrev = status.ymusic.canPrev
+                                canSwipeNext = !isTrackTransitioning && status.ymusic.state != "loading" && status.ymusic.canNext,
+                                canSwipePrev = status.ymusic.canPrev && !isTrackTransitioning
                             )
                         }
                         AppTab.COLLECTION -> {
@@ -1009,6 +1028,9 @@ fun AtriOSApp(
                         }
 
                         AppTab.SETTINGS -> {
+                            BackHandler(enabled = settingsPage != SettingsPage.ROOT && !showBigPlayer && !showVolumeSheet && !showEqSheet) {
+                                settingsPage = SettingsPage.ROOT
+                            }
                             AnimatedContent(
                                 targetState = settingsPage,
                                 transitionSpec = {
@@ -1027,66 +1049,117 @@ fun AtriOSApp(
                             ) { curPage ->
                             LazyColumn(
                                 modifier = Modifier.fillMaxSize().statusBarsPadding().padding(horizontal = 16.dp),
-                                verticalArrangement = Arrangement.spacedBy(12.dp),
-                                contentPadding = PaddingValues(vertical = 14.dp)
+                                verticalArrangement = Arrangement.spacedBy(10.dp),
+                                contentPadding = PaddingValues(top = 12.dp, bottom = 100.dp)
                             ) {
                                 if (curPage == SettingsPage.ROOT) {
                                     item {
+                                        val transportLabel = if (client.isRelayActive()) "TLS Relay" else "Bluetooth SPP"
                                         Row(
-                                            modifier = Modifier.fillMaxWidth(),
+                                            modifier = Modifier.fillMaxWidth().padding(bottom = 2.dp),
                                             horizontalArrangement = Arrangement.SpaceBetween,
                                             verticalAlignment = Alignment.CenterVertically
                                         ) {
-                                            Column {
+                                            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                                                 Text("Настройки", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 26.sp)
-                                                Text("${status.model} · $connText", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
+                                                Row(
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                                ) {
+                                                    Surface(
+                                                        shape = RoundedCornerShape(99.dp),
+                                                        color = palette.accent.copy(alpha = 0.16f)
+                                                    ) {
+                                                        Text(
+                                                            transportLabel,
+                                                            color = palette.accent,
+                                                            fontSize = 11.sp,
+                                                            fontWeight = FontWeight.SemiBold,
+                                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                                                        )
+                                                    }
+                                                    Text(
+                                                        "${status.model}${if (status.fwVersion.isNotBlank()) " · v${status.fwVersion}" else ""}",
+                                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                        fontSize = 12.sp
+                                                    )
+                                                }
                                             }
                                             IconButton(
                                                 onClick = { client.disconnect(); autoConnectState = "manual" },
                                                 modifier = Modifier.size(38.dp).clip(CircleShape).background(OledCard)
                                             ) {
-                                                Icon(Icons.Rounded.PowerSettingsNew, contentDescription = "Отключить", tint = Color.White, modifier = Modifier.size(19.dp))
+                                                Icon(Icons.Rounded.LinkOff, contentDescription = "Отключить колонку", tint = Color.White, modifier = Modifier.size(19.dp))
                                             }
                                         }
                                     }
-                                    val menuPages = listOf(
-                                        SettingsPage.ACCOUNT,
-                                        SettingsPage.WIFI,
-                                        SettingsPage.BLUETOOTH,
-                                        SettingsPage.PALETTE,
-                                        SettingsPage.TIME,
-                                        SettingsPage.ABOUT,
-                                        SettingsPage.DEBUG
+                                    val curAppVer = AppUpdater.currentVersionName(context)
+                                    val sections = listOf(
+                                        "Подключение и аккаунт" to listOf(
+                                            SettingsPage.ACCOUNT to if (status.ymusic.loggedIn) status.ymusic.displayName.ifBlank { status.ymusic.login.ifBlank { "Подключён" } } else "Не выполнен вход",
+                                            SettingsPage.WIFI to if (status.wifiConnected) "${status.wifiSsid.ifBlank { "Wi-Fi OK" }} (${status.wifiIp})" else "Wi-Fi не подключён",
+                                            SettingsPage.BLUETOOTH to "${if (status.btSpeakerMode) "BT-колонка вкл." else "BT-колонка выкл."} · ${if (status.btHidden) "Скрыта" else "Видима"}"
+                                        ),
+                                        "Интерфейс и время" to listOf(
+                                            SettingsPage.PALETTE to palette.label,
+                                            SettingsPage.TIME to status.timezone.ifBlank { "UTC" }
+                                        ),
+                                        "Система и диагностика" to listOf(
+                                            SettingsPage.ABOUT to "Прошивка v${status.fwVersion.ifBlank { "—" }} · App v$curAppVer",
+                                            SettingsPage.DEBUG to "Логи (${DebugLogStore.errorCount.get()} ош.), VQE, E2EE, ИИ"
+                                        )
                                     )
-                                    items(menuPages.size) { idx ->
-                                        val page = menuPages[idx]
-                                        Surface(
-                                            shape = RoundedCornerShape(TypeUI.RadiusMd),
-                                            color = TypeUI.SurfaceElevated,
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .border(1.dp, TypeUI.Hairline, RoundedCornerShape(TypeUI.RadiusMd))
-                                                .clickable {
-                                                    settingsPage = page
-                                                    if (page == SettingsPage.ABOUT) client.otaStatus()
-                                                }
-                                        ) {
-                                            Row(
-                                                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 15.dp),
-                                                verticalAlignment = Alignment.CenterVertically,
-                                                horizontalArrangement = Arrangement.spacedBy(14.dp)
+                                    sections.forEach { (sectionTitle, entries) ->
+                                        item {
+                                            Text(
+                                                sectionTitle,
+                                                color = palette.accent,
+                                                fontWeight = FontWeight.SemiBold,
+                                                fontSize = 12.sp,
+                                                modifier = Modifier.padding(start = 4.dp, top = 4.dp)
+                                            )
+                                        }
+                                        item {
+                                            Surface(
+                                                shape = RoundedCornerShape(TypeUI.RadiusMd),
+                                                color = TypeUI.SurfaceElevated,
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .border(1.dp, TypeUI.Hairline, RoundedCornerShape(TypeUI.RadiusMd))
                                             ) {
-                                                Box(
-                                                    modifier = Modifier.size(40.dp).clip(CircleShape).background(palette.accent.copy(alpha = 0.14f)),
-                                                    contentAlignment = Alignment.Center
-                                                ) {
-                                                    Icon(page.icon, contentDescription = null, tint = palette.accent, modifier = Modifier.size(22.dp))
+                                                Column(modifier = Modifier.fillMaxWidth()) {
+                                                    entries.forEachIndexed { idx, (page, dynamicSub) ->
+                                                        if (idx > 0) {
+                                                            HorizontalDivider(
+                                                                color = TypeUI.Hairline,
+                                                                modifier = Modifier.padding(start = 62.dp)
+                                                            )
+                                                        }
+                                                        Row(
+                                                            modifier = Modifier
+                                                                .fillMaxWidth()
+                                                                .clickable {
+                                                                    settingsPage = page
+                                                                    if (page == SettingsPage.ABOUT) client.otaStatus()
+                                                                }
+                                                                .padding(horizontal = 14.dp, vertical = 12.dp),
+                                                            verticalAlignment = Alignment.CenterVertically,
+                                                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                                                        ) {
+                                                            Box(
+                                                                modifier = Modifier.size(36.dp).clip(CircleShape).background(palette.accent.copy(alpha = 0.14f)),
+                                                                contentAlignment = Alignment.Center
+                                                            ) {
+                                                                Icon(page.icon, contentDescription = null, tint = palette.accent, modifier = Modifier.size(20.dp))
+                                                            }
+                                                            Column(modifier = Modifier.weight(1f)) {
+                                                                Text(page.title, color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                                                                Text(dynamicSub, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                                            }
+                                                            Icon(Icons.Rounded.ChevronRight, contentDescription = null, tint = Color(0xFF6B6B75), modifier = Modifier.size(20.dp))
+                                                        }
+                                                    }
                                                 }
-                                                Column(modifier = Modifier.weight(1f)) {
-                                                    Text(page.title, color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
-                                                    Text(page.subtitle, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                                }
-                                                Icon(Icons.Rounded.ChevronRight, contentDescription = null, tint = Color(0xFF6B6B75))
                                             }
                                         }
                                     }
@@ -1319,259 +1392,329 @@ fun AtriOSApp(
                                         }
                                         SettingsPage.DEBUG -> {
                                             item {
-                                                AiAssistantCard(
-                                                    ai = status.ai,
-                                                    onApplyAi = { enabled, mode, server, wake, voice, emotion ->
-                                                        client.setAi(enabled = enabled, mode = mode, server = server, wakeWord = wake, ttsVoice = voice, ttsEmotion = emotion)
-                                                    }
-                                                )
-                                            }
-                                            item {
-                                                LedAndScreenCard(
-                                                    capabilities = status.capabilities,
-                                                    currentScreenMode = status.screenMode,
-                                                    currentRingMode = status.ringMode,
-                                                    onSetScreen = { mode, st, txt -> client.setScreen(mode, st, txt) },
-                                                    onSetRing = { mode -> status = status.copy(ringMode = mode); client.setRing(mode) }
-                                                )
-                                            }
-                                            item {
-                                                Surface(
-                                                    shape = RoundedCornerShape(TypeUI.RadiusLg),
-                                                    color = TypeUI.SurfaceElevated,
-                                                    modifier = Modifier.border(1.dp, TypeUI.Hairline, RoundedCornerShape(TypeUI.RadiusLg))
-                                                ) {
-                                                    Row(
-                                                        modifier = Modifier.fillMaxWidth().padding(18.dp),
-                                                        horizontalArrangement = Arrangement.SpaceBetween,
-                                                        verticalAlignment = Alignment.CenterVertically
-                                                    ) {
-                                                        Column(modifier = Modifier.weight(1f)) {
-                                                            Text("Тест динамиков", color = Color.White, fontWeight = FontWeight.SemiBold)
-                                                            Text("Проверка аудиовыхода колонки", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                                        }
-                                                        FilledTonalButton(onClick = { client.audioTest() }, shape = RoundedCornerShape(TypeUI.RadiusPill)) {
-                                                            Icon(Icons.Rounded.GraphicEq, contentDescription = null, modifier = Modifier.size(18.dp))
-                                                            Spacer(Modifier.width(6.dp))
-                                                            Text("Тест")
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            item {
-                                                // Live VQE / STFT-AEC & Barge-In Telemetry Card (ERLE, SNR, Echo Lag, Active Mic)
-                                                Surface(
-                                                    shape = RoundedCornerShape(TypeUI.RadiusLg),
-                                                    color = TypeUI.SurfaceElevated,
-                                                    modifier = Modifier.border(1.dp, TypeUI.Hairline, RoundedCornerShape(TypeUI.RadiusLg))
-                                                ) {
-                                                    Column(
-                                                        modifier = Modifier.fillMaxWidth().padding(18.dp),
-                                                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                                                    ) {
-                                                        Row(
-                                                            modifier = Modifier.fillMaxWidth(),
-                                                            horizontalArrangement = Arrangement.SpaceBetween,
-                                                            verticalAlignment = Alignment.CenterVertically
-                                                        ) {
-                                                            Text("VQE · STFT-AEC & Barge-In", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 15.sp)
-                                                            Text(
-                                                                if (status.vqe.refActive) "Loopback OK" else "Ожидание",
-                                                                color = if (status.vqe.refActive) palette.accent else Color(0xFF7A7A86),
-                                                                fontSize = 12.sp,
-                                                                fontWeight = FontWeight.SemiBold
-                                                            )
-                                                        }
-                                                        InfoRow("Подавление эха (ERLE)", "%.1f дБ".format(status.vqe.erleDb))
-                                                        InfoRow("Речевой SNR (300–3400 Гц)", "%.1f дБ".format(status.vqe.snrDb))
-                                                        InfoRow("Задержка тракта", "${status.vqe.lagMs} мс")
-                                                        InfoRow("Активный микрофон", "MIC #${status.vqe.bestMic} (из 7)")
-                                                        InfoRow("Перебивание (Barge-In)", if (status.vqe.bargeIn) "Активно (речь)" else "Готово")
-                                                    }
-                                                }
-                                            }
-                                            item {
-                                                // End-to-End Encrypted (X25519 + ChaCha20 + HMAC-SHA256) Station Terminal
-                                                Surface(
-                                                    shape = RoundedCornerShape(TypeUI.RadiusLg),
-                                                    color = TypeUI.SurfaceElevated,
-                                                    modifier = Modifier.border(1.dp, TypeUI.Hairline, RoundedCornerShape(TypeUI.RadiusLg))
-                                                ) {
-                                                    Column(
-                                                        modifier = Modifier.fillMaxWidth().padding(16.dp),
-                                                        verticalArrangement = Arrangement.spacedBy(10.dp)
-                                                    ) {
-                                                        Row(
-                                                            modifier = Modifier.fillMaxWidth(),
-                                                            horizontalArrangement = Arrangement.SpaceBetween,
-                                                            verticalAlignment = Alignment.CenterVertically
-                                                        ) {
-                                                            Column(modifier = Modifier.weight(1f)) {
-                                                                Text("Терминал станции (E2EE)", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 15.sp)
-                                                                Text(
-                                                                    termE2eeStatus,
-                                                                    color = if (termE2eeReady) Color(0xFF69F0AE) else Color(0xFF9A9AA6),
-                                                                    fontSize = 11.sp
-                                                                )
-                                                            }
-                                                            FilledTonalButton(
-                                                                onClick = { client.termE2eeInit() },
-                                                                shape = RoundedCornerShape(99.dp),
-                                                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
-                                                            ) {
-                                                                Icon(Icons.Rounded.Lock, contentDescription = null, modifier = Modifier.size(15.dp))
-                                                                Spacer(Modifier.width(4.dp))
-                                                                Text(if (termE2eeReady) "Переключ." else "Подключить", fontSize = 12.sp)
-                                                            }
-                                                        }
-                                                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
-                                                            listOf("uptime", "free -m", "uname -a", "ps | head -n 12").forEach { qc ->
-                                                                Surface(
-                                                                    shape = RoundedCornerShape(99.dp),
-                                                                    color = OledCard,
-                                                                    modifier = Modifier
-                                                                        .border(1.dp, Color(0xFF33333A), RoundedCornerShape(99.dp))
-                                                                        .clickable {
-                                                                            termOutputLog = (termOutputLog + "\n$ $qc").trim()
-                                                                            client.termE2eeExec(qc)
-                                                                        }
-                                                                ) {
-                                                                    Text(qc.substringBefore(" "), color = Color(0xFFD0D0DC), fontSize = 11.sp, modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp))
-                                                                }
-                                                            }
-                                                        }
-                                                        Row(
-                                                            verticalAlignment = Alignment.CenterVertically,
-                                                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                                            modifier = Modifier.fillMaxWidth()
-                                                        ) {
-                                                            OutlinedTextField(
-                                                                value = termCmdInput,
-                                                                onValueChange = { termCmdInput = it },
-                                                                placeholder = { Text("sh команда (шифруется E2EE)...", fontSize = 12.sp) },
-                                                                singleLine = true,
-                                                                modifier = Modifier.weight(1f),
-                                                                shape = RoundedCornerShape(12.dp)
-                                                            )
-                                                            IconButton(
-                                                                onClick = {
-                                                                    val cmd = termCmdInput.trim()
-                                                                    if (cmd.isNotEmpty()) {
-                                                                        termOutputLog = (termOutputLog + "\n$ $cmd").trim()
-                                                                        client.termE2eeExec(cmd)
-                                                                        termCmdInput = ""
-                                                                    }
-                                                                },
-                                                                modifier = Modifier.size(44.dp).clip(CircleShape).background(palette.accent)
-                                                            ) {
-                                                                Icon(Icons.Rounded.PlayArrow, contentDescription = "Выполнить", tint = palette.onAccent)
-                                                            }
-                                                        }
-                                                        if (termOutputLog.isNotBlank()) {
-                                                            Column(
-                                                                modifier = Modifier
-                                                                    .fillMaxWidth()
-                                                                    .clip(RoundedCornerShape(10.dp))
-                                                                    .background(Color(0xFF070A08))
-                                                                    .padding(10.dp)
-                                                            ) {
-                                                                Text(
-                                                                    termOutputLog,
-                                                                    color = Color(0xFF7CFF9E),
-                                                                    fontSize = 11.sp,
-                                                                    lineHeight = 14.sp,
-                                                                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
-                                                                )
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            item {
-                                                // Detailed Live Network / Relay / Error Diagnostic Logs Card
+                                                var debugSection by remember { mutableStateOf("ALL") }
+                                                var logFilter by remember { mutableStateOf("ALL") }
                                                 val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
                                                 var logRev by remember { mutableIntStateOf(DebugLogStore.version) }
                                                 DisposableEffect(Unit) {
                                                     DebugLogStore.onChanged = { logRev = DebugLogStore.version }
                                                     onDispose { DebugLogStore.onChanged = null }
                                                 }
-                                                val snapshot = remember(logRev) { DebugLogStore.entries.take(60) }
-                                                Surface(
-                                                    shape = RoundedCornerShape(TypeUI.RadiusLg),
-                                                    color = TypeUI.SurfaceElevated,
-                                                    modifier = Modifier.border(1.dp, TypeUI.Hairline, RoundedCornerShape(TypeUI.RadiusLg))
-                                                ) {
-                                                    Column(
-                                                        modifier = Modifier.fillMaxWidth().padding(16.dp),
-                                                        verticalArrangement = Arrangement.spacedBy(10.dp)
-                                                    ) {
-                                                        Row(
-                                                            modifier = Modifier.fillMaxWidth(),
-                                                            horizontalArrangement = Arrangement.SpaceBetween,
-                                                            verticalAlignment = Alignment.CenterVertically
+                                                val filteredLogs = remember(logRev, logFilter) {
+                                                    DebugLogStore.entries.filter { entry ->
+                                                        when (logFilter) {
+                                                            "ERR" -> entry.level == "ERR" || entry.level == "WARN"
+                                                            "RELAY" -> entry.tag == "RELAY" || entry.tag == "OFFLOAD"
+                                                            "BT" -> entry.tag == "BT"
+                                                            "YM" -> entry.tag == "DIRECT_YM" || entry.message.contains("ymusic", ignoreCase = true)
+                                                            "E2EE" -> entry.tag == "E2EE"
+                                                            else -> true
+                                                        }
+                                                    }.take(80)
+                                                }
+
+                                                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                                                    // Section selector pills
+                                                    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                                        val secChips = listOf(
+                                                            "ALL" to "Все",
+                                                            "DIAG" to "Диагностика",
+                                                            "LOGS" to "Логи (${DebugLogStore.entries.size})",
+                                                            "E2EE" to "E2EE",
+                                                            "HW" to "ИИ и LED"
+                                                        )
+                                                        items(secChips.size) { i ->
+                                                            val (id, label) = secChips[i]
+                                                            FilterChip(
+                                                                selected = debugSection == id,
+                                                                onClick = { debugSection = id },
+                                                                label = { Text(label, fontSize = 12.sp) }
+                                                            )
+                                                        }
+                                                    }
+
+                                                    // 1. TOP: Live Connection & Hardware Diagnostics
+                                                    if (debugSection == "ALL" || debugSection == "DIAG") {
+                                                        Surface(
+                                                            shape = RoundedCornerShape(TypeUI.RadiusLg),
+                                                            color = TypeUI.SurfaceElevated,
+                                                            modifier = Modifier.border(1.dp, TypeUI.Hairline, RoundedCornerShape(TypeUI.RadiusLg))
                                                         ) {
-                                                            Column {
-                                                                Text("Логи диагностики", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 15.sp)
-                                                                Text(
-                                                                    "Запросов: ${DebugLogStore.totalRequests.get()} · Повторов: ${DebugLogStore.retryCount.get()} · Ошибок: ${DebugLogStore.errorCount.get()}",
-                                                                    color = Color(0xFF9A9AA6),
-                                                                    fontSize = 11.sp
-                                                                )
-                                                            }
-                                                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                                                IconButton(
-                                                                    onClick = {
-                                                                        clipboard.setText(androidx.compose.ui.text.AnnotatedString(DebugLogStore.dumpText()))
-                                                                        scope.launch { snackbarHostState.showSnackbar("Логи скопированы") }
-                                                                    },
-                                                                    modifier = Modifier.size(34.dp).clip(CircleShape).background(OledCard)
+                                                            Column(
+                                                                modifier = Modifier.fillMaxWidth().padding(16.dp),
+                                                                verticalArrangement = Arrangement.spacedBy(7.dp)
+                                                            ) {
+                                                                Row(
+                                                                    modifier = Modifier.fillMaxWidth(),
+                                                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                                                    verticalAlignment = Alignment.CenterVertically
                                                                 ) {
-                                                                    Icon(Icons.Rounded.ContentCopy, contentDescription = "Копировать", tint = Color.White, modifier = Modifier.size(16.dp))
+                                                                    Text("Соединение и телеметрия", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                                                                    Surface(
+                                                                        shape = RoundedCornerShape(99.dp),
+                                                                        color = palette.accent.copy(alpha = 0.16f)
+                                                                    ) {
+                                                                        Text(
+                                                                            if (client.isRelayActive()) "TLS Relay" else "BT RFCOMM",
+                                                                            color = palette.accent,
+                                                                            fontSize = 11.sp,
+                                                                            fontWeight = FontWeight.SemiBold,
+                                                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                                                                        )
+                                                                    }
                                                                 }
-                                                                IconButton(
-                                                                    onClick = { DebugLogStore.clear() },
-                                                                    modifier = Modifier.size(34.dp).clip(CircleShape).background(OledCard)
+                                                                InfoRow("Задержка (RTT)", "${DebugLogStore.lastLatencyMs} мс (ср. ${DebugLogStore.avgLatencyMs} мс)")
+                                                                InfoRow("Запросы / Повторы / Ош.", "${DebugLogStore.totalRequests.get()} / ${DebugLogStore.retryCount.get()} / ${DebugLogStore.errorCount.get()}")
+                                                                InfoRow("Кэш Яндекс Музыки", "Сфер: ${ymOrbs.size} · Коллекция: ${if (ymCollection.loaded) "${ymCollection.likesCount} л." else "—"}")
+                                                                InfoRow("VQE / AEC", if (status.vqe.refActive) "ERLE %.1f дБ · SNR %.1f дБ · MIC #%d".format(status.vqe.erleDb, status.vqe.snrDb, status.vqe.bestMic) else "Ожидание loopback")
+                                                                InfoRow("Задержка VQE / Barge-In", "${status.vqe.lagMs} мс · ${if (status.vqe.bargeIn) "Речь" else "Готово"}")
+                                                            }
+                                                        }
+                                                        TelemetryCard(status = status)
+                                                    }
+
+                                                    // 2. Filterable Bounded Diagnostic Logs
+                                                    if (debugSection == "ALL" || debugSection == "LOGS") {
+                                                        Surface(
+                                                            shape = RoundedCornerShape(TypeUI.RadiusLg),
+                                                            color = TypeUI.SurfaceElevated,
+                                                            modifier = Modifier.border(1.dp, TypeUI.Hairline, RoundedCornerShape(TypeUI.RadiusLg))
+                                                        ) {
+                                                            Column(
+                                                                modifier = Modifier.fillMaxWidth().padding(16.dp),
+                                                                verticalArrangement = Arrangement.spacedBy(10.dp)
+                                                            ) {
+                                                                Row(
+                                                                    modifier = Modifier.fillMaxWidth(),
+                                                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                                                    verticalAlignment = Alignment.CenterVertically
                                                                 ) {
-                                                                    Icon(Icons.Rounded.DeleteOutline, contentDescription = "Очистить", tint = Color(0xFFFF6B81), modifier = Modifier.size(16.dp))
+                                                                    Column {
+                                                                        Text("Логи диагностики", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                                                                        Text(
+                                                                            "Показано: ${filteredLogs.size} из ${DebugLogStore.entries.size}",
+                                                                            color = Color(0xFF9A9AA6),
+                                                                            fontSize = 11.sp
+                                                                        )
+                                                                    }
+                                                                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                                                        IconButton(
+                                                                            onClick = {
+                                                                                clipboard.setText(androidx.compose.ui.text.AnnotatedString(DebugLogStore.dumpText()))
+                                                                                scope.launch { snackbarHostState.showSnackbar("Логи скопированы") }
+                                                                            },
+                                                                            modifier = Modifier.size(34.dp).clip(CircleShape).background(OledCard)
+                                                                        ) {
+                                                                            Icon(Icons.Rounded.ContentCopy, contentDescription = "Копировать", tint = Color.White, modifier = Modifier.size(16.dp))
+                                                                        }
+                                                                        IconButton(
+                                                                            onClick = { DebugLogStore.clear() },
+                                                                            modifier = Modifier.size(34.dp).clip(CircleShape).background(OledCard)
+                                                                        ) {
+                                                                            Icon(Icons.Rounded.DeleteOutline, contentDescription = "Очистить", tint = Color(0xFFFF6B81), modifier = Modifier.size(16.dp))
+                                                                        }
+                                                                    }
+                                                                }
+                                                                LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                                                    val filters = listOf("ALL" to "ALL", "ERR" to "ERR/WARN", "RELAY" to "RELAY", "BT" to "BT", "YM" to "YM", "E2EE" to "E2EE")
+                                                                    items(filters.size) { i ->
+                                                                        val (fid, flabel) = filters[i]
+                                                                        FilterChip(
+                                                                            selected = logFilter == fid,
+                                                                            onClick = { logFilter = fid },
+                                                                            label = { Text(flabel, fontSize = 11.sp) }
+                                                                        )
+                                                                    }
+                                                                }
+                                                                if (filteredLogs.isEmpty()) {
+                                                                    Text(
+                                                                        "Нет записей для фильтра «$logFilter».",
+                                                                        color = Color(0xFF7A7A86),
+                                                                        fontSize = 12.sp
+                                                                    )
+                                                                } else {
+                                                                    Column(
+                                                                        modifier = Modifier
+                                                                            .fillMaxWidth()
+                                                                            .heightIn(max = 240.dp)
+                                                                            .clip(RoundedCornerShape(12.dp))
+                                                                            .background(Color(0xFF0A0A0E))
+                                                                            .verticalScroll(rememberScrollState())
+                                                                            .padding(10.dp),
+                                                                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                                                                    ) {
+                                                                        filteredLogs.forEach { entry ->
+                                                                            val col = when (entry.level) {
+                                                                                "ERR" -> Color(0xFFFF5C77)
+                                                                                "WARN" -> Color(0xFFFFC845)
+                                                                                "OK" -> if (entry.tag == "OFFLOAD") Color(0xFF4DD0E1) else Color(0xFF69F0AE)
+                                                                                else -> Color(0xFFB8B8C4)
+                                                                            }
+                                                                            Text(
+                                                                                "${entry.time} [${entry.level}/${entry.tag}] ${entry.message}",
+                                                                                color = col,
+                                                                                fontSize = 11.sp,
+                                                                                lineHeight = 14.sp,
+                                                                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                                                                            )
+                                                                        }
+                                                                    }
                                                                 }
                                                             }
                                                         }
-                                                        if (snapshot.isEmpty()) {
-                                                            Text(
-                                                                "Пока нет записей — выполните действие (громкость, трек, коллекция), чтобы увидеть подробный лог с кодами HTTP и задержками.",
-                                                                color = Color(0xFF7A7A86),
-                                                                fontSize = 12.sp
-                                                            )
-                                                        } else {
+                                                    }
+
+                                                    // 3. E2EE Station Terminal
+                                                    if (debugSection == "ALL" || debugSection == "E2EE") {
+                                                        Surface(
+                                                            shape = RoundedCornerShape(TypeUI.RadiusLg),
+                                                            color = TypeUI.SurfaceElevated,
+                                                            modifier = Modifier.border(1.dp, TypeUI.Hairline, RoundedCornerShape(TypeUI.RadiusLg))
+                                                        ) {
                                                             Column(
-                                                                modifier = Modifier
-                                                                    .fillMaxWidth()
-                                                                    .clip(RoundedCornerShape(12.dp))
-                                                                    .background(Color(0xFF0A0A0E))
-                                                                    .padding(10.dp),
-                                                                verticalArrangement = Arrangement.spacedBy(5.dp)
+                                                                modifier = Modifier.fillMaxWidth().padding(16.dp),
+                                                                verticalArrangement = Arrangement.spacedBy(10.dp)
                                                             ) {
-                                                                snapshot.forEach { entry ->
-                                                                    val col = when (entry.level) {
-                                                                        "ERR" -> Color(0xFFFF5C77)
-                                                                        "WARN" -> Color(0xFFFFC845)
-                                                                        "OK" -> if (entry.tag == "OFFLOAD") Color(0xFF4DD0E1) else Color(0xFF69F0AE)
-                                                                        else -> Color(0xFFB8B8C4)
+                                                                Row(
+                                                                    modifier = Modifier.fillMaxWidth(),
+                                                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                                                    verticalAlignment = Alignment.CenterVertically
+                                                                ) {
+                                                                    Column(modifier = Modifier.weight(1f)) {
+                                                                        Text("Терминал станции (E2EE)", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                                                                        Text(
+                                                                            termE2eeStatus,
+                                                                            color = if (termE2eeReady) Color(0xFF69F0AE) else Color(0xFF9A9AA6),
+                                                                            fontSize = 11.sp,
+                                                                            maxLines = 1,
+                                                                            overflow = TextOverflow.Ellipsis
+                                                                        )
                                                                     }
-                                                                    Text(
-                                                                        "${entry.time} [${entry.level}/${entry.tag}] ${entry.message}",
-                                                                        color = col,
-                                                                        fontSize = 11.sp,
-                                                                        lineHeight = 14.sp,
-                                                                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                                                                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                                                                        if (termOutputLog.isNotBlank()) {
+                                                                            IconButton(
+                                                                                onClick = { termOutputLog = "" },
+                                                                                modifier = Modifier.size(32.dp).clip(CircleShape).background(OledCard)
+                                                                            ) {
+                                                                                Icon(Icons.Rounded.DeleteOutline, contentDescription = "Очистить вывод", tint = Color(0xFFFF6B81), modifier = Modifier.size(16.dp))
+                                                                            }
+                                                                        }
+                                                                        FilledTonalButton(
+                                                                            onClick = { client.termE2eeInit() },
+                                                                            shape = RoundedCornerShape(99.dp),
+                                                                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                                                                        ) {
+                                                                            Icon(Icons.Rounded.Lock, contentDescription = null, modifier = Modifier.size(15.dp))
+                                                                            Spacer(Modifier.width(4.dp))
+                                                                            Text(if (termE2eeReady) "Обновить" else "Подключить", fontSize = 12.sp)
+                                                                        }
+                                                                    }
+                                                                }
+                                                                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
+                                                                    listOf("uptime", "free -m", "uname -a", "ps | head -n 12").forEach { qc ->
+                                                                        Surface(
+                                                                            shape = RoundedCornerShape(99.dp),
+                                                                            color = OledCard,
+                                                                            modifier = Modifier
+                                                                                .border(1.dp, Color(0xFF33333A), RoundedCornerShape(99.dp))
+                                                                                .clickable {
+                                                                                    termOutputLog = (termOutputLog + "\n$ $qc").trim()
+                                                                                    client.termE2eeExec(qc)
+                                                                                }
+                                                                        ) {
+                                                                            Text(qc.substringBefore(" "), color = Color(0xFFD0D0DC), fontSize = 11.sp, modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp))
+                                                                        }
+                                                                    }
+                                                                }
+                                                                Row(
+                                                                    verticalAlignment = Alignment.CenterVertically,
+                                                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                                                    modifier = Modifier.fillMaxWidth()
+                                                                ) {
+                                                                    OutlinedTextField(
+                                                                        value = termCmdInput,
+                                                                        onValueChange = { termCmdInput = it },
+                                                                        placeholder = { Text("sh команда (шифруется E2EE)...", fontSize = 12.sp) },
+                                                                        singleLine = true,
+                                                                        modifier = Modifier.weight(1f),
+                                                                        shape = RoundedCornerShape(12.dp)
                                                                     )
+                                                                    IconButton(
+                                                                        onClick = {
+                                                                            val cmd = termCmdInput.trim()
+                                                                            if (cmd.isNotEmpty()) {
+                                                                                termOutputLog = (termOutputLog + "\n$ $cmd").trim()
+                                                                                client.termE2eeExec(cmd)
+                                                                                termCmdInput = ""
+                                                                            }
+                                                                        },
+                                                                        modifier = Modifier.size(44.dp).clip(CircleShape).background(palette.accent)
+                                                                    ) {
+                                                                        Icon(Icons.Rounded.PlayArrow, contentDescription = "Выполнить", tint = palette.onAccent)
+                                                                    }
+                                                                }
+                                                                if (termOutputLog.isNotBlank()) {
+                                                                    Column(
+                                                                        modifier = Modifier
+                                                                            .fillMaxWidth()
+                                                                            .heightIn(max = 200.dp)
+                                                                            .clip(RoundedCornerShape(10.dp))
+                                                                            .background(Color(0xFF070A08))
+                                                                            .verticalScroll(rememberScrollState())
+                                                                            .padding(10.dp)
+                                                                    ) {
+                                                                        Text(
+                                                                            termOutputLog,
+                                                                            color = Color(0xFF7CFF9E),
+                                                                            fontSize = 11.sp,
+                                                                            lineHeight = 14.sp,
+                                                                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                                                                        )
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+
+                                                    // 4. AI / Qwen3-TTS, LED Ring/Matrix & Audio Test
+                                                    if (debugSection == "ALL" || debugSection == "HW") {
+                                                        AiAssistantCard(
+                                                            ai = status.ai,
+                                                            onApplyAi = { enabled, mode, server, wake, voice, emotion ->
+                                                                client.setAi(enabled = enabled, mode = mode, server = server, wakeWord = wake, ttsVoice = voice, ttsEmotion = emotion)
+                                                            }
+                                                        )
+                                                        LedAndScreenCard(
+                                                            capabilities = status.capabilities,
+                                                            currentScreenMode = status.screenMode,
+                                                            currentRingMode = status.ringMode,
+                                                            onSetScreen = { mode, st, txt -> client.setScreen(mode, st, txt) },
+                                                            onSetRing = { mode -> status = status.copy(ringMode = mode); client.setRing(mode) }
+                                                        )
+                                                        Surface(
+                                                            shape = RoundedCornerShape(TypeUI.RadiusLg),
+                                                            color = TypeUI.SurfaceElevated,
+                                                            modifier = Modifier.border(1.dp, TypeUI.Hairline, RoundedCornerShape(TypeUI.RadiusLg))
+                                                        ) {
+                                                            Row(
+                                                                modifier = Modifier.fillMaxWidth().padding(18.dp),
+                                                                horizontalArrangement = Arrangement.SpaceBetween,
+                                                                verticalAlignment = Alignment.CenterVertically
+                                                            ) {
+                                                                Column(modifier = Modifier.weight(1f)) {
+                                                                    Text("Тест динамиков", color = Color.White, fontWeight = FontWeight.SemiBold)
+                                                                    Text("Проверка аудиовыхода колонки", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                                                }
+                                                                FilledTonalButton(onClick = { client.audioTest() }, shape = RoundedCornerShape(TypeUI.RadiusPill)) {
+                                                                    Icon(Icons.Rounded.GraphicEq, contentDescription = null, modifier = Modifier.size(18.dp))
+                                                                    Spacer(Modifier.width(6.dp))
+                                                                    Text("Тест")
                                                                 }
                                                             }
                                                         }
                                                     }
                                                 }
                                             }
-                                            item { TelemetryCard(status = status) }
                                         }
                                         SettingsPage.ROOT -> Unit
                                     }
@@ -1660,8 +1803,8 @@ fun AtriOSApp(
                     onPlayWave = { dispatchYMusicPlay("wave", null) },
                     onDismiss = { showBigPlayer = false },
                     onOpenEqualizer = { showEqSheet = true },
-                    canSwipeNext = !isTrackTransitioning && status.ymusic.state != "loading",
-                    canSwipePrev = status.ymusic.canPrev
+                    canSwipeNext = !isTrackTransitioning && status.ymusic.state != "loading" && status.ymusic.canNext,
+                    canSwipePrev = status.ymusic.canPrev && !isTrackTransitioning
                 )
             }
         }

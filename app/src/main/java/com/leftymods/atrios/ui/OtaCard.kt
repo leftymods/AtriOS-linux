@@ -141,8 +141,15 @@ fun OtaUpdateCard(
                     )
                 }
             } else if (ota.message.isNotBlank()) {
+                val localizedMsg = when {
+                    ota.message.equals("AtriOS is up to date", ignoreCase = true) ||
+                        ota.message.equals("Up to date", ignoreCase = true) -> "Установлена актуальная прошивка"
+                    ota.message.equals("Update check started", ignoreCase = true) -> "Проверка обновлений…"
+                    ota.message.equals("OTA update started", ignoreCase = true) -> "Запуск обновления прошивки…"
+                    else -> ota.message
+                }
                 Text(
-                    ota.message,
+                    localizedMsg,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )

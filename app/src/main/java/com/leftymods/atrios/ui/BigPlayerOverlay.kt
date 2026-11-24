@@ -95,17 +95,24 @@ fun BigPlayerOverlay(
 
     var showVolumeRow by remember { mutableStateOf(false) }
     var elapsedSec by remember(ymusic.trackId) { mutableIntStateOf((ymusic.positionMs / 1000L).toInt().coerceAtLeast(0)) }
-    LaunchedEffect(ymusic.positionMs) {
+    LaunchedEffect(ymusic.positionMs, ymusic.state) {
+        if (ymusic.state == "loading") {
+            elapsedSec = 0
+            return@LaunchedEffect
+        }
         val srvSec = (ymusic.positionMs / 1000L).toInt().coerceAtLeast(0)
-        if (kotlin.math.abs(srvSec - elapsedSec) >= 2) {
+        if (srvSec == 0 && elapsedSec > 0) {
+            elapsedSec = 0
+        } else if (kotlin.math.abs(srvSec - elapsedSec) >= 2) {
             elapsedSec = srvSec
         }
     }
     var coverDir by remember { mutableIntStateOf(1) }
+    val hasDuration = ymusic.durationMs > 0L
     val totalSec = remember(ymusic.durationMs) { (ymusic.durationMs / 1000L).toInt().coerceAtLeast(1) }
 
-    LaunchedEffect(ymusic.trackId, ymusic.state, totalSec) {
-        while (ymusic.state == "playing" && elapsedSec < totalSec) {
+    LaunchedEffect(ymusic.trackId, ymusic.state, totalSec, hasDuration) {
+        while (ymusic.state == "playing" && (!hasDuration || elapsedSec < totalSec)) {
             delay(1000)
             elapsedSec += 1
         }
@@ -272,7 +279,7 @@ fun BigPlayerOverlay(
 
                 // Material 3 Expressive Wavy Animated Progress Bar (inspired by Material-3-Music-Player)
                 Column(modifier = Modifier.fillMaxWidth()) {
-                    val progressFrac = (elapsedSec.toFloat() / totalSec.toFloat()).coerceIn(0f, 1f)
+                    val progressFrac = if (hasDuration) (elapsedSec.toFloat() / totalSec.toFloat()).coerceIn(0f, 1f) else 0f
                     val isPlayingNow = ymusic.state == "playing"
                     val wavePhase = if (isPlayingNow) {
                         val waveInf = rememberInfiniteTransition(label = "m3Wave")
@@ -329,7 +336,11 @@ fun BigPlayerOverlay(
                     Spacer(Modifier.height(4.dp))
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                         Text("%d:%02d".format(elapsedSec / 60, elapsedSec % 60), color = Color.White.copy(alpha = 0.68f), fontSize = 12.sp)
-                        Text("%d:%02d".format(totalSec / 60, totalSec % 60), color = Color.White.copy(alpha = 0.68f), fontSize = 12.sp)
+                        Text(
+                            if (hasDuration) "%d:%02d".format(totalSec / 60, totalSec % 60) else "—:—",
+                            color = Color.White.copy(alpha = 0.68f),
+                            fontSize = 12.sp
+                        )
                     }
                 }
 
@@ -372,12 +383,20 @@ fun BigPlayerOverlay(
                             },
                         contentAlignment = Alignment.Center
                     ) {
-                        Icon(
-                            painterResource(if (ymusic.state == "playing") R.drawable.ic_ym_pause else R.drawable.ic_ym_play),
-                            contentDescription = "Плей / Пауза",
-                            tint = palette.onAccent,
-                            modifier = Modifier.size(34.dp)
-                        )
+                        if (ymusic.state == "loading") {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(30.dp),
+                                color = palette.onAccent,
+                                strokeWidth = 3.dp
+                            )
+                        } else {
+                            Icon(
+                                painterResource(if (ymusic.state == "playing") R.drawable.ic_ym_pause else R.drawable.ic_ym_play),
+                                contentDescription = "Плей / Пауза",
+                                tint = palette.onAccent,
+                                modifier = Modifier.size(34.dp)
+                            )
+                        }
                     }
                     IconButton(
                         onClick = { if (canSwipeNext) { coverDir = 1; elapsedSec = 0; onControl("next") } },
