@@ -191,14 +191,66 @@ fn get_current_volume() -> i32 {
         .unwrap_or(60)
 }
 
-fn set_system_volume(pct: i32) {
+fn apply_volume_hw_fast(pct: i32) {
+    use std::io::Write;
     let pct = pct.clamp(0, 100);
-    let _ = atomic_write_bytes(Path::new(VOLUME_FILE), format!("{pct}\n").as_bytes(), 0o644, false);
-    let _ = Command::new("/usr/lib/atrios/audio")
-        .args(["volume", &pct.to_string()])
+    let raw = if pct == 0 { 0 } else { crate::rotaryd::volume_to_raw(pct, 255) };
+    let raw_wfr = if pct == 0 { 0 } else { crate::rotaryd::woofer_volume_to_raw(pct, 255) };
+    let raw_hp = if pct == 0 { 0 } else { crate::rotaryd::volume_to_raw(pct, 191) };
+    let sw = if pct == 0 { 0 } else { 1 };
+    let msw = if pct == 0 { 0 } else { 3 };
+    let spk_mute = if pct == 0 { 1 } else { 0 };
+    let script = format!(
+        "cset name='Woofer Master Playback Volume' {raw_wfr}\n\
+         cset name='Tweeters Master Playback Volume' {raw}\n\
+         cset name='Headphone DAC Playback Volume' {raw_hp}\n\
+         cset name='Woofer Master Playback Switch' {msw}\n\
+         cset name='Tweeters Master Playback Switch' {msw}\n\
+         cset name='Woofer Ch1 Playback Switch' {sw}\n\
+         cset name='Woofer Ch2 Playback Switch' {sw}\n\
+         cset name='Tweeters Ch1 Playback Switch' {sw}\n\
+         cset name='Tweeters Ch2 Playback Switch' {sw}\n\
+         cset name='Headphone Headphone Switch' {sw}\n\
+         cset name='SPK mute' {spk_mute}\n"
+    );
+    if let Ok(mut child) = Command::new("amixer")
+        .args(["-q", "-c", "AMLAUGESOUND", "-s"])
+        .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .spawn();
+        .spawn()
+    {
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(script.as_bytes());
+        }
+        let _ = child.wait();
+    }
+}
+
+fn set_system_volume(pct: i32) {
+    use std::sync::atomic::AtomicI32;
+    use std::sync::OnceLock;
+    static PENDING_VOL: AtomicI32 = AtomicI32::new(-1);
+    static WORKER_INIT: OnceLock<()> = OnceLock::new();
+
+    let pct = pct.clamp(0, 100);
+    let _ = atomic_write_bytes(Path::new(VOLUME_FILE), format!("{pct}\n").as_bytes(), 0o644, false);
+    PENDING_VOL.store(pct, Ordering::SeqCst);
+
+    WORKER_INIT.get_or_init(|| {
+        thread::spawn(|| {
+            let mut last_applied = -1i32;
+            loop {
+                let target = PENDING_VOL.swap(-1, Ordering::SeqCst);
+                if target >= 0 && target != last_applied {
+                    apply_volume_hw_fast(target);
+                    last_applied = target;
+                } else {
+                    thread::sleep(Duration::from_millis(25));
+                }
+            }
+        });
+    });
 }
 
 fn get_ai_info() -> Json {
