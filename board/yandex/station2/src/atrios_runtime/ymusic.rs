@@ -831,7 +831,7 @@ fn fetch_remote_queue(auth: &YMusicAuth, queue_id: &str) -> Result<(Vec<TrackInf
         .map(|arr| {
             arr.iter()
                 .filter_map(|t| t.get_str("trackId").map(|s| s.to_string()))
-                .collect()
+                .collect::<Vec<String>>()
         })
         .unwrap_or_default();
     if raw_ids.is_empty() {
@@ -847,7 +847,11 @@ fn fetch_remote_queue(auth: &YMusicAuth, queue_id: &str) -> Result<(Vec<TrackInf
     let tracks: Vec<TrackInfo> = det
         .get("result")
         .and_then(|v| v.as_arr())
-        .map(|arr| arr.iter().filter_map(|t| parse_track_json(t, false)).collect())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|t| parse_track_json(t, false))
+                .collect::<Vec<TrackInfo>>()
+        })
         .unwrap_or_default();
     if tracks.is_empty() {
         return Err("No playable tracks in remote queue".into());
@@ -2449,7 +2453,11 @@ impl PlayerState {
                     let tracks: Vec<TrackInfo> = det
                         .get("result")
                         .and_then(|v| v.as_arr())
-                        .map(|arr| arr.iter().filter_map(|t| parse_track_json(t, false)).collect())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|t| parse_track_json(t, false))
+                                .collect::<Vec<TrackInfo>>()
+                        })
                         .unwrap_or_default();
                     if tracks.is_empty() {
                         Err("No playable tracks in Ynison queue".into())
