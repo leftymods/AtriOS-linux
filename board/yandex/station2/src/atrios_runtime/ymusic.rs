@@ -245,6 +245,8 @@ pub struct YMusicStatus {
     pub repeat: bool,
     pub can_prev: bool,
     pub can_next: bool,
+    pub queue_ids: Vec<String>,
+    pub queue_index: usize,
     pub error: Option<String>,
     pub seq: u64,
     pub updated_ms: i64,
@@ -281,6 +283,8 @@ impl YMusicStatus {
             repeat: false,
             can_prev: false,
             can_next: true,
+            queue_ids: Vec::new(),
+            queue_index: 0,
             error: None,
             seq: 0,
             updated_ms: now_ms,
@@ -341,6 +345,15 @@ impl YMusicStatus {
         }
         if let Some(b) = j.get("can_next").and_then(|v| v.as_bool()) {
             st.can_next = b;
+        }
+        if let Some(arr) = j.get("queue_ids").and_then(|v| v.as_arr()) {
+            st.queue_ids = arr
+                .iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect::<Vec<String>>();
+        }
+        if let Some(n) = j.get("queue_index").and_then(|v| v.as_i64()) {
+            st.queue_index = n.max(0) as usize;
         }
         if let Some(s) = j.get_str("error") {
             if !s.is_empty() {
@@ -403,6 +416,16 @@ impl YMusicStatus {
             ("repeat", Json::Bool(self.repeat)),
             ("can_prev", Json::Bool(self.can_prev)),
             ("can_next", Json::Bool(self.can_next)),
+            (
+                "queue_ids",
+                Json::Arr(
+                    self.queue_ids
+                        .iter()
+                        .map(|s| Json::Str(s.clone()))
+                        .collect::<Vec<Json>>(),
+                ),
+            ),
+            ("queue_index", Json::Num(self.queue_index as f64)),
             (
                 "error",
                 self.error.as_ref().map(|s| Json::Str(s.clone())).unwrap_or(Json::Null),
@@ -1912,6 +1935,13 @@ impl PlayerState {
         // Hard stop at first seen track (index == 0): NEVER wrap around backward!
         self.status.can_prev = self.index > 0;
         self.status.can_next = true;
+        self.status.queue_ids = self
+            .queue
+            .iter()
+            .take(40)
+            .map(|t| t.id.clone())
+            .collect::<Vec<String>>();
+        self.status.queue_index = self.index.min(self.status.queue_ids.len().saturating_sub(1));
         if self.index > 0 {
             if let Some(prv) = self.queue.get(self.index - 1) {
                 self.status.prev_title = prv.title.clone();

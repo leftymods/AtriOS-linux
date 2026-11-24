@@ -6,14 +6,14 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::https::{WsFrame, WssClient};
 use crate::json::{obj, Json};
-use crate::ymusic::{load_auth, read_status, YMUSIC_CMD_SOCK};
+use crate::ymusic::{load_auth, read_status, YMusicStatus, YMUSIC_CMD_SOCK};
 
 const YNISON_REDIRECT_URL: &str =
     "wss://ynison.music.yandex.ru/redirector.YnisonRedirectService/GetRedirectToYnison";
 const YNISON_STATE_PATH: &str = "/ynison_state.YnisonStateService/PutYnisonState";
 const YNISON_ORIGIN: &str = "https://music.yandex.ru";
 const YNISON_APP_NAME: &str = "AtriStation";
-const YNISON_APP_VERSION: &str = "1.11.0";
+const YNISON_APP_VERSION: &str = "1.12.0";
 const YNISON_DEVICE_ID_FILE: &str = "/var/lib/atrios/ynison_device_id";
 
 static RID_SEQ: AtomicU64 = AtomicU64::new(1);
@@ -190,6 +190,123 @@ fn build_playing_status_msg(
     .to_string_compact()
 }
 
+fn build_volume_info_msg(device_id: &str, vol_0_1: f64) -> String {
+    obj(vec![
+        (
+            "update_volume_info",
+            obj(vec![
+                ("device_id", Json::Str(device_id.into())),
+                (
+                    "volume_info",
+                    obj(vec![
+                        ("volume", Json::Num(vol_0_1.clamp(0.0, 1.0))),
+                        ("version", make_version_block(device_id)),
+                    ]),
+                ),
+            ]),
+        ),
+        ("rid", Json::Str(next_rid())),
+        ("player_action_timestamp_ms", Json::Str(now_ms().to_string())),
+        (
+            "activity_interception_type",
+            Json::Str("DO_NOT_INTERCEPT_BY_DEFAULT".into()),
+        ),
+    ])
+    .to_string_compact()
+}
+
+fn build_hybrid_full_state(device_id: &str, vol_0_1: f64, st: &YMusicStatus, claim_active: bool) -> String {
+    let paused = st.state != "playing" && st.state != "loading";
+    let pos = if !paused && st.started_ts > 0 {
+        st.position_ms + (now_ms() - st.started_ts).max(0)
+    } else {
+        st.position_ms
+    };
+    let ids: Vec<String> = if !st.queue_ids.is_empty() {
+        st.queue_ids.clone()
+    } else if !st.track_id.is_empty() {
+        vec![st.track_id.clone()]
+    } else {
+        Vec::new()
+    };
+    let cur_idx: i64 = if ids.is_empty() {
+        -1
+    } else {
+        st.queue_index.min(ids.len().saturating_sub(1)) as i64
+    };
+    let playables: Vec<Json> = ids
+        .iter()
+        .enumerate()
+        .map(|(i, tid)| {
+            let mut f = vec![
+                ("playable_id", Json::Str(tid.clone())),
+                ("playable_type", Json::Str("TRACK".into())),
+                ("from", Json::Str("AtriOS-speaker".into())),
+            ];
+            if i as i64 == cur_idx {
+                if !st.title.is_empty() {
+                    f.push(("title", Json::Str(st.title.clone())));
+                }
+                if !st.cover_url.is_empty() {
+                    f.push(("cover_url_optional", Json::Str(st.cover_url.clone())));
+                }
+            }
+            obj(f)
+        })
+        .collect::<Vec<Json>>();
+    let entity_type = match st.mode.as_str() {
+        "wave" | "station" => "RADIO",
+        "playlist" | "likes" => "PLAYLIST",
+        "album" => "ALBUM",
+        _ => "VARIOUS",
+    };
+    let repeat_mode = if st.repeat { "ONE" } else { "NONE" };
+    let player_state = obj(vec![
+        (
+            "status",
+            obj(vec![
+                ("paused", Json::Bool(paused)),
+                ("duration_ms", Json::Str(st.duration_ms.max(0).to_string())),
+                ("progress_ms", Json::Str(pos.max(0).to_string())),
+                ("playback_speed", Json::Num(1.0)),
+                ("version", make_version_block(device_id)),
+            ]),
+        ),
+        (
+            "player_queue",
+            obj(vec![
+                ("current_playable_index", Json::Num(cur_idx as f64)),
+                ("entity_id", Json::Str(String::new())),
+                ("entity_type", Json::Str(entity_type.into())),
+                ("playable_list", Json::Arr(playables)),
+                ("options", obj(vec![("repeat_mode", Json::Str(repeat_mode.into()))])),
+                ("entity_context", Json::Str("BASED_ON_ENTITY_BY_DEFAULT".into())),
+                ("version", make_version_block(device_id)),
+                ("from_optional", Json::Str("AtriOS-speaker".into())),
+            ]),
+        ),
+    ]);
+    let interception = if claim_active {
+        "INTERCEPT_IF_NO_ONE_ACTIVE"
+    } else {
+        "DO_NOT_INTERCEPT_BY_DEFAULT"
+    };
+    obj(vec![
+        (
+            "update_full_state",
+            obj(vec![
+                ("player_state", player_state),
+                ("device", build_device_block(device_id, vol_0_1)),
+                ("is_currently_active", Json::Bool(claim_active)),
+            ]),
+        ),
+        ("rid", Json::Str(next_rid())),
+        ("player_action_timestamp_ms", Json::Str(now_ms().to_string())),
+        ("activity_interception_type", Json::Str(interception.into())),
+    ])
+    .to_string_compact()
+}
+
 fn send_ymusic_cmd(cmd: &str) {
     if let Ok(sock) = UnixDatagram::unbound() {
         let _ = sock.send_to(cmd.as_bytes(), YMUSIC_CMD_SOCK);
@@ -273,19 +390,67 @@ fn run_ynison_session(token: &str, device_id: &str, stop_flag: &'static AtomicBo
             last_ping = Instant::now();
         }
 
-        // While AtriStation is the active Ynison player, push periodic playback status updates
-        if is_active && last_status_push.elapsed() >= Duration::from_secs(3) {
+        // Hybrid Initiator + Status Sync:
+        // 1) If speaker started playing autonomously (voice / button / wave), claim active device & publish full queue!
+        // 2) If speaker is already active, push track/pause/progress/volume changes back to Ynison!
+        if last_status_push.elapsed() >= Duration::from_secs(2) {
             let st = read_status();
+            let cur_vol_pct = crate::bt_control::get_current_volume();
+            if (cur_vol_pct - last_remote_vol_pct).abs() >= 1 {
+                last_remote_vol_pct = cur_vol_pct;
+                let _ = ws.send_text(&build_volume_info_msg(
+                    device_id,
+                    cur_vol_pct as f64 / 100.0,
+                ));
+            }
             let paused = st.state != "playing" && st.state != "loading";
-            let pos = if !paused && st.started_ts > 0 {
-                st.position_ms + (now_ms() - st.started_ts).max(0)
-            } else {
-                st.position_ms
-            };
-            if st.track_id != last_pushed_track || paused != last_pushed_paused || !paused {
-                let _ = ws.send_text(&build_playing_status_msg(device_id, paused, pos, st.duration_ms));
-                last_pushed_track = st.track_id;
-                last_pushed_paused = paused;
+            let local_queue_sig = st.queue_ids.join(",");
+            if !paused && !st.track_id.is_empty() && st.mode != "ynison" {
+                let queue_changed = local_queue_sig != last_queue_sig
+                    || st.track_id != last_pushed_track
+                    || !is_active;
+                if queue_changed {
+                    let _ = ws.send_text(&build_hybrid_full_state(
+                        device_id,
+                        cur_vol_pct as f64 / 100.0,
+                        &st,
+                        true,
+                    ));
+                    is_active = true;
+                    last_queue_sig = local_queue_sig;
+                    last_idx = st.queue_index as i64;
+                    last_paused = Some(false);
+                    last_pushed_track = st.track_id;
+                    last_pushed_paused = false;
+                } else {
+                    let pos = if st.started_ts > 0 {
+                        st.position_ms + (now_ms() - st.started_ts).max(0)
+                    } else {
+                        st.position_ms
+                    };
+                    let _ = ws.send_text(&build_playing_status_msg(
+                        device_id,
+                        false,
+                        pos,
+                        st.duration_ms,
+                    ));
+                }
+            } else if is_active {
+                let pos = if !paused && st.started_ts > 0 {
+                    st.position_ms + (now_ms() - st.started_ts).max(0)
+                } else {
+                    st.position_ms
+                };
+                if st.track_id != last_pushed_track || paused != last_pushed_paused || !paused {
+                    let _ = ws.send_text(&build_playing_status_msg(
+                        device_id,
+                        paused,
+                        pos,
+                        st.duration_ms,
+                    ));
+                    last_pushed_track = st.track_id;
+                    last_pushed_paused = paused;
+                }
             }
             last_status_push = Instant::now();
         }
