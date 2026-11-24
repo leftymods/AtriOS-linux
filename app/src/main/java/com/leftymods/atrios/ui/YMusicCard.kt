@@ -54,6 +54,8 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
+import com.leftymods.atrios.R
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -501,7 +503,7 @@ fun YandexWaveFullScreen(
 
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         IconButton(onClick = onOpenEqualizer) {
-                            Icon(Icons.Rounded.Equalizer, contentDescription = "Эквалайзер", tint = Color.White, modifier = Modifier.size(24.dp))
+                            Icon(painterResource(R.drawable.ic_ym_eq), contentDescription = "Эквалайзер", tint = Color.White, modifier = Modifier.size(22.dp))
                         }
                         IconButton(onClick = onOpenVolumeSheet) {
                             Icon(if (mute || volume.toInt() == 0) Icons.Rounded.VolumeOff else Icons.Rounded.VolumeUp, contentDescription = "Громкость колонки", tint = if (mute || volume.toInt() == 0) Color(0xFFFF5C8A) else Color.White, modifier = Modifier.size(24.dp))
@@ -509,7 +511,7 @@ fun YandexWaveFullScreen(
                         IconButton(
                             onClick = { if (ymusic.loggedIn) searchOpen = true else showOAuthDialog = true }
                         ) {
-                            Icon(Icons.Rounded.Search, contentDescription = "Поиск", tint = Color.White, modifier = Modifier.size(26.dp))
+                            Icon(painterResource(R.drawable.ic_ym_search), contentDescription = "Поиск", tint = Color.White, modifier = Modifier.size(24.dp))
                         }
                     }
                 }
@@ -554,7 +556,21 @@ fun YandexWaveFullScreen(
                                     .background(if (palette.isYandexOriginal) Color(0xCC1A1A1A) else Color.Black.copy(alpha = 0.34f))
                                     .then(if (palette.isYandexOriginal) Modifier.border(1.dp, Color(0xFF333333), CircleShape) else Modifier)
                             ) {
-                                Icon(Icons.Rounded.SkipPrevious, contentDescription = "Назад", tint = Color.White, modifier = Modifier.size(26.dp))
+                                Icon(painterResource(R.drawable.ic_ym_prev), contentDescription = "Назад", tint = Color.White, modifier = Modifier.size(22.dp))
+                            }
+
+                            val onMainPlayClick = {
+                                when (ymusic.state) {
+                                    "playing", "loading" -> onControl("pause")
+                                    "paused" -> onControl("play")
+                                    else -> {
+                                        when {
+                                            ymusic.mode == "likes" || activePreset == "Мне нравится" -> onPlay("likes", null)
+                                            ymusic.mode == "chart" || activePreset == "Чарт" -> onPlay("chart", null)
+                                            else -> onPlay("wave", null)
+                                        }
+                                    }
+                                }
                             }
 
                             if (palette.isYandexOriginal) {
@@ -564,13 +580,7 @@ fun YandexWaveFullScreen(
                                     color = palette.accent,
                                     modifier = Modifier
                                         .height(58.dp)
-                                        .clickable {
-                                            when (ymusic.state) {
-                                                "playing" -> onControl("pause")
-                                                "paused" -> onControl("play")
-                                                else -> onPlay("wave", null)
-                                            }
-                                        }
+                                        .clickable { onMainPlayClick() }
                                 ) {
                                     Row(
                                         modifier = Modifier.padding(horizontal = 28.dp),
@@ -581,10 +591,10 @@ fun YandexWaveFullScreen(
                                             CircularProgressIndicator(modifier = Modifier.size(22.dp), color = palette.onAccent, strokeWidth = 2.5.dp)
                                         } else {
                                             Icon(
-                                                if (ymusic.state == "playing") Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
+                                                painterResource(if (ymusic.state == "playing") R.drawable.ic_ym_pause else R.drawable.ic_ym_play),
                                                 contentDescription = "Играть / Пауза",
                                                 tint = palette.onAccent,
-                                                modifier = Modifier.size(28.dp)
+                                                modifier = Modifier.size(24.dp)
                                             )
                                         }
                                         Text(
@@ -601,23 +611,17 @@ fun YandexWaveFullScreen(
                                         .size(86.dp)
                                         .clip(CircleShape)
                                         .background(palette.accent)
-                                        .clickable {
-                                            when (ymusic.state) {
-                                                "playing" -> onControl("pause")
-                                                "paused" -> onControl("play")
-                                                else -> onPlay("wave", null)
-                                            }
-                                        },
+                                        .clickable { onMainPlayClick() },
                                     contentAlignment = Alignment.Center
                                 ) {
                                     if (ymusic.state == "loading") {
                                         CircularProgressIndicator(modifier = Modifier.size(32.dp), color = palette.onAccent, strokeWidth = 3.dp)
                                     } else {
                                         Icon(
-                                            if (ymusic.state == "playing") Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
+                                            painterResource(if (ymusic.state == "playing") R.drawable.ic_ym_pause else R.drawable.ic_ym_play),
                                             contentDescription = "Играть / Пауза",
                                             tint = palette.onAccent,
-                                            modifier = Modifier.size(44.dp)
+                                            modifier = Modifier.size(36.dp)
                                         )
                                     }
                                 }
@@ -631,7 +635,7 @@ fun YandexWaveFullScreen(
                                     .background(if (palette.isYandexOriginal) Color(0xCC1A1A1A) else Color.Black.copy(alpha = 0.34f))
                                     .then(if (palette.isYandexOriginal) Modifier.border(1.dp, Color(0xFF333333), CircleShape) else Modifier)
                             ) {
-                                Icon(Icons.Rounded.SkipNext, contentDescription = "Вперёд", tint = Color.White, modifier = Modifier.size(26.dp))
+                                Icon(painterResource(R.drawable.ic_ym_next), contentDescription = "Вперёд", tint = Color.White, modifier = Modifier.size(22.dp))
                             }
                         }
 

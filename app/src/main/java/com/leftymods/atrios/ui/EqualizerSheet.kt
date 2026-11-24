@@ -42,9 +42,10 @@ fun EqualizerPanel(
     palette: AppPalette,
     onApplyEq: (enabled: Boolean, preset: String, bands: List<Float>) -> Unit
 ) {
-    var enabled by remember(eq.enabled) { mutableStateOf(eq.enabled) }
-    var preset by remember(eq.preset) { mutableStateOf(eq.preset) }
-    var bands by remember(eq.bands) { mutableStateOf(if (eq.bands.size == 5) eq.bands else listOf(0f, 0f, 0f, 0f, 0f)) }
+    var enabled by remember { mutableStateOf(eq.enabled) }
+    var preset by remember { mutableStateOf(eq.preset) }
+    var bands by remember { mutableStateOf(if (eq.bands.size == 5) eq.bands else listOf(0f, 0f, 0f, 0f, 0f)) }
+    val lastLiveSent = remember { java.util.concurrent.atomic.AtomicLong(0L) }
 
     Column(
         modifier = Modifier
@@ -134,8 +135,14 @@ fun EqualizerPanel(
                                 bands = updated
                                 enabled = true
                                 preset = "custom"
+                                val now = System.currentTimeMillis()
+                                if (now - lastLiveSent.get() >= 180L) {
+                                    lastLiveSent.set(now)
+                                    onApplyEq(true, "custom", updated)
+                                }
                             },
                             onValueChangeFinished = {
+                                lastLiveSent.set(System.currentTimeMillis())
                                 onApplyEq(enabled, preset, bands)
                             },
                             valueRange = -12f..12f,

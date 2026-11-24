@@ -31,6 +31,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.res.painterResource
+import com.leftymods.atrios.R
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -279,10 +281,10 @@ fun BigPlayerOverlay(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     IconButton(onClick = { onControl("dislike") }) {
-                        Icon(Icons.Rounded.HeartBroken, contentDescription = "Не нравится", tint = Color.White.copy(alpha = 0.78f), modifier = Modifier.size(26.dp))
+                        Icon(painterResource(R.drawable.ic_ym_dislike), contentDescription = "Не нравится", tint = Color.White.copy(alpha = 0.78f), modifier = Modifier.size(24.dp))
                     }
                     IconButton(onClick = { coverDir = -1; elapsedSec = 0; onControl("prev") }) {
-                        Icon(Icons.Rounded.SkipPrevious, contentDescription = "Предыдущий", tint = Color.White, modifier = Modifier.size(36.dp))
+                        Icon(painterResource(R.drawable.ic_ym_prev), contentDescription = "Предыдущий", tint = Color.White, modifier = Modifier.size(30.dp))
                     }
                     Box(
                         modifier = Modifier
@@ -291,7 +293,7 @@ fun BigPlayerOverlay(
                             .background(palette.accent)
                             .clickable {
                                 when (ymusic.state) {
-                                    "playing" -> onControl("pause")
+                                    "playing", "loading" -> onControl("pause")
                                     "paused" -> onControl("play")
                                     else -> onPlayWave()
                                 }
@@ -299,21 +301,21 @@ fun BigPlayerOverlay(
                         contentAlignment = Alignment.Center
                     ) {
                         Icon(
-                            if (ymusic.state == "playing") Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
+                            painterResource(if (ymusic.state == "playing") R.drawable.ic_ym_pause else R.drawable.ic_ym_play),
                             contentDescription = "Плей / Пауза",
                             tint = palette.onAccent,
-                            modifier = Modifier.size(40.dp)
+                            modifier = Modifier.size(34.dp)
                         )
                     }
                     IconButton(onClick = { coverDir = 1; elapsedSec = 0; onControl("next") }) {
-                        Icon(Icons.Rounded.SkipNext, contentDescription = "Следующий", tint = Color.White, modifier = Modifier.size(36.dp))
+                        Icon(painterResource(R.drawable.ic_ym_next), contentDescription = "Следующий", tint = Color.White, modifier = Modifier.size(30.dp))
                     }
                     IconButton(onClick = { onControl("like") }) {
                         Icon(
-                            if (ymusic.liked) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
+                            painterResource(if (ymusic.liked) R.drawable.ic_ym_liked else R.drawable.ic_ym_like),
                             contentDescription = "Нравится",
                             tint = if (ymusic.liked) Color(0xFFFF2E7A) else Color.White,
-                            modifier = Modifier.size(26.dp)
+                            modifier = Modifier.size(24.dp)
                         )
                     }
                 }
