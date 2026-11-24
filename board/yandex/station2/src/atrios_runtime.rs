@@ -29,6 +29,8 @@ mod bt_control;
 mod ota;
 #[path = "atrios_runtime/ymusic.rs"]
 mod ymusic;
+#[path = "atrios_runtime/ynison.rs"]
+mod ynison;
 #[path = "atrios_runtime/hardware.rs"]
 mod hardware;
 #[path = "atrios_runtime/supervise.rs"]

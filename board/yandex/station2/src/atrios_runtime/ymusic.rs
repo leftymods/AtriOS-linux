@@ -2116,14 +2116,19 @@ impl PlayerState {
                 }
                 match res {
                     Ok(tracks) => {
-                        self.mode = mode;
+                        let start_paused = mode == "ynison_paused";
+                        self.mode = if start_paused { "ynison".into() } else { mode };
                         self.active_station = station;
                         if !batch_id.is_empty() {
                             self.batch_id = batch_id;
                         }
                         self.queue = tracks;
                         self.index = start_index.min(self.queue.len().saturating_sub(1));
-                        self.start_current_track();
+                        if start_paused {
+                            self.preview_current_track();
+                        } else {
+                            self.start_current_track();
+                        }
                     }
                     Err(e) => {
                         eprintln!("[ymusic] Load {mode} failed: {e}");
@@ -2389,6 +2394,79 @@ impl PlayerState {
             self.repeat_one = !self.repeat_one;
             self.status.repeat = self.repeat_one;
             write_status(&mut self.status);
+        } else if let Some(rest) = cmd.strip_prefix("ynison_sync:") {
+            let mut parts = rest.splitn(3, ':');
+            let want_play = parts.next().unwrap_or("play") != "pause";
+            let rel_idx = parts.next().and_then(|s| s.parse::<usize>().ok()).unwrap_or(0);
+            let ids_csv = parts.next().unwrap_or("").trim();
+            if ids_csv.is_empty() {
+                return;
+            }
+            let target_ids: Vec<&str> = ids_csv.split(',').filter(|s| !s.is_empty()).collect();
+            if target_ids.is_empty() {
+                return;
+            }
+            // Fast path: same queue already loaded -> jump immediately without network fetch!
+            let same_queue = self.queue.len() == target_ids.len()
+                && self.queue.iter().zip(target_ids.iter()).all(|(t, id)| t.id == *id);
+            if same_queue {
+                let idx = rel_idx.min(self.queue.len().saturating_sub(1));
+                self.mode = "ynison".into();
+                self.status.mode = "ynison".into();
+                if self.index != idx || self.pipeline.is_none() {
+                    self.index = idx;
+                    if want_play {
+                        self.start_current_track();
+                    } else {
+                        self.preview_current_track();
+                    }
+                } else if want_play {
+                    self.handle_command("play");
+                } else {
+                    self.handle_command("pause");
+                }
+                return;
+            }
+            let Some(auth) = load_auth() else {
+                return;
+            };
+            let gen = self.bump_gen();
+            self.pending_play_at = None;
+            if let Some(p) = self.pipeline.take() {
+                p.stop();
+            }
+            self.mode = "ynison".into();
+            self.status.mode = "ynison".into();
+            self.status.state = if want_play { "loading".into() } else { "paused".into() };
+            self.status.started_ts = 0;
+            self.status.error = None;
+            write_status(&mut self.status);
+            let csv_owned = ids_csv.to_string();
+            let tx = self.tx.clone();
+            thread::spawn(move || {
+                let form = format!("track-ids={}", url_encode(&csv_owned));
+                let res = api_post_form_json(&auth.token, "/tracks", &form).and_then(|det| {
+                    let tracks: Vec<TrackInfo> = det
+                        .get("result")
+                        .and_then(|v| v.as_arr())
+                        .map(|arr| arr.iter().filter_map(|t| parse_track_json(t, false)).collect())
+                        .unwrap_or_default();
+                    if tracks.is_empty() {
+                        Err("No playable tracks in Ynison queue".into())
+                    } else {
+                        Ok(tracks)
+                    }
+                });
+                let mode_tag = if want_play { "ynison".to_string() } else { "ynison_paused".to_string() };
+                let _ = tx.send(DaemonEvent::ModeLoaded {
+                    gen,
+                    mode: mode_tag,
+                    station: "user:onyourwave".into(),
+                    batch_id: String::new(),
+                    start_index: rel_idx,
+                    res,
+                });
+            });
         } else if cmd == "stop" {
             self.stop_playback();
         } else if cmd == "shutdown" {
@@ -2438,7 +2516,8 @@ fn run_daemon() -> i32 {
     let (tx, rx) = mpsc::channel::<DaemonEvent>();
     let mut player = PlayerState::new(tx);
     write_status(&mut player.status);
-    let mut buf = [0u8; 2048];
+    crate::ynison::spawn_ynison_thread(&STOP_REQUESTED);
+    let mut buf = [0u8; 4096];
 
     while !STOP_REQUESTED.load(Ordering::SeqCst) {
         if let Ok(n) = sock.recv(&mut buf) {

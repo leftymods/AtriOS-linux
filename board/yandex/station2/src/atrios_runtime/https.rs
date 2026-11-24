@@ -717,3 +717,317 @@ pub fn request_json(
     }
     Ok(val)
 }
+
+// --- Pure-Rust RFC 6455 WebSocket-over-TLS Client (zero external crates) ---
+
+#[derive(Clone, Debug)]
+pub enum WsFrame {
+    Text(String),
+    Binary(Vec<u8>),
+    Close(u16),
+}
+
+pub struct WssClient {
+    tcp: TcpStream,
+    guard: SslGuard,
+    rx_buf: Vec<u8>,
+}
+
+fn ws_random_bytes(out: &mut [u8]) {
+    use std::io::Read;
+    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+        if f.read_exact(out).is_ok() {
+            return;
+        }
+    }
+    let mut seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0x5eed1234_u64);
+    for b in out.iter_mut() {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        *b = (seed >> 33) as u8;
+    }
+}
+
+fn ws_base64(input: &[u8]) -> String {
+    const TBL: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(((input.len() + 2) / 3) * 4);
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(TBL[((n >> 18) & 63) as usize] as char);
+        out.push(TBL[((n >> 12) & 63) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(TBL[((n >> 6) & 63) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(TBL[(n & 63) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
+impl WssClient {
+    pub fn connect(url: &str, headers: &[(&str, &str)], timeout_secs: u64) -> Result<Self, String> {
+        let https_url = if let Some(rest) = url.strip_prefix("wss://") {
+            format!("https://{rest}")
+        } else if url.starts_with("https://") {
+            url.to_string()
+        } else {
+            return Err("WssClient requires wss:// URL".into());
+        };
+        let parsed = require_https(&https_url)?;
+        let deadline = Instant::now() + Duration::from_secs(timeout_secs.max(3));
+        let (tcp, guard) = tls_connect(&parsed, None, deadline, None)?;
+        let fd = tcp.as_raw_fd();
+
+        let mut key_raw = [0u8; 16];
+        ws_random_bytes(&mut key_raw);
+        let ws_key = ws_base64(&key_raw);
+
+        let mut req = format!(
+            "GET {} HTTP/1.1\r\nHost: {}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {}\r\nSec-WebSocket-Version: 13\r\n",
+            parsed.path_query, parsed.netloc, ws_key
+        );
+        for (k, v) in headers {
+            req.push_str(k);
+            req.push_str(": ");
+            req.push_str(v);
+            req.push_str("\r\n");
+        }
+        req.push_str("\r\n");
+        ssl_write_all(&guard, fd, req.as_bytes(), deadline, None)?;
+
+        let mut rx_buf = Vec::with_capacity(4096);
+        let mut tmp = [0u8; 4096];
+        let hdr_end = loop {
+            if let Some(pos) = rx_buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                break pos + 4;
+            }
+            if rx_buf.len() > 32768 {
+                return Err("WS handshake headers too large".into());
+            }
+            let n = ssl_read_some(&guard, fd, &mut tmp, deadline, None)?;
+            if n == 0 {
+                return Err("EOF during WS handshake".into());
+            }
+            rx_buf.extend_from_slice(&tmp[..n]);
+        };
+
+        let status_line = String::from_utf8_lossy(&rx_buf[..hdr_end])
+            .lines()
+            .next()
+            .unwrap_or("")
+            .to_string();
+        if !status_line.contains(" 101 ") {
+            return Err(format!("WS upgrade rejected: {status_line}"));
+        }
+        rx_buf.drain(0..hdr_end);
+        Ok(Self { tcp, guard, rx_buf })
+    }
+
+    fn send_frame(&mut self, opcode: u8, payload: &[u8]) -> Result<(), String> {
+        let mut frame = Vec::with_capacity(14 + payload.len());
+        frame.push(0x80 | (opcode & 0x0F));
+        let len = payload.len();
+        if len < 126 {
+            frame.push(0x80 | (len as u8));
+        } else if len <= 65535 {
+            frame.push(0x80 | 126);
+            frame.extend_from_slice(&(len as u16).to_be_bytes());
+        } else {
+            frame.push(0x80 | 127);
+            frame.extend_from_slice(&(len as u64).to_be_bytes());
+        }
+        let mut mask = [0u8; 4];
+        ws_random_bytes(&mut mask);
+        frame.extend_from_slice(&mask);
+        for (i, &b) in payload.iter().enumerate() {
+            frame.push(b ^ mask[i & 3]);
+        }
+        let deadline = Instant::now() + Duration::from_secs(10);
+        ssl_write_all(&self.guard, self.tcp.as_raw_fd(), &frame, deadline, None)
+    }
+
+    pub fn send_text(&mut self, text: &str) -> Result<(), String> {
+        self.send_frame(0x1, text.as_bytes())
+    }
+
+    pub fn send_ping(&mut self) -> Result<(), String> {
+        self.send_frame(0x9, b"atrios")
+    }
+
+    pub fn send_pong(&mut self, payload: &[u8]) -> Result<(), String> {
+        self.send_frame(0xA, payload)
+    }
+
+    fn read_more(&mut self, deadline: Instant) -> Result<bool, String> {
+        let mut tmp = [0u8; 8192];
+        let fd = self.tcp.as_raw_fd();
+        loop {
+            if Instant::now() >= deadline {
+                return Ok(false);
+            }
+            let n = unsafe {
+                (self.guard.fns.SSL_read)(
+                    self.guard.ssl,
+                    tmp.as_mut_ptr() as *mut c_void,
+                    tmp.len() as c_int,
+                )
+            };
+            if n > 0 {
+                self.rx_buf.extend_from_slice(&tmp[..n as usize]);
+                return Ok(true);
+            }
+            let err = unsafe { (self.guard.fns.SSL_get_error)(self.guard.ssl, n) };
+            match err {
+                SSL_ERROR_ZERO_RETURN => return Err("WS closed by peer".into()),
+                SSL_ERROR_WANT_READ => {
+                    let now = Instant::now();
+                    if now >= deadline {
+                        return Ok(false);
+                    }
+                    let rem_ms = (deadline - now).as_millis().min(100) as c_int;
+                    let mut pfd = PollFd { fd, events: POLLIN, revents: 0 };
+                    let pr = unsafe { poll(&mut pfd, 1, rem_ms.max(1)) };
+                    if pr == 0 && Instant::now() >= deadline {
+                        return Ok(false);
+                    }
+                }
+                SSL_ERROR_WANT_WRITE => {
+                    let _ = wait_fd(fd, POLLOUT, deadline, None);
+                }
+                _ => {
+                    let msg = ossl_err(self.guard.fns);
+                    if n == 0 && msg == "TLS error" {
+                        return Err("WS EOF".into());
+                    }
+                    return Err(format!("WS TLS read error: {msg}"));
+                }
+            }
+        }
+    }
+
+    pub fn recv_frame(&mut self, timeout_ms: u64) -> Result<Option<WsFrame>, String> {
+        let deadline = Instant::now() + Duration::from_millis(timeout_ms.max(10));
+        let mut frag_opcode: Option<u8> = None;
+        let mut frag_buf: Vec<u8> = Vec::new();
+
+        loop {
+            if let Some((fin, opcode, payload)) = self.try_parse_one_frame()? {
+                match opcode {
+                    0x9 => {
+                        let _ = self.send_pong(&payload);
+                        continue;
+                    }
+                    0xA => continue,
+                    0x8 => {
+                        let code = if payload.len() >= 2 {
+                            u16::from_be_bytes([payload[0], payload[1]])
+                        } else {
+                            1000
+                        };
+                        return Ok(Some(WsFrame::Close(code)));
+                    }
+                    0x1 | 0x2 => {
+                        if fin {
+                            return Ok(Some(if opcode == 0x1 {
+                                WsFrame::Text(String::from_utf8_lossy(&payload).into_owned())
+                            } else {
+                                WsFrame::Binary(payload)
+                            }));
+                        } else {
+                            frag_opcode = Some(opcode);
+                            frag_buf.clear();
+                            frag_buf.extend_from_slice(&payload);
+                            continue;
+                        }
+                    }
+                    0x0 => {
+                        if let Some(op) = frag_opcode {
+                            frag_buf.extend_from_slice(&payload);
+                            if fin {
+                                let out = std::mem::take(&mut frag_buf);
+                                frag_opcode = None;
+                                return Ok(Some(if op == 0x1 {
+                                    WsFrame::Text(String::from_utf8_lossy(&out).into_owned())
+                                } else {
+                                    WsFrame::Binary(out)
+                                }));
+                            }
+                        }
+                        continue;
+                    }
+                    _ => continue,
+                }
+            }
+            // If we are mid-frame or mid-fragment, allow up to 10s to finish receiving it
+            let read_dl = if !self.rx_buf.is_empty() || frag_opcode.is_some() {
+                deadline.max(Instant::now() + Duration::from_secs(10))
+            } else {
+                deadline
+            };
+            if !self.read_more(read_dl)? {
+                return Ok(None);
+            }
+        }
+    }
+
+    fn try_parse_one_frame(&mut self) -> Result<Option<(bool, u8, Vec<u8>)>, String> {
+        if self.rx_buf.len() < 2 {
+            return Ok(None);
+        }
+        let b0 = self.rx_buf[0];
+        let b1 = self.rx_buf[1];
+        let fin = (b0 & 0x80) != 0;
+        let opcode = b0 & 0x0F;
+        let masked = (b1 & 0x80) != 0;
+        let mut idx = 2usize;
+        let mut len = (b1 & 0x7F) as usize;
+        if len == 126 {
+            if self.rx_buf.len() < 4 {
+                return Ok(None);
+            }
+            len = u16::from_be_bytes([self.rx_buf[2], self.rx_buf[3]]) as usize;
+            idx = 4;
+        } else if len == 127 {
+            if self.rx_buf.len() < 10 {
+                return Ok(None);
+            }
+            let len64 = u64::from_be_bytes([
+                self.rx_buf[2], self.rx_buf[3], self.rx_buf[4], self.rx_buf[5],
+                self.rx_buf[6], self.rx_buf[7], self.rx_buf[8], self.rx_buf[9],
+            ]);
+            if len64 > 4 * 1024 * 1024 {
+                return Err("WS frame exceeds 4MB limit".into());
+            }
+            len = len64 as usize;
+            idx = 10;
+        }
+        let mask_len = if masked { 4 } else { 0 };
+        if self.rx_buf.len() < idx + mask_len + len {
+            return Ok(None);
+        }
+        let mut payload = self.rx_buf[idx + mask_len..idx + mask_len + len].to_vec();
+        if masked {
+            let mask = [
+                self.rx_buf[idx],
+                self.rx_buf[idx + 1],
+                self.rx_buf[idx + 2],
+                self.rx_buf[idx + 3],
+            ];
+            for (i, b) in payload.iter_mut().enumerate() {
+                *b ^= mask[i & 3];
+            }
+        }
+        self.rx_buf.drain(0..idx + mask_len + len);
+        Ok(Some((fin, opcode, payload)))
+    }
+}

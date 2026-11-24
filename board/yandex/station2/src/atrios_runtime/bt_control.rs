@@ -183,7 +183,7 @@ fn get_wifi_info() -> (String, String, bool) {
     (ip, ssid, connected)
 }
 
-fn get_current_volume() -> i32 {
+pub(crate) fn get_current_volume() -> i32 {
     fs::read_to_string(VOLUME_FILE)
         .ok()
         .and_then(|s| s.trim().parse::<i32>().ok())
@@ -227,7 +227,7 @@ fn apply_volume_hw_fast(pct: i32) {
     }
 }
 
-fn set_system_volume(pct: i32) {
+pub(crate) fn set_system_volume(pct: i32) {
     use std::sync::atomic::AtomicI32;
     use std::sync::OnceLock;
     static PENDING_VOL: AtomicI32 = AtomicI32::new(-1);
