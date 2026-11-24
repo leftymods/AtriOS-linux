@@ -361,7 +361,9 @@ impl YMusicStatus {
             ),
             ("audio_bass", Json::Num(if self.state == "playing" { read_audio_envelope().0 } else { 0.0 })),
             ("audio_mid", Json::Num(if self.state == "playing" { read_audio_envelope().1 } else { 0.0 })),
-            ("audio_energy", Json::Num(if self.state == "playing" { read_audio_envelope().2 } else { 0.0 })),
+            ("audio_high", Json::Num(if self.state == "playing" { read_audio_envelope().2 } else { 0.0 })),
+            ("audio_energy", Json::Num(if self.state == "playing" { read_audio_envelope().3 } else { 0.0 })),
+            ("audio_beat", Json::Num(if self.state == "playing" { read_audio_envelope().4 } else { 0.0 })),
             ("updated_ts", Json::Num(self.updated_ts as f64)),
         ])
     }
@@ -1076,17 +1078,19 @@ fn resolve_track_stream_url(auth: &YMusicAuth, track_id: &str) -> Result<String,
 }
 
 
-fn read_audio_envelope() -> (f64, f64, f64) {
+fn read_audio_envelope() -> (f64, f64, f64, f64, f64) {
     let Ok(txt) = fs::read_to_string("/var/run/atrios/ymusic_audio.json") else {
-        return (0.0, 0.0, 0.0);
+        return (0.0, 0.0, 0.0, 0.0, 0.0);
     };
     let Ok(j) = Json::parse(&txt) else {
-        return (0.0, 0.0, 0.0);
+        return (0.0, 0.0, 0.0, 0.0, 0.0);
     };
     let b = j.get("b").and_then(|v| v.as_f64()).unwrap_or(0.0);
     let v = j.get("v").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let h = j.get("h").and_then(|v| v.as_f64()).unwrap_or(0.0);
     let e = j.get("e").and_then(|v| v.as_f64()).unwrap_or(0.0);
-    (b, v, e)
+    let p = j.get("p").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    (b, v, h, e, p)
 }
 
 fn is_track_liked_live(auth: &YMusicAuth, track_id: &str) -> Option<bool> {

@@ -1,5 +1,5 @@
 #define MINIMP3_IMPLEMENTATION
-#include "/mnt/c/Users/ggala/piper_train_work/minimp3.h"
+#include "minimp3.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdint.h>
@@ -22,10 +22,16 @@ int main(void) {
     float cur_gain = 1.0f;
     unsigned int frame_cnt = 0;
     int ducked = 0;
-    float lp_state = 0.0f;
+    float lp_bass = 0.0f;
+    float lp_mid = 0.0f;
+    float prev_x = 0.0f;
     float smooth_bass = 0.0f;
     float smooth_mid = 0.0f;
+    float smooth_high = 0.0f;
     float smooth_eng = 0.0f;
+    float avg_bass = 0.0f;
+    float avg_eng = 0.0f;
+    float smooth_beat = 0.0f;
 
     while (!eof || filled > 0) {
         if (!eof && filled < INBUF_SZ / 2) {
@@ -56,29 +62,42 @@ int main(void) {
             int ch = (info.channels == 1) ? 1 : info.channels;
             int total = samples * ch;
 
-            // Compute real-time bass (low-pass ~220Hz) & voice/mid energy for reactive UI blobs
-            double sum_bass = 0.0, sum_mid = 0.0, sum_all = 0.0;
-            const float alpha = 0.045f; // ~220Hz 1-pole LPF at 44.1kHz
+            // 4-band full-spectrum + beat transient analyzer for Liquid Plasma blob
+            double sum_bass = 0.0, sum_mid = 0.0, sum_high = 0.0, sum_all = 0.0;
+            const float alpha_bass = 0.036f; // ~200Hz LPF
+            const float alpha_mid = 0.28f;   // ~2.4kHz LPF
             for (int i = 0; i < total; i += ch) {
                 float x = (float)pcm[i] / 32768.0f;
-                lp_state += alpha * (x - lp_state);
-                float mid = x - lp_state;
-                sum_bass += (double)(lp_state * lp_state);
+                lp_bass += alpha_bass * (x - lp_bass);
+                lp_mid += alpha_mid * (x - lp_mid);
+                float mid = lp_mid - lp_bass;
+                float high = (x - lp_mid) * 0.7f + (x - prev_x) * 0.3f;
+                prev_x = x;
+                sum_bass += (double)(lp_bass * lp_bass);
                 sum_mid += (double)(mid * mid);
+                sum_high += (double)(high * high);
                 sum_all += (double)(x * x);
             }
             float inv_n = (samples > 0) ? (1.0f / (float)samples) : 1.0f;
-            float bass = fminf(1.0f, sqrtf((float)sum_bass * inv_n) * 3.8f);
-            float mid = fminf(1.0f, sqrtf((float)sum_mid * inv_n) * 3.2f);
-            float eng = fminf(1.0f, sqrtf((float)sum_all * inv_n) * 2.8f);
-            smooth_bass = smooth_bass * 0.55f + bass * 0.45f;
-            smooth_mid = smooth_mid * 0.55f + mid * 0.45f;
+            float bass = fminf(1.0f, sqrtf((float)sum_bass * inv_n) * 4.0f);
+            float mid = fminf(1.0f, sqrtf((float)sum_mid * inv_n) * 3.8f);
+            float high = fminf(1.0f, sqrtf((float)sum_high * inv_n) * 5.2f);
+            float eng = fminf(1.0f, sqrtf((float)sum_all * inv_n) * 3.0f);
+            smooth_bass = smooth_bass * 0.50f + bass * 0.50f;
+            smooth_mid = smooth_mid * 0.52f + mid * 0.48f;
+            smooth_high = smooth_high * 0.45f + high * 0.55f;
             smooth_eng = smooth_eng * 0.55f + eng * 0.45f;
+            avg_bass = avg_bass * 0.92f + bass * 0.08f;
+            avg_eng = avg_eng * 0.92f + eng * 0.08f;
+            float flux = fmaxf(0.0f, (bass - avg_bass) * 3.2f + (eng - avg_eng) * 1.8f);
+            float beat = fminf(1.0f, flux);
+            smooth_beat = (beat > smooth_beat) ? beat : (smooth_beat * 0.78f);
 
             if ((frame_cnt & 3u) == 0u) {
                 FILE *fp = fopen(AUDIO_ENV_TMP, "w");
                 if (fp) {
-                    fprintf(fp, "{\"b\":%.2f,\"v\":%.2f,\"e\":%.2f}\n", smooth_bass, smooth_mid, smooth_eng);
+                    fprintf(fp, "{\"b\":%.2f,\"v\":%.2f,\"h\":%.2f,\"e\":%.2f,\"p\":%.2f}\n",
+                        smooth_bass, smooth_mid, smooth_high, smooth_eng, smooth_beat);
                     fclose(fp);
                     rename(AUDIO_ENV_TMP, AUDIO_ENV_FILE);
                 }
