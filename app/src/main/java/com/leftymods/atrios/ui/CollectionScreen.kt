@@ -353,6 +353,141 @@ fun CollectionScreen(
             )
         }
 
+        // Section 0a: "Для вас" (MarshalX /feed generated playlists: Плейлист дня, Дежавю, Премьера, Тайник)
+        if (collection.generatedPlaylists.isNotEmpty()) {
+            item {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(
+                        "Для вас",
+                        color = Color.White,
+                        fontSize = 21.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        modifier = Modifier.padding(horizontal = 18.dp)
+                    )
+                    LazyRow(
+                        contentPadding = PaddingValues(horizontal = 18.dp),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        itemsIndexed(
+                            collection.generatedPlaylists,
+                            key = { idx, pl -> "${pl.uid}_${pl.kind}_$idx" }
+                        ) { _, pl ->
+                            Surface(
+                                shape = RoundedCornerShape(18.dp),
+                                color = OledCard,
+                                modifier = Modifier
+                                    .width(142.dp)
+                                    .border(1.dp, Color.White.copy(alpha = 0.07f), RoundedCornerShape(18.dp))
+                                    .clickable { onPlay("playlist", "${pl.uid}:${pl.kind}") }
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(10.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    AsyncCoverArt(
+                                        url = pl.coverUrl,
+                                        shape = RoundedCornerShape(12.dp),
+                                        modifier = Modifier.fillMaxWidth().aspectRatio(1f),
+                                        fallbackIcon = Icons.Rounded.AutoAwesome
+                                    )
+                                    Text(
+                                        pl.title,
+                                        color = Color.White,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 13.sp,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        if (pl.trackCount > 0) pluralTracks(pl.trackCount) else pl.subtitle.ifBlank { "Персональный" },
+                                        color = Color(0xFF8E8E98),
+                                        fontSize = 11.sp,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Section 0b: "Продолжить с других устройств" (MarshalX /queues)
+        if (collection.remoteQueues.isNotEmpty()) {
+            item {
+                Column(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Text(
+                        "Продолжить с других устройств",
+                        color = Color.White,
+                        fontSize = 19.sp,
+                        fontWeight = FontWeight.ExtraBold
+                    )
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        collection.remoteQueues.forEachIndexed { idx, q ->
+                            Surface(
+                                shape = RoundedCornerShape(14.dp),
+                                color = OledCard,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .border(1.dp, Color.White.copy(alpha = 0.06f), RoundedCornerShape(14.dp))
+                                    .clickable { onPlay("queue", q.id) }
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(38.dp)
+                                            .clip(CircleShape)
+                                            .background(musicAccent.copy(alpha = 0.16f)),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(
+                                            Icons.Rounded.DevicesOther,
+                                            contentDescription = null,
+                                            tint = musicAccent,
+                                            modifier = Modifier.size(20.dp)
+                                        )
+                                    }
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            q.title,
+                                            color = Color.White,
+                                            fontWeight = FontWeight.SemiBold,
+                                            fontSize = 14.sp,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        if (q.deviceName.isNotBlank()) {
+                                            Text(
+                                                q.deviceName,
+                                                color = Color(0xFF8E8E98),
+                                                fontSize = 12.sp,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
+                                    }
+                                    Icon(
+                                        Icons.Rounded.PlayArrow,
+                                        contentDescription = "Продолжить #${idx + 1}",
+                                        tint = musicAccent,
+                                        modifier = Modifier.size(22.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Section 1: "Мне нравится >" + dynamic count + top tracks preview
         item {
             Column(

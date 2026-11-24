@@ -397,6 +397,72 @@ data class YMusicPlaylist(
     }
 }
 
+data class YMusicGeneratedPlaylist(
+    val type: String,
+    val uid: Long,
+    val kind: Int,
+    val title: String,
+    val subtitle: String = "",
+    val trackCount: Int = 0,
+    val coverUrl: String = ""
+) {
+    companion object {
+        fun fromJsonArray(arr: JSONArray?): List<YMusicGeneratedPlaylist> {
+            if (arr == null) return emptyList()
+            return buildList {
+                for (i in 0 until arr.length()) {
+                    val o = arr.optJSONObject(i) ?: continue
+                    val title = o.optString("title", "").trim()
+                    val uid = o.optLong("uid", 0L)
+                    val kind = o.optInt("kind", 0)
+                    if (title.isNotEmpty() && kind > 0) {
+                        add(
+                            YMusicGeneratedPlaylist(
+                                type = o.optString("type", ""),
+                                uid = uid,
+                                kind = kind,
+                                title = title,
+                                subtitle = o.optString("subtitle", ""),
+                                trackCount = o.optInt("track_count", 0),
+                                coverUrl = o.optString("cover_url", "")
+                            )
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+data class YMusicRemoteQueue(
+    val id: String,
+    val title: String,
+    val deviceName: String = "",
+    val modified: String = ""
+) {
+    companion object {
+        fun fromJsonArray(arr: JSONArray?): List<YMusicRemoteQueue> {
+            if (arr == null) return emptyList()
+            return buildList {
+                for (i in 0 until arr.length()) {
+                    val o = arr.optJSONObject(i) ?: continue
+                    val id = o.optString("id", "").trim()
+                    if (id.isNotEmpty()) {
+                        add(
+                            YMusicRemoteQueue(
+                                id = id,
+                                title = o.optString("title", "Очередь").ifBlank { "Очередь" },
+                                deviceName = o.optString("device_name", ""),
+                                modified = o.optString("modified", "")
+                            )
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
 data class YMusicCollection(
     val loaded: Boolean = false,
     val likesCount: Int = 0,
@@ -404,7 +470,9 @@ data class YMusicCollection(
     val likedTracks: List<YMusicTrack> = emptyList(),
     val favoriteArtists: List<YMusicArtist> = emptyList(),
     val playlists: List<YMusicPlaylist> = emptyList(),
-    val likedAlbums: List<YMusicAlbum> = emptyList()
+    val likedAlbums: List<YMusicAlbum> = emptyList(),
+    val generatedPlaylists: List<YMusicGeneratedPlaylist> = emptyList(),
+    val remoteQueues: List<YMusicRemoteQueue> = emptyList()
 ) {
     companion object {
         fun fromJson(obj: JSONObject?): YMusicCollection {
@@ -416,7 +484,9 @@ data class YMusicCollection(
                 likedTracks = YMusicTrack.fromJsonArray(obj.optJSONArray("liked_tracks")),
                 favoriteArtists = YMusicArtist.fromJsonArray(obj.optJSONArray("favorite_artists")),
                 playlists = YMusicPlaylist.fromJsonArray(obj.optJSONArray("playlists")),
-                likedAlbums = YMusicAlbum.fromJsonArray(obj.optJSONArray("liked_albums"))
+                likedAlbums = YMusicAlbum.fromJsonArray(obj.optJSONArray("liked_albums")),
+                generatedPlaylists = YMusicGeneratedPlaylist.fromJsonArray(obj.optJSONArray("generated_playlists")),
+                remoteQueues = YMusicRemoteQueue.fromJsonArray(obj.optJSONArray("remote_queues"))
             )
         }
     }

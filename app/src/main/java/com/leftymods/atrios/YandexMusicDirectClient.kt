@@ -3,8 +3,10 @@ package com.leftymods.atrios
 import com.leftymods.atrios.model.YMusicAlbum
 import com.leftymods.atrios.model.YMusicArtist
 import com.leftymods.atrios.model.YMusicCollection
+import com.leftymods.atrios.model.YMusicGeneratedPlaylist
 import com.leftymods.atrios.model.YMusicOrb
 import com.leftymods.atrios.model.YMusicPlaylist
+import com.leftymods.atrios.model.YMusicRemoteQueue
 import com.leftymods.atrios.model.YMusicTrack
 import org.json.JSONArray
 import org.json.JSONObject
@@ -285,6 +287,73 @@ object YandexMusicDirectClient {
             dislikesCount = arr?.length() ?: 0
         }
 
+        val generatedPlaylists = mutableListOf<YMusicGeneratedPlaylist>()
+        runCatching {
+            val arr = apiGet(token, "/feed")
+                .optJSONObject("result")?.optJSONArray("generatedPlaylists") ?: JSONArray()
+            for (i in 0 until arr.length()) {
+                val item = arr.optJSONObject(i) ?: continue
+                val gType = item.optString("type", "").trim()
+                val data = item.optJSONObject("data") ?: continue
+                val title = data.optString("title", "").trim()
+                val plUid = data.optJSONObject("owner")?.optLong("uid", uid) ?: uid
+                val kind = data.optInt("kind", 0)
+                if (title.isEmpty() || kind <= 0) continue
+                val covObj = data.optJSONObject("cover")
+                val covUri = covObj?.optString("uri", "")?.ifBlank {
+                    covObj.optJSONArray("itemsUri")?.optString(0, "").orEmpty()
+                }?.ifBlank { data.optString("ogImage", "") }.orEmpty()
+                generatedPlaylists.add(
+                    YMusicGeneratedPlaylist(
+                        type = gType,
+                        uid = plUid,
+                        kind = kind,
+                        title = title,
+                        subtitle = data.optString("description", "").trim(),
+                        trackCount = data.optInt("trackCount", 0),
+                        coverUrl = coverUrl(covUri)
+                    )
+                )
+            }
+        }
+
+        val remoteQueues = mutableListOf<YMusicRemoteQueue>()
+        runCatching {
+            val arr = apiGet(token, "/queues")
+                .optJSONObject("result")?.optJSONArray("queues") ?: JSONArray()
+            for (i in 0 until arr.length()) {
+                if (remoteQueues.size >= 4) break
+                val q = arr.optJSONObject(i) ?: continue
+                val qId = q.optString("id", "").trim()
+                if (qId.isEmpty()) continue
+                val ctx = q.optJSONObject("context")
+                val ctxDesc = ctx?.optString("description", "")?.trim().orEmpty()
+                val ctxType = ctx?.optString("type", "")?.trim().orEmpty()
+                val qTitle = ctxDesc.ifBlank {
+                    when (ctxType.lowercase()) {
+                        "my_music" -> "Моя музыка"
+                        "radio" -> "Моя волна"
+                        "playlist" -> "Плейлист"
+                        "album" -> "Альбом"
+                        "artist" -> "Исполнитель"
+                        "search" -> "Поиск"
+                        else -> ctxType.ifBlank { "Очередь воспроизведения" }
+                    }
+                }
+                val devName = q.optJSONObject("device")?.optString("name", "")?.trim()
+                    ?.ifBlank { q.optString("from", "").trim() }
+                    ?: q.optString("from", "").trim()
+                remoteQueues.add(
+                    YMusicRemoteQueue(
+                        id = qId,
+                        title = qTitle,
+                        deviceName = devName,
+                        modified = q.optString("modified", "").trim()
+                    )
+                )
+            }
+        }
+
         val col = YMusicCollection(
             loaded = true,
             likesCount = likesCount,
@@ -292,12 +361,18 @@ object YandexMusicDirectClient {
             likedTracks = likedTracks,
             favoriteArtists = favArtists,
             playlists = playlists,
-            likedAlbums = likedAlbums
+            likedAlbums = likedAlbums,
+            generatedPlaylists = generatedPlaylists,
+            remoteQueues = remoteQueues
         )
         cachedCollection = col
         cachedCollectionToken = token
         cachedCollectionTs = System.currentTimeMillis()
-        DebugLogStore.log("OK", "DIRECT_YM", "collection -> ${likesCount} likes, ${favArtists.size} artists, ${playlists.size} pl (${System.currentTimeMillis() - t0}ms)")
+        DebugLogStore.log(
+            "OK",
+            "DIRECT_YM",
+            "collection -> $likesCount likes, ${favArtists.size} artists, ${playlists.size} pl, ${generatedPlaylists.size} feed, ${remoteQueues.size} queues (${System.currentTimeMillis() - t0}ms)"
+        )
         return col
     }
 
