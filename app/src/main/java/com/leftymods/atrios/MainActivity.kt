@@ -207,6 +207,7 @@ fun AtriOSApp(
     val lastYmSeqRef = remember { java.util.concurrent.atomic.AtomicLong(0L) }
     val pendingVolRef = remember { java.util.concurrent.atomic.AtomicInteger(-1) }
     val pendingVolUntilRef = remember { java.util.concurrent.atomic.AtomicLong(0L) }
+    val latestSliderPctRef = remember { java.util.concurrent.atomic.AtomicInteger(60) }
     val pendingEqUntilRef = remember { java.util.concurrent.atomic.AtomicLong(0L) }
     val lastVolumeDragRef = remember { java.util.concurrent.atomic.AtomicLong(0L) }
     val lastVolumeSentRef = remember { java.util.concurrent.atomic.AtomicLong(0L) }
@@ -366,6 +367,8 @@ fun AtriOSApp(
             }
         ).also { c ->
             c.setSavedRelayConfig(relayConfig.gatewayUrl, relayConfig.deviceId, relayConfig.token)
+            val savedYmTok = storage.loadYMusicToken()
+            if (savedYmTok.isNotBlank()) c.setDirectYMusicAuth(savedYmTok)
         }
     }
 
@@ -374,12 +377,13 @@ fun AtriOSApp(
         lastVolumeDragRef.set(nowMs)
         val clamped = vol.coerceIn(0f, 100f)
         val pct = clamped.toInt()
+        latestSliderPctRef.set(pct)
         sliderVol = clamped
         pendingVolRef.set(pct)
-        pendingVolUntilRef.set(nowMs + 2600L)
+        pendingVolUntilRef.set(nowMs + 3500L)
         status = status.copy(volume = pct, mute = pct == 0)
         val changed = pct != lastVolumeSentPctRef.get()
-        if (forceCommit || (changed && nowMs - lastVolumeSentRef.get() >= 75L)) {
+        if (forceCommit || pct == 0 || (changed && nowMs - lastVolumeSentRef.get() >= 110L)) {
             lastVolumeSentRef.set(nowMs)
             lastVolumeSentPctRef.set(pct)
             client.setVolume(pct)
@@ -899,7 +903,11 @@ fun AtriOSApp(
                                 searchResults = ymSearchResults,
                                 albumResults = ymAlbumResults,
                                 onRefresh = { client.ymusicStatus(); client.ymusicOrbs() },
-                                onLogin = { tok -> client.ymusicLogin(tok) },
+                                onLogin = { tok ->
+                                    storage.saveYMusicToken(tok)
+                                    client.setDirectYMusicAuth(tok)
+                                    client.ymusicLogin(tok)
+                                },
                                 onPlay = { mode, q ->
                                     val nowMs = System.currentTimeMillis()
                                     lastUserActionRef.set(nowMs)
@@ -1089,7 +1097,11 @@ fun AtriOSApp(
                                             item {
                                                 YandexAccountCard(
                                                     ymusic = status.ymusic,
-                                                    onLogin = { tok -> client.ymusicLogin(tok) },
+                                                    onLogin = { tok ->
+                                    storage.saveYMusicToken(tok)
+                                    client.setDirectYMusicAuth(tok)
+                                    client.ymusicLogin(tok)
+                                },
                                                     onLogout = { client.ymusicLogout() },
                                                     onRefresh = { client.ymusicStatus(); client.ymusicOrbs() }
                                                 )
@@ -1464,7 +1476,7 @@ fun AtriOSApp(
                             mute = status.mute,
                             speakersDesc = status.speakersDesc,
                             onVolumeChange = { dispatchVolumeLive(it, forceCommit = false) },
-                            onVolumeCommit = { dispatchVolumeLive(it.toFloat(), forceCommit = true) },
+                            onVolumeCommit = { dispatchVolumeLive(latestSliderPctRef.get().toFloat(), forceCommit = true) },
                             onToggleMute = { client.setMute(!status.mute) },
                             onAudioTest = { client.audioTest() },
                             showAudioTest = false
@@ -1510,7 +1522,7 @@ fun AtriOSApp(
                         scope.launch { delay(900); client.ymusicStatus() }
                     },
                     onVolumeChange = { dispatchVolumeLive(it, forceCommit = false) },
-                    onVolumeCommit = { dispatchVolumeLive(it.toFloat(), forceCommit = true) },
+                    onVolumeCommit = { dispatchVolumeLive(latestSliderPctRef.get().toFloat(), forceCommit = true) },
                     onControl = { action -> dispatchYMusicControl(action) },
                     onPlayWave = { client.ymusicPlay("wave", null) },
                     onDismiss = { showBigPlayer = false },

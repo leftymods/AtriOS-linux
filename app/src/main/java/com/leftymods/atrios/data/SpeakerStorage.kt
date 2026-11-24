@@ -76,4 +76,10 @@ class SpeakerStorage(context: Context) {
     fun savePaletteId(id: String) {
         prefs.edit().putString("app_palette", id).apply()
     }
+
+    fun loadYMusicToken(): String = prefs.getString("ymusic_token_v1", "")?.trim().orEmpty()
+
+    fun saveYMusicToken(token: String) {
+        prefs.edit().putString("ymusic_token_v1", token.trim()).apply()
+    }
 }

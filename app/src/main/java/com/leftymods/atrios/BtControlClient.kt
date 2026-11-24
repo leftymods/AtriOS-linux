@@ -115,6 +115,13 @@ class BtControlClient(
     @Volatile private var relayActive: Boolean = false
     @Volatile private var userDisconnected: Boolean = false
     @Volatile private var lastYmTs: Long = 0L
+    @Volatile private var directYmToken: String = ""
+    @Volatile private var directYmUid: Long = 0L
+
+    fun setDirectYMusicAuth(token: String, uid: Long = 0L) {
+        if (token.isNotBlank()) directYmToken = token.trim().removePrefix("OAuth ").trim()
+        if (uid > 0L) directYmUid = uid
+    }
 
     fun setSavedRelayConfig(gatewayUrl: String, deviceId: String, token: String) {
         if (gatewayUrl.startsWith("https://")) relayGateway = gatewayUrl.trim().trimEnd('/')
@@ -434,11 +441,19 @@ class BtControlClient(
     // Yandex Music (#30 contract)
     fun ymusicStatus() = sendCommand(JSONObject().put("cmd", "ymusic_status"))
 
-    fun ymusicLogin(token: String) = sendCommand(
-        JSONObject().put("cmd", "ymusic_login").put("token", token.trim())
-    )
+    fun ymusicLogin(token: String) {
+        val clean = token.trim().removePrefix("OAuth ").trim()
+        directYmToken = clean
+        YandexMusicDirectClient.clearCache()
+        sendCommand(JSONObject().put("cmd", "ymusic_login").put("token", clean))
+    }
 
-    fun ymusicLogout() = sendCommand(JSONObject().put("cmd", "ymusic_logout"))
+    fun ymusicLogout() {
+        directYmToken = ""
+        directYmUid = 0L
+        YandexMusicDirectClient.clearCache()
+        sendCommand(JSONObject().put("cmd", "ymusic_logout"))
+    }
 
     fun ymusicPlay(mode: String, query: String? = null) {
         val obj = JSONObject().put("cmd", "ymusic_play").put("mode", mode)
@@ -447,16 +462,60 @@ class BtControlClient(
     }
 
     fun ymusicSearch(query: String) {
+        val tok = directYmToken
+        if (tok.isNotBlank()) {
+            scope.launch(Dispatchers.IO) {
+                try {
+                    val (tracks, albums) = YandexMusicDirectClient.searchCatalog(tok, query)
+                    withContext(Dispatchers.Main) { onYMusicSearchResults(tracks, albums) }
+                    return@launch
+                } catch (e: Exception) {
+                    DebugLogStore.log("WARN", "DIRECT_YM", "search fallback: ${e.message}")
+                }
+                sendServerOffloadOrFallback("search", JSONObject().put("cmd", "ymusic_search").put("query", query))
+            }
+            return
+        }
         val payload = JSONObject().put("cmd", "ymusic_search").put("query", query)
         sendServerOffloadOrFallback("search", payload)
     }
 
     fun ymusicOrbs() {
+        val tok = directYmToken
+        if (tok.isNotBlank()) {
+            scope.launch(Dispatchers.IO) {
+                try {
+                    val orbs = YandexMusicDirectClient.fetchOrbs(tok, directYmUid)
+                    if (orbs.isNotEmpty()) {
+                        withContext(Dispatchers.Main) { onYMusicOrbsUpdate(orbs) }
+                        return@launch
+                    }
+                } catch (e: Exception) {
+                    DebugLogStore.log("WARN", "DIRECT_YM", "orbs fallback: ${e.message}")
+                }
+                sendServerOffloadOrFallback("orbs", JSONObject().put("cmd", "ymusic_orbs"))
+            }
+            return
+        }
         val payload = JSONObject().put("cmd", "ymusic_orbs")
         sendServerOffloadOrFallback("orbs", payload)
     }
 
-    fun ymusicCollection() {
+    fun ymusicCollection(force: Boolean = false) {
+        val tok = directYmToken
+        if (tok.isNotBlank()) {
+            scope.launch(Dispatchers.IO) {
+                try {
+                    val col = YandexMusicDirectClient.fetchCollection(tok, directYmUid, force = force)
+                    withContext(Dispatchers.Main) { onYMusicCollectionUpdate(col) }
+                    return@launch
+                } catch (e: Exception) {
+                    DebugLogStore.log("WARN", "DIRECT_YM", "collection fallback: ${e.message}")
+                }
+                sendServerOffloadOrFallback("collection", JSONObject().put("cmd", "ymusic_collection"))
+            }
+            return
+        }
         val payload = JSONObject().put("cmd", "ymusic_collection")
         sendServerOffloadOrFallback("collection", payload)
     }
