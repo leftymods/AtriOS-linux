@@ -600,6 +600,10 @@ class BtControlClient(
         JSONObject().put("cmd", "ymusic_control").put("action", action)
     )
 
+    fun setYnisonEnabled(enabled: Boolean) = sendCommand(
+        JSONObject().put("cmd", "set_ynison_enabled").put("enabled", enabled)
+    )
+
     // Timers (#10 contract)
     fun getTimers() = sendCommand(JSONObject().put("cmd", "get_timers"))
 

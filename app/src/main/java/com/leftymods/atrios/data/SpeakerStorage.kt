@@ -77,6 +77,19 @@ class SpeakerStorage(context: Context) {
         prefs.edit().putString("app_palette", id).apply()
     }
 
+    fun loadCustomColors(): Pair<Int, Int> {
+        val accent = prefs.getInt("custom_accent_argb", 0xFF00E5FF.toInt())
+        val secondary = prefs.getInt("custom_secondary_argb", 0xFFFF2E7A.toInt())
+        return accent to secondary
+    }
+
+    fun saveCustomColors(accentArgb: Int, secondaryArgb: Int) {
+        prefs.edit()
+            .putInt("custom_accent_argb", accentArgb)
+            .putInt("custom_secondary_argb", secondaryArgb)
+            .apply()
+    }
+
     fun loadYMusicToken(): String = prefs.getString("ymusic_token_v1", "")?.trim().orEmpty()
 
     fun saveYMusicToken(token: String) {

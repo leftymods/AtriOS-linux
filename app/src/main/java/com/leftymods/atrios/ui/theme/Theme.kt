@@ -9,6 +9,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.SideEffect
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalView
 import androidx.core.view.WindowCompat
@@ -26,7 +27,7 @@ val YmSurfaceContent = Color(0xFF121212)
 val YmSurfacePopover = Color(0xFF1A1A1A)
 val YmOutline = Color(0xFF333333)
 
-enum class AppPalette(
+data class AppPalette(
     val id: String,
     val label: String,
     val accent: Color,
@@ -40,48 +41,74 @@ enum class AppPalette(
     val borderCol: Color = Color(0xFF222228),
     val isYandexOriginal: Boolean = false
 ) {
-    YANDEX_ORIGINAL(
-        id = "yandex_original",
-        label = "Яндекс Музыка (Оригинал)",
-        accent = Color(0xFFFFFF00),
-        onAccent = Color(0xFF000000),
-        aura1 = Color(0xFFFFD400),
-        aura2 = Color(0xFFFF5500),
-        aura3 = Color(0xFFFF2478),
-        surfaceBg = YmSurfaceContent,
-        cardBg = YmSurfacePopover,
-        cardHighBg = Color(0xFF242424),
-        borderCol = YmOutline,
-        isYandexOriginal = true
-    ),
-    YANDEX(
-        "yandex", "Яндекс Жёлтый",
-        Color(0xFFFFEE00), Color(0xFF0D0D0D),
-        Color(0xFFFFD800), Color(0xFFFF3D00), Color(0xFFFF1C96)
-    ),
-    CYAN(
-        "cyan", "Неон Циан",
-        Color(0xFF00E5FF), Color(0xFF001F26),
-        Color(0xFF00E5FF), Color(0xFF2979FF), Color(0xFFB388FF)
-    ),
-    VIOLET(
-        "violet", "Кибер Фиолет",
-        Color(0xFFB388FF), Color(0xFF1A0047),
-        Color(0xFF9C4DFF), Color(0xFFFF1F8E), Color(0xFF448AFF)
-    ),
-    EMERALD(
-        "emerald", "Изумруд",
-        Color(0xFF00E676), Color(0xFF002611),
-        Color(0xFF00E676), Color(0xFF00BFA5), Color(0xFF64FFDA)
-    ),
-    CRIMSON(
-        "crimson", "Малиновый",
-        Color(0xFFFF2E7A), Color(0xFFFFFFFF),
-        Color(0xFFFF2E7A), Color(0xFFFF6D00), Color(0xFFFFD600)
-    );
-
     companion object {
-        fun fromId(id: String?): AppPalette = entries.firstOrNull { it.id == id } ?: YANDEX_ORIGINAL
+        val YANDEX_ORIGINAL = AppPalette(
+            id = "yandex_original",
+            label = "Яндекс Музыка (Оригинал)",
+            accent = Color(0xFFFFFF00),
+            onAccent = Color(0xFF000000),
+            aura1 = Color(0xFFFFD400),
+            aura2 = Color(0xFFFF5500),
+            aura3 = Color(0xFFFF2478),
+            surfaceBg = YmSurfaceContent,
+            cardBg = YmSurfacePopover,
+            cardHighBg = Color(0xFF242424),
+            borderCol = YmOutline,
+            isYandexOriginal = true
+        )
+        val YANDEX = AppPalette(
+            "yandex", "Яндекс Жёлтый",
+            Color(0xFFFFEE00), Color(0xFF0D0D0D),
+            Color(0xFFFFD800), Color(0xFFFF3D00), Color(0xFFFF1C96)
+        )
+        val CYAN = AppPalette(
+            "cyan", "Неон Циан",
+            Color(0xFF00E5FF), Color(0xFF001F26),
+            Color(0xFF00E5FF), Color(0xFF2979FF), Color(0xFFB388FF)
+        )
+        val VIOLET = AppPalette(
+            "violet", "Кибер Фиолет",
+            Color(0xFFB388FF), Color(0xFF1A0047),
+            Color(0xFF9C4DFF), Color(0xFFFF1F8E), Color(0xFF448AFF)
+        )
+        val EMERALD = AppPalette(
+            "emerald", "Изумруд",
+            Color(0xFF00E676), Color(0xFF002611),
+            Color(0xFF00E676), Color(0xFF00BFA5), Color(0xFF64FFDA)
+        )
+        val CRIMSON = AppPalette(
+            "crimson", "Малиновый",
+            Color(0xFFFF2E7A), Color(0xFFFFFFFF),
+            Color(0xFFFF2E7A), Color(0xFFFF6D00), Color(0xFFFFD600)
+        )
+
+        val entries: List<AppPalette> = listOf(YANDEX_ORIGINAL, YANDEX, CYAN, VIOLET, EMERALD, CRIMSON)
+
+        fun custom(accentArgb: Int, secondaryArgb: Int): AppPalette {
+            val acc = Color(accentArgb)
+            val sec = Color(secondaryArgb)
+            val onAcc = if (acc.luminance() > 0.45f) Color(0xFF000000) else Color(0xFFFFFFFF)
+            val mid = Color(
+                red = (acc.red * 0.55f + sec.red * 0.45f).coerceIn(0f, 1f),
+                green = (acc.green * 0.55f + sec.green * 0.45f).coerceIn(0f, 1f),
+                blue = (acc.blue * 0.55f + sec.blue * 0.45f).coerceIn(0f, 1f),
+                alpha = 1f
+            )
+            return AppPalette(
+                id = "custom",
+                label = "Своя тема",
+                accent = acc,
+                onAccent = onAcc,
+                aura1 = acc,
+                aura2 = sec,
+                aura3 = mid
+            )
+        }
+
+        fun fromId(id: String?, customAccentArgb: Int = 0xFF00E5FF.toInt(), customSecondaryArgb: Int = 0xFFFF2E7A.toInt()): AppPalette {
+            if (id == "custom") return custom(customAccentArgb, customSecondaryArgb)
+            return entries.firstOrNull { it.id == id } ?: YANDEX_ORIGINAL
+        }
     }
 }
 

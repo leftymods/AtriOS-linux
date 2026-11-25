@@ -24,12 +24,20 @@ data class BoundSpeakerInfo(
 data class AtriVaultData(
     val yandexMusicToken: String = "",
     val yandexMusicLogin: String = "",
-    val boundDeviceIds: List<String> = emptyList()
+    val boundDeviceIds: List<String> = emptyList(),
+    val relayDeviceId: String = "",
+    val relayToken: String = "",
+    val relayUrl: String = "",
+    val speakerName: String = ""
 ) {
     fun toJson(): String = JSONObject().apply {
         put("ym_token", yandexMusicToken)
         put("ym_login", yandexMusicLogin)
         put("bound_devices", JSONArray(boundDeviceIds))
+        put("relay_device_id", relayDeviceId)
+        put("relay_token", relayToken)
+        put("relay_url", relayUrl)
+        put("speaker_name", speakerName)
     }.toString()
 
     companion object {
@@ -46,7 +54,11 @@ data class AtriVaultData(
             return AtriVaultData(
                 yandexMusicToken = j.optString("ym_token", ""),
                 yandexMusicLogin = j.optString("ym_login", ""),
-                boundDeviceIds = devs
+                boundDeviceIds = devs,
+                relayDeviceId = j.optString("relay_device_id", ""),
+                relayToken = j.optString("relay_token", ""),
+                relayUrl = j.optString("relay_url", ""),
+                speakerName = j.optString("speaker_name", "")
             )
         }
     }

@@ -1,7 +1,9 @@
 package com.leftymods.atrios
 
 import android.Manifest
+import android.accounts.AccountManager
 import android.annotation.SuppressLint
+import android.app.Activity
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothManager
@@ -50,10 +52,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -142,7 +148,10 @@ private enum class SettingsPage(val title: String, val subtitle: String, val ico
 fun AtriOSRoot() {
     val context = LocalContext.current
     val storage = remember { SpeakerStorage(context) }
-    var palette by remember { mutableStateOf(AppPalette.fromId(storage.loadPaletteId())) }
+    val initCustom = remember { storage.loadCustomColors() }
+    var palette by remember {
+        mutableStateOf(AppPalette.fromId(storage.loadPaletteId(), initCustom.first, initCustom.second))
+    }
 
     AtriOSTheme(palette = palette) {
         AtriOSApp(
@@ -151,6 +160,9 @@ fun AtriOSRoot() {
             onPaletteChange = { p ->
                 palette = p
                 storage.savePaletteId(p.id)
+                if (p.id == "custom") {
+                    storage.saveCustomColors(p.accent.toArgb(), p.aura2.toArgb())
+                }
             }
         )
     }
@@ -625,6 +637,24 @@ fun AtriOSApp(
         }
     }
 
+    // Automatically persist relayConfig into encrypted AtriOS Vault whenever logged in and configured
+    LaunchedEffect(accountState.loggedIn, relayConfig.deviceId, relayConfig.token, relayConfig.gatewayUrl) {
+        if (accountState.loggedIn && relayConfig.deviceId.isNotBlank() && relayConfig.token.isNotBlank()) {
+            val v = accountState.vault
+            val spkName = activeDevice?.name?.takeIf { it.isNotBlank() } ?: status.model.ifBlank { "AtriStation" }
+            if (v.relayDeviceId != relayConfig.deviceId || v.relayToken != relayConfig.token || v.relayUrl != relayConfig.gatewayUrl) {
+                val updated = v.copy(
+                    relayDeviceId = relayConfig.deviceId,
+                    relayToken = relayConfig.token,
+                    relayUrl = relayConfig.gatewayUrl,
+                    speakerName = spkName
+                )
+                withContext(Dispatchers.IO) { accountClient.saveVault(updated) }
+                    .onSuccess { accountState = it }
+            }
+        }
+    }
+
     LaunchedEffect(connected, status.ymusic.isActive) {
         // Only poll ymusic_status on BT transport; Relay already polls full /status (with ymusic) every 1.5s
         while (connected && status.ymusic.isActive && !client.isRelayActive()) {
@@ -723,6 +753,43 @@ fun AtriOSApp(
                                 }
                             }
                         }
+                        if (!accountState.loggedIn) {
+                            item {
+                                AtriIdOfflineLoginCard(
+                                    palette = palette,
+                                    busy = accountBusy,
+                                    error = accountError,
+                                    onLogin = { u, p ->
+                                        accountBusy = true; accountError = null
+                                        scope.launch {
+                                            val res = withContext(Dispatchers.IO) { accountClient.login(u, p) }
+                                            res.onSuccess { st ->
+                                                accountState = st
+                                                val v = st.vault
+                                                if (v.yandexMusicToken.isNotBlank()) {
+                                                    storage.saveYMusicToken(v.yandexMusicToken)
+                                                    client.setDirectYMusicAuth(v.yandexMusicToken)
+                                                }
+                                                if (v.relayDeviceId.isNotBlank() && v.relayToken.isNotBlank()) {
+                                                    val cfg = RelayConfig(
+                                                        gatewayUrl = v.relayUrl.ifBlank { "https://ai.leftymods.tech" },
+                                                        deviceId = v.relayDeviceId,
+                                                        token = v.relayToken
+                                                    )
+                                                    relayConfig = cfg
+                                                    storage.saveRelayConfig(cfg)
+                                                    autoConnectState = "trying"
+                                                    client.connectRelay(cfg.gatewayUrl, cfg.deviceId, cfg.token)
+                                                } else {
+                                                    accountError = "Аккаунт открыт, но в облаке ещё нет сохранённой колонки"
+                                                }
+                                            }.onFailure { accountError = it.message }
+                                            accountBusy = false
+                                        }
+                                    }
+                                )
+                            }
+                        }
                         if (!hasPerms) {
                             item {
                                 Surface(shape = RoundedCornerShape(22.dp), color = OledCard) {
@@ -756,7 +823,7 @@ fun AtriOSApp(
                             var tokInput by remember(relayConfig.token) { mutableStateOf(relayConfig.token) }
                             Surface(shape = RoundedCornerShape(22.dp), color = OledCard) {
                                 Column(Modifier.fillMaxWidth().padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                                    Text("Через интернет (HTTPS Relay)", fontWeight = FontWeight.Bold, color = Color.White)
+                                    Text("Подключение через интернет", fontWeight = FontWeight.Bold, color = Color.White)
                                     OutlinedTextField(value = gwInput, onValueChange = { gwInput = it }, label = { Text("HTTPS шлюз") }, singleLine = true, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp))
                                     OutlinedTextField(value = didInput, onValueChange = { didInput = it }, label = { Text("Device ID") }, singleLine = true, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp))
                                     OutlinedTextField(value = tokInput, onValueChange = { tokInput = it }, label = { Text("Bearer токен") }, singleLine = true, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp))
@@ -903,7 +970,7 @@ fun AtriOSApp(
                 ) { currentTab ->
                     val currentDeviceId = relayConfig.deviceId
                     val currentSpeakerName = activeDevice?.name?.takeIf { it.isNotBlank() } ?: "AtriStation"
-                    val transportLabel = if (client.isRelayActive()) "TLS Relay" else "Bluetooth SPP"
+                    val transportLabel = if (client.isRelayActive()) "Через интернет" else "Bluetooth"
 
                     when (currentTab) {
                         AppTab.HOME -> {
@@ -951,7 +1018,11 @@ fun AtriOSApp(
                                         val initVault = AtriVaultData(
                                             yandexMusicToken = storage.loadYMusicToken(),
                                             yandexMusicLogin = status.ymusic.login,
-                                            boundDeviceIds = if (currentDeviceId.isNotBlank()) listOf(currentDeviceId) else emptyList()
+                                            boundDeviceIds = if (currentDeviceId.isNotBlank()) listOf(currentDeviceId) else emptyList(),
+                                            relayDeviceId = relayConfig.deviceId,
+                                            relayToken = relayConfig.token,
+                                            relayUrl = relayConfig.gatewayUrl,
+                                            speakerName = currentSpeakerName
                                         )
                                         val res = withContext(Dispatchers.IO) { accountClient.register(u, p, initVault) }
                                         res.onSuccess { st ->
@@ -1044,6 +1115,10 @@ fun AtriOSApp(
                                                 .onSuccess { accountState = it }
                                         }
                                     }
+                                },
+                                onToggleYnison = { enabled ->
+                                    status = status.copy(ymusic = status.ymusic.copy(ynisonEnabled = enabled))
+                                    client.setYnisonEnabled(enabled)
                                 }
                             )
                         }
@@ -1116,7 +1191,7 @@ fun AtriOSApp(
                             ) {
                                 if (curPage == SettingsPage.ROOT) {
                                     item {
-                                        val transportLabel = if (client.isRelayActive()) "TLS Relay" else "Bluetooth SPP"
+                                        val transportLabel = if (client.isRelayActive()) "Через интернет" else "Bluetooth"
                                         Row(
                                             modifier = Modifier.fillMaxWidth().padding(bottom = 2.dp),
                                             horizontalArrangement = Arrangement.SpaceBetween,
@@ -1323,7 +1398,7 @@ fun AtriOSApp(
                                                     Column(Modifier.fillMaxWidth().padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                                                         Text("Выберите палитру приложения", color = Color.White, fontWeight = FontWeight.SemiBold)
                                                         AppPalette.entries.forEach { p ->
-                                                            val sel = p == palette
+                                                            val sel = p.id == palette.id
                                                             Row(
                                                                 modifier = Modifier
                                                                     .fillMaxWidth()
@@ -1344,6 +1419,129 @@ fun AtriOSApp(
                                                                 if (sel) Icon(Icons.Rounded.CheckCircle, contentDescription = null, tint = p.accent)
                                                             }
                                                         }
+                                                    }
+                                                }
+                                            }
+                                            item {
+                                                val savedCustom = remember { storage.loadCustomColors() }
+                                                var customAccent by remember {
+                                                    mutableStateOf(if (palette.id == "custom") palette.accent else Color(savedCustom.first))
+                                                }
+                                                var customSecondary by remember {
+                                                    mutableStateOf(if (palette.id == "custom") palette.aura2 else Color(savedCustom.second))
+                                                }
+                                                var accentHue by remember {
+                                                    mutableFloatStateOf(
+                                                        FloatArray(3).also {
+                                                            android.graphics.Color.colorToHSV(customAccent.toArgb(), it)
+                                                        }[0]
+                                                    )
+                                                }
+                                                var secondaryHue by remember {
+                                                    mutableFloatStateOf(
+                                                        FloatArray(3).also {
+                                                            android.graphics.Color.colorToHSV(customSecondary.toArgb(), it)
+                                                        }[0]
+                                                    )
+                                                }
+                                                val swatches = listOf(
+                                                    Color(0xFF00E5FF), Color(0xFFFF2E7A), Color(0xFFFFEE00),
+                                                    Color(0xFF00E676), Color(0xFFB388FF), Color(0xFFFF6D00),
+                                                    Color(0xFF448AFF), Color(0xFFFF5252)
+                                                )
+                                                val isCustomActive = palette.id == "custom"
+                                                Surface(
+                                                    shape = RoundedCornerShape(22.dp),
+                                                    color = OledCard,
+                                                    modifier = Modifier.border(
+                                                        1.dp,
+                                                        if (isCustomActive) palette.accent else Color.White.copy(alpha = 0.06f),
+                                                        RoundedCornerShape(22.dp)
+                                                    )
+                                                ) {
+                                                    Column(Modifier.fillMaxWidth().padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                                                        Row(
+                                                            modifier = Modifier.fillMaxWidth(),
+                                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                                            verticalAlignment = Alignment.CenterVertically
+                                                        ) {
+                                                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                                                Icon(Icons.Rounded.ColorLens, contentDescription = null, tint = customAccent)
+                                                                Text("Своя тема", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                                                            }
+                                                            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                                                Box(Modifier.size(20.dp).clip(CircleShape).background(customAccent))
+                                                                Box(Modifier.size(20.dp).clip(CircleShape).background(customSecondary))
+                                                            }
+                                                        }
+                                                        Text("Акцентный цвет", color = Color(0xFFA0A0B0), fontSize = 12.sp)
+                                                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                                            swatches.forEach { sw ->
+                                                                Box(
+                                                                    modifier = Modifier
+                                                                        .size(28.dp)
+                                                                        .clip(CircleShape)
+                                                                        .background(sw)
+                                                                        .border(
+                                                                            if (sw.toArgb() == customAccent.toArgb()) 2.dp else 0.dp,
+                                                                            Color.White,
+                                                                            CircleShape
+                                                                        )
+                                                                        .clickable {
+                                                                            customAccent = sw
+                                                                            accentHue = FloatArray(3).also {
+                                                                                android.graphics.Color.colorToHSV(sw.toArgb(), it)
+                                                                            }[0]
+                                                                            onPaletteChange(AppPalette.custom(sw.toArgb(), customSecondary.toArgb()))
+                                                                        }
+                                                                )
+                                                            }
+                                                        }
+                                                        Slider(
+                                                            value = accentHue,
+                                                            onValueChange = { h ->
+                                                                accentHue = h
+                                                                val argb = android.graphics.Color.HSVToColor(floatArrayOf(h, 0.92f, 1.0f))
+                                                                customAccent = Color(argb)
+                                                                onPaletteChange(AppPalette.custom(argb, customSecondary.toArgb()))
+                                                            },
+                                                            valueRange = 0f..360f,
+                                                            colors = SliderDefaults.colors(thumbColor = customAccent, activeTrackColor = customAccent)
+                                                        )
+                                                        Text("Цвет свечения сферы", color = Color(0xFFA0A0B0), fontSize = 12.sp)
+                                                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                                            swatches.forEach { sw ->
+                                                                Box(
+                                                                    modifier = Modifier
+                                                                        .size(28.dp)
+                                                                        .clip(CircleShape)
+                                                                        .background(sw)
+                                                                        .border(
+                                                                            if (sw.toArgb() == customSecondary.toArgb()) 2.dp else 0.dp,
+                                                                            Color.White,
+                                                                            CircleShape
+                                                                        )
+                                                                        .clickable {
+                                                                            customSecondary = sw
+                                                                            secondaryHue = FloatArray(3).also {
+                                                                                android.graphics.Color.colorToHSV(sw.toArgb(), it)
+                                                                            }[0]
+                                                                            onPaletteChange(AppPalette.custom(customAccent.toArgb(), sw.toArgb()))
+                                                                        }
+                                                                )
+                                                            }
+                                                        }
+                                                        Slider(
+                                                            value = secondaryHue,
+                                                            onValueChange = { h ->
+                                                                secondaryHue = h
+                                                                val argb = android.graphics.Color.HSVToColor(floatArrayOf(h, 0.92f, 1.0f))
+                                                                customSecondary = Color(argb)
+                                                                onPaletteChange(AppPalette.custom(customAccent.toArgb(), argb))
+                                                            },
+                                                            valueRange = 0f..360f,
+                                                            colors = SliderDefaults.colors(thumbColor = customSecondary, activeTrackColor = customSecondary)
+                                                        )
                                                     }
                                                 }
                                             }
@@ -1932,6 +2130,91 @@ private fun MiniPlayerCard(
                         tint = if (palette.isYandexOriginal) palette.accent else Color.White,
                         modifier = Modifier.size(26.dp)
                     )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AtriIdOfflineLoginCard(
+    palette: AppPalette,
+    busy: Boolean,
+    error: String?,
+    onLogin: (String, String) -> Unit
+) {
+    var username by remember { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
+    val passFocus = remember { FocusRequester() }
+    val googlePicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { res ->
+        if (res.resultCode == Activity.RESULT_OK) {
+            val email = res.data?.getStringExtra(AccountManager.KEY_ACCOUNT_NAME)?.trim().orEmpty()
+            if (email.isNotBlank()) {
+                username = email
+                runCatching { passFocus.requestFocus() }
+            }
+        }
+    }
+
+    Surface(shape = RoundedCornerShape(22.dp), color = OledCard) {
+        Column(Modifier.fillMaxWidth().padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Icon(Icons.Rounded.VerifiedUser, contentDescription = null, tint = palette.accent)
+                Text("Войти по AtriOS ID", fontWeight = FontWeight.Bold, color = Color.White, fontSize = 16.sp)
+            }
+            Text(
+                "Восстановите колонку из защищённого облака без повторной настройки по Bluetooth.",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontSize = 12.sp
+            )
+            OutlinedButton(
+                onClick = {
+                    val intent = AccountManager.newChooseAccountIntent(
+                        null, null, arrayOf("com.google"), null, null, null, null
+                    )
+                    googlePicker.launch(intent)
+                },
+                enabled = !busy,
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(14.dp)
+            ) {
+                Icon(Icons.Rounded.Email, contentDescription = null, tint = palette.accent, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("Выбрать почту Google", color = Color.White)
+            }
+            OutlinedTextField(
+                value = username,
+                onValueChange = { username = it },
+                label = { Text("Почта Google или логин") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(14.dp)
+            )
+            OutlinedTextField(
+                value = password,
+                onValueChange = { password = it },
+                label = { Text("Мастер-пароль") },
+                visualTransformation = PasswordVisualTransformation(),
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth().focusRequester(passFocus),
+                shape = RoundedCornerShape(14.dp)
+            )
+            if (!error.isNullOrBlank()) {
+                Text(error, color = Color(0xFFFF6B6B), fontSize = 12.sp)
+            }
+            Button(
+                onClick = { onLogin(username, password) },
+                enabled = !busy && username.trim().length >= 3 && password.length >= 6,
+                modifier = Modifier.fillMaxWidth().height(48.dp),
+                shape = RoundedCornerShape(99.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = palette.accent, contentColor = palette.onAccent)
+            ) {
+                if (busy) {
+                    CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp, color = palette.onAccent)
+                } else {
+                    Text("Войти и подключиться", fontWeight = FontWeight.Bold)
                 }
             }
         }

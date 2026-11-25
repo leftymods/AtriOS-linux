@@ -8,6 +8,12 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
@@ -25,6 +31,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -56,7 +63,8 @@ fun IntegrationsScreen(
     onBindCurrentSpeaker: () -> Unit,
     onUnbindSpeaker: (String) -> Unit,
     onYandexLoginToken: (String) -> Unit,
-    onYandexLogout: () -> Unit
+    onYandexLogout: () -> Unit,
+    onToggleYnison: (Boolean) -> Unit = {}
 ) {
     var showYmWebView by remember { mutableStateOf(false) }
     var isRegisterMode by remember { mutableStateOf(false) }
@@ -123,7 +131,7 @@ fun IntegrationsScreen(
                     )
                     Text(
                         text = if (accountState.loggedIn) {
-                            "Zero-Knowledge Vault v${accountState.vaultVersion} · AES-256-GCM"
+                            "Защищённое облако"
                         } else {
                             "Шифрование на устройстве · сервер не видит токены"
                         },
@@ -164,7 +172,7 @@ fun IntegrationsScreen(
                 OutlinedTextField(
                     value = password,
                     onValueChange = { password = it },
-                    label = { Text("Мастер-пароль (для шифрования Vault)") },
+                    label = { Text("Мастер-пароль") },
                     visualTransformation = PasswordVisualTransformation(),
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth().focusRequester(passwordFocusRequester)
@@ -234,14 +242,38 @@ fun IntegrationsScreen(
                     Text(accountError, color = Color(0xFFFF6B6B), fontSize = 12.sp)
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    val syncSpin = if (accountBusy) {
+                        val inf = rememberInfiniteTransition(label = "syncSpin")
+                        val rot by inf.animateFloat(
+                            initialValue = 0f,
+                            targetValue = 360f,
+                            animationSpec = infiniteRepeatable(
+                                animation = tween(900, easing = LinearEasing),
+                                repeatMode = RepeatMode.Restart
+                            ),
+                            label = "syncRot"
+                        )
+                        rot
+                    } else 0f
                     OutlinedButton(
                         onClick = onAccountSync,
                         enabled = !accountBusy,
                         modifier = Modifier.weight(1f)
                     ) {
-                        Icon(Icons.Rounded.Sync, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
+                        Icon(
+                            Icons.Rounded.Sync,
+                            contentDescription = null,
+                            tint = Color.White,
+                            modifier = Modifier
+                                .size(16.dp)
+                                .graphicsLayer { rotationZ = syncSpin }
+                        )
                         Spacer(Modifier.width(6.dp))
-                        Text("Синхронизировать", color = Color.White, fontSize = 13.sp)
+                        Text(
+                            if (accountBusy) "Синхронизация..." else "Синхронизировать",
+                            color = Color.White,
+                            fontSize = 13.sp
+                        )
                     }
                     OutlinedButton(
                         onClick = onAccountLogout,
@@ -299,6 +331,37 @@ fun IntegrationsScreen(
             }
 
             if (ymStatus.loggedIn) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(OledCardHigh)
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            "Управление из приложения Яндекс Музыка",
+                            color = Color.White,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                        Text(
+                            if (ymStatus.ynisonEnabled) "Колонка видна в списке устройств" else "Отключено — колонка скрыта в ЯМ",
+                            color = Color(0xFFA0A0B0),
+                            fontSize = 11.sp
+                        )
+                    }
+                    Switch(
+                        checked = ymStatus.ynisonEnabled,
+                        onCheckedChange = { onToggleYnison(it) },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = palette.onAccent,
+                            checkedTrackColor = palette.accent
+                        )
+                    )
+                }
                 OutlinedButton(
                     onClick = onYandexLogout,
                     modifier = Modifier.fillMaxWidth(),
