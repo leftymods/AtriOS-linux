@@ -868,6 +868,10 @@ impl WssClient {
         self.send_frame(0xA, payload)
     }
 
+    pub fn send_close(&mut self, code: u16) {
+        let _ = self.send_frame(0x8, &code.to_be_bytes());
+    }
+
     fn read_more(&mut self, deadline: Instant) -> Result<bool, String> {
         let mut tmp = [0u8; 8192];
         let fd = self.tcp.as_raw_fd();

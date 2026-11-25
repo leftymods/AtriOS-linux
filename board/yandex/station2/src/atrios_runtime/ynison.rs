@@ -13,7 +13,7 @@ const YNISON_REDIRECT_URL: &str =
 const YNISON_STATE_PATH: &str = "/ynison_state.YnisonStateService/PutYnisonState";
 const YNISON_ORIGIN: &str = "https://music.yandex.ru";
 const YNISON_APP_NAME: &str = "AtriStation";
-const YNISON_APP_VERSION: &str = "1.12.0";
+const YNISON_APP_VERSION: &str = "1.13.0";
 const YNISON_DEVICE_ID_FILE: &str = "/var/lib/atrios/ynison_device_id";
 
 static RID_SEQ: AtomicU64 = AtomicU64::new(1);
@@ -379,10 +379,16 @@ fn run_ynison_session(token: &str, device_id: &str, stop_flag: &'static AtomicBo
     let mut last_pushed_paused = true;
 
     while !stop_flag.load(Ordering::SeqCst) {
-        // Reconnect immediately if user logged out or switched Yandex token
+        // Auto-remove immediately when user logs out or switches Yandex token:
+        // send clean RFC 6455 Close(1000) so Ynison removes AtriStation from official app right away!
         match load_auth() {
             Some(a) if a.token == token => {}
-            _ => return Ok(()),
+            _ => {
+                println!("[ynison] Yandex Music logged out — sending clean Close(1000) to remove AtriStation");
+                send_ymusic_cmd("stop");
+                ws.send_close(1000);
+                return Ok(());
+            }
         }
 
         if last_ping.elapsed() >= Duration::from_secs(keepalive_sec) {
@@ -585,7 +591,7 @@ pub fn spawn_ynison_thread(stop_flag: &'static AtomicBool) {
         let mut backoff_sec = 2u64;
         while !stop_flag.load(Ordering::SeqCst) {
             let Some(auth) = load_auth() else {
-                thread::sleep(Duration::from_secs(5));
+                thread::sleep(Duration::from_secs(1));
                 continue;
             };
             match run_ynison_session(&auth.token, &device_id, stop_flag) {

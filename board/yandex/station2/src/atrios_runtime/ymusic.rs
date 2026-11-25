@@ -678,6 +678,49 @@ fn station_search_fallback_query(st: &str) -> &'static str {
     }
 }
 
+/// MarshalX RotorSessionsMixin: POST /rotor/session/new (modern radio session API with queue dedup)
+fn fetch_rotor_session_new(
+    auth: &YMusicAuth,
+    seed: &str,
+    queue_ids: &[String],
+) -> Result<(String, String, Vec<TrackInfo>), String> {
+    let mut fields = vec![
+        ("seeds", Json::Arr(vec![Json::Str(seed.into())])),
+        ("includeTracksInResponse", Json::Bool(true)),
+    ];
+    if !queue_ids.is_empty() {
+        fields.push((
+            "queue",
+            Json::Arr(
+                queue_ids
+                    .iter()
+                    .take(25)
+                    .map(|s| Json::Str(s.clone()))
+                    .collect::<Vec<Json>>(),
+            ),
+        ));
+    }
+    let resp = api_post_json(&auth.token, "/rotor/session/new", &obj(fields))?;
+    let res = resp.get("result").ok_or("Empty rotor session response")?;
+    let sid = res.get_str("radioSessionId").unwrap_or("").to_string();
+    let batch_id = res.get_str("batchId").unwrap_or("").to_string();
+    let seq = res
+        .get("sequence")
+        .and_then(|v| v.as_arr())
+        .ok_or("Missing sequence in rotor session")?;
+    let tracks: Vec<TrackInfo> = seq
+        .iter()
+        .filter_map(|item| {
+            let liked = item.get("liked").and_then(|v| v.as_bool()).unwrap_or(false);
+            item.get("track").and_then(|t| parse_track_json(t, liked))
+        })
+        .collect::<Vec<TrackInfo>>();
+    if tracks.is_empty() {
+        return Err("Empty rotor session tracks".into());
+    }
+    Ok((sid, batch_id, tracks))
+}
+
 fn fetch_rotor_station(
     auth: &YMusicAuth,
     station: &str,
@@ -690,6 +733,14 @@ fn fetch_rotor_station(
         "activity:workout" => "activity:run",
         other => other,
     };
+    // Prefer modern MarshalX RotorSessions API (/rotor/session/new) first
+    let q_vec: Vec<String> = queue_track_id
+        .filter(|s| !s.is_empty())
+        .map(|s| vec![s.to_string()])
+        .unwrap_or_default();
+    if let Ok((_sid, bid, tracks)) = fetch_rotor_session_new(auth, st, &q_vec) {
+        return Ok((bid, tracks));
+    }
     let ep = match queue_track_id {
         Some(tid) if !tid.is_empty() => {
             format!("/rotor/station/{st}/tracks?settings2=true&queue={}", url_encode(tid))
