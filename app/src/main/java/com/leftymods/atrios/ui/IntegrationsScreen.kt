@@ -1,9 +1,13 @@
 package com.leftymods.atrios.ui
 
+import android.accounts.AccountManager
 import android.annotation.SuppressLint
+import android.app.Activity
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
@@ -18,6 +22,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
@@ -56,11 +62,24 @@ fun IntegrationsScreen(
     var isRegisterMode by remember { mutableStateOf(false) }
     var username by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
+    val passwordFocusRequester = remember { FocusRequester() }
+    val googleAccountLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { res ->
+        if (res.resultCode == Activity.RESULT_OK) {
+            val email = res.data?.getStringExtra(AccountManager.KEY_ACCOUNT_NAME)?.trim().orEmpty()
+            if (email.isNotBlank()) {
+                username = email
+                runCatching { passwordFocusRequester.requestFocus() }
+            }
+        }
+    }
 
     Column(
         modifier = Modifier
             .fillMaxSize()
             .background(OledBlack)
+            .statusBarsPadding()
             .verticalScroll(rememberScrollState())
             .padding(horizontal = 20.dp, vertical = 14.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
@@ -115,10 +134,30 @@ fun IntegrationsScreen(
             }
 
             if (!accountState.loggedIn) {
+                OutlinedButton(
+                    onClick = {
+                        val intent = AccountManager.newChooseAccountIntent(
+                            null,
+                            null,
+                            arrayOf("com.google"),
+                            null,
+                            null,
+                            null,
+                            null
+                        )
+                        googleAccountLauncher.launch(intent)
+                    },
+                    enabled = !accountBusy,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(Icons.Rounded.Email, contentDescription = null, tint = palette.accent, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Войти через Google (выбрать почту)", color = Color.White, fontWeight = FontWeight.Medium)
+                }
                 OutlinedTextField(
                     value = username,
                     onValueChange = { username = it },
-                    label = { Text("Логин (a-z, 0-9)") },
+                    label = { Text("Почта Google или логин") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
@@ -128,7 +167,7 @@ fun IntegrationsScreen(
                     label = { Text("Мастер-пароль (для шифрования Vault)") },
                     visualTransformation = PasswordVisualTransformation(),
                     singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier.fillMaxWidth().focusRequester(passwordFocusRequester)
                 )
                 if (!accountError.isNullOrBlank()) {
                     Text(accountError, color = Color(0xFFFF6B6B), fontSize = 12.sp)
@@ -246,7 +285,7 @@ fun IntegrationsScreen(
                     Icon(Icons.Rounded.MusicNote, contentDescription = null, tint = Color(0xFFFFCC00))
                 }
                 Column(modifier = Modifier.weight(1f)) {
-                    Text("Яндекс Музыка (Ynison)", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                    Text("Яндекс Музыка", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
                     Text(
                         text = if (ymStatus.loggedIn) {
                             "Активна (${ymStatus.displayName.ifBlank { ymStatus.login }}) · AtriStation видна в ЯМ"
@@ -282,9 +321,7 @@ fun IntegrationsScreen(
             }
         }
 
-        // 3. Extensible Service Slots
-        FutureIntegrationRow(Icons.Rounded.Headphones, "Spotify Connect", "Скоро · прямой стриминг на колонку")
-        FutureIntegrationRow(Icons.Rounded.LibraryMusic, "VK Музыка", "Скоро · интеграция через AtriOS Vault")
+        // 3. Smart Home Slot
         FutureIntegrationRow(Icons.Rounded.Home, "Home Assistant / Умный дом", "Скоро · голосовое управление устройствами")
 
         Spacer(Modifier.height(16.dp))

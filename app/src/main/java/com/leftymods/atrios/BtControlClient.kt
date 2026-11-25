@@ -311,7 +311,7 @@ class BtControlClient(
                         sendCommand(JSONObject().put("cmd", "get_timers"))
                         sendCommand(JSONObject().put("cmd", "get_alarms"))
                     }
-                    delay(1500)
+                    delay(1200)
                 } catch (e: kotlinx.coroutines.CancellationException) {
                     throw e
                 } catch (e: Exception) {

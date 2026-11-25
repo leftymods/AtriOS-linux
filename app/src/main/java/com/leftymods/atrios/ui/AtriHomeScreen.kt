@@ -43,7 +43,7 @@ fun AtriHomeScreen(
     onOpenVolume: () -> Unit,
     onOpenEq: () -> Unit,
     onOpenIntegrations: () -> Unit,
-    onStartWaveVoice: () -> Unit
+    onOpenTimers: () -> Unit
 ) {
     val ym = status.ymusic
     val isPlaying = ym.state == "playing"
@@ -54,12 +54,13 @@ fun AtriHomeScreen(
         modifier = Modifier
             .fillMaxSize()
             .background(OledBlack)
+            .statusBarsPadding()
             .verticalScroll(rememberScrollState())
             .padding(horizontal = 20.dp, vertical = 14.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        // Top status bar
+        // Top status bar (no duplicate EQ/Volume buttons — those live in the 2x2 Quick Action grid below)
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
@@ -87,37 +88,13 @@ fun AtriHomeScreen(
                     Text(
                         text = buildString {
                             append(transportLabel)
-                            if (ym.loggedIn) append(" · Ynison активен")
+                            append(" · Подключена")
                             if (accountState.loggedIn) append(" · @${accountState.username}")
                         },
                         color = Color(0xFFA0A0B0),
                         fontSize = 12.sp,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
-                    )
-                }
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                IconButton(
-                    onClick = onOpenEq,
-                    modifier = Modifier
-                        .size(40.dp)
-                        .clip(CircleShape)
-                        .background(OledCard)
-                ) {
-                    Icon(Icons.Rounded.Equalizer, contentDescription = "Эквалайзер", tint = Color.White)
-                }
-                IconButton(
-                    onClick = onOpenVolume,
-                    modifier = Modifier
-                        .size(40.dp)
-                        .clip(CircleShape)
-                        .background(OledCard)
-                ) {
-                    Icon(
-                        if (volumePct == 0) Icons.Rounded.VolumeOff else Icons.Rounded.VolumeUp,
-                        contentDescription = "Громкость",
-                        tint = Color.White
                     )
                 }
             }
@@ -164,8 +141,7 @@ fun AtriHomeScreen(
                 Text(
                     text = when {
                         isLoading -> "Загрузка..."
-                        isPlaying && ym.mode == "ynison" -> "Ynison · Играет"
-                        isPlaying -> "Атри · Волна"
+                        isPlaying -> "Играет"
                         ym.loggedIn -> "Нажмите для Моей волны"
                         else -> "Атри готова"
                     },
@@ -174,14 +150,14 @@ fun AtriHomeScreen(
                     fontWeight = FontWeight.SemiBold
                 )
                 Text(
-                    text = if (isPlaying) "Тап — пауза" else "Управление музыкой из Яндекс Музыки (Ynison)",
+                    text = if (isPlaying) "Тап — пауза" else "Управление музыкой на колонке",
                     color = Color.White.copy(alpha = 0.72f),
                     fontSize = 11.sp
                 )
             }
         }
 
-        // Compact Now Playing status card (reflects Ynison or autonomous speaker playback)
+        // Compact Now Playing status card
         if (hasTrack) {
             Row(
                 modifier = Modifier
@@ -208,7 +184,7 @@ fun AtriHomeScreen(
                         overflow = TextOverflow.Ellipsis
                     )
                     Text(
-                        text = ym.artist.ifBlank { if (ym.mode == "ynison") "Яндекс Музыка (Ynison)" else "AtriStation" },
+                        text = ym.artist.ifBlank { if (ym.loggedIn) "Яндекс Музыка" else "AtriStation" },
                         color = Color(0xFFA0A0B0),
                         fontSize = 12.sp,
                         maxLines = 1,
@@ -282,20 +258,20 @@ fun AtriHomeScreen(
             horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             QuickTile(
-                icon = Icons.Rounded.CastConnected,
-                title = "Яндекс Ynison",
-                subtitle = if (ym.loggedIn) "Подключён" else "Настроить",
+                icon = Icons.Rounded.MusicNote,
+                title = "Яндекс Музыка",
+                subtitle = if (ym.loggedIn) "Подключена" else "Настроить",
                 accent = if (ym.loggedIn) Color(0xFF4ADE80) else palette.accent,
                 modifier = Modifier.weight(1f),
                 onClick = onOpenIntegrations
             )
             QuickTile(
-                icon = Icons.Rounded.AutoAwesome,
-                title = "Моя волна",
-                subtitle = "Автономно",
+                icon = Icons.Rounded.Timer,
+                title = "Таймеры",
+                subtitle = "Будильники и таймеры",
                 accent = palette.accent,
                 modifier = Modifier.weight(1f),
-                onClick = onStartWaveVoice
+                onClick = onOpenTimers
             )
         }
 

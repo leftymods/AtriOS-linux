@@ -305,11 +305,16 @@ fun AtriOSApp(
                 val lockedEq = nowMs < pendingEqUntilRef.get()
                 val incomingTrackReady = isTrackTransitioning && !staleSeq && !rejectedOld &&
                     s.ymusic.trackId.isNotBlank() && !s.ymusic.trackId.startsWith("opt_") && s.ymusic.state != "loading"
-                val nextYm = if (staleSeq || rejectedOld || (lockedYm && !incomingTrackReady)) {
+                val externalYnisonUpdate = s.ymusic.mode == "ynison" && !staleSeq && (
+                    s.ymusic.trackId != status.ymusic.trackId ||
+                        s.ymusic.title != status.ymusic.title ||
+                        s.ymusic.state != status.ymusic.state
+                    )
+                val nextYm = if (staleSeq || (!externalYnisonUpdate && (rejectedOld || (lockedYm && !incomingTrackReady)))) {
                     status.ymusic
                 } else {
                     if (s.ymusic.seq > lastYmSeqRef.get()) lastYmSeqRef.set(s.ymusic.seq)
-                    if (incomingTrackReady) isTrackTransitioning = false
+                    if (incomingTrackReady || externalYnisonUpdate) isTrackTransitioning = false
                     val wantState = pendingPlayStateRef.get()
                     if (wantState != null && nowMs < pendingPlayStateUntilRef.get() && s.ymusic.state != wantState) {
                         s.ymusic.copy(state = wantState)
@@ -928,10 +933,7 @@ fun AtriOSApp(
                                 onOpenVolume = { showVolumeSheet = true },
                                 onOpenEq = { showEqSheet = true },
                                 onOpenIntegrations = { selectedTab = AppTab.INTEGRATIONS },
-                                onStartWaveVoice = {
-                                    if (status.ymusic.loggedIn) dispatchYMusicPlay("wave", null)
-                                    else selectedTab = AppTab.INTEGRATIONS
-                                }
+                                onOpenTimers = { selectedTab = AppTab.TIMERS }
                             )
                         }
                         AppTab.INTEGRATIONS -> {
