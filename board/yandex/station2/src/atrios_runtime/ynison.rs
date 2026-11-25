@@ -13,8 +13,21 @@ const YNISON_REDIRECT_URL: &str =
 const YNISON_STATE_PATH: &str = "/ynison_state.YnisonStateService/PutYnisonState";
 const YNISON_ORIGIN: &str = "https://music.yandex.ru";
 const YNISON_APP_NAME: &str = "AtriStation";
-const YNISON_APP_VERSION: &str = "1.13.0";
+const YNISON_APP_VERSION: &str = "1.14.0";
 const YNISON_DEVICE_ID_FILE: &str = "/var/lib/atrios/ynison_device_id";
+pub const YNISON_ENABLED_FILE: &str = "/var/lib/atrios/ynison_enabled";
+
+pub fn is_ynison_enabled() -> bool {
+    match fs::read_to_string(YNISON_ENABLED_FILE) {
+        Ok(s) => !matches!(s.trim().to_ascii_lowercase().as_str(), "0" | "false" | "off" | "no"),
+        Err(_) => true,
+    }
+}
+
+pub fn set_ynison_enabled(enabled: bool) {
+    let _ = fs::create_dir_all("/var/lib/atrios");
+    let _ = fs::write(YNISON_ENABLED_FILE, if enabled { "1\n" } else { "0\n" });
+}
 
 static RID_SEQ: AtomicU64 = AtomicU64::new(1);
 
@@ -379,8 +392,13 @@ fn run_ynison_session(token: &str, device_id: &str, stop_flag: &'static AtomicBo
     let mut last_pushed_paused = true;
 
     while !stop_flag.load(Ordering::SeqCst) {
-        // Auto-remove immediately when user logs out or switches Yandex token:
+        // Auto-remove immediately when user logs out, switches token, or disables Ynison:
         // send clean RFC 6455 Close(1000) so Ynison removes AtriStation from official app right away!
+        if !is_ynison_enabled() {
+            println!("[ynison] Ynison disabled by user — sending clean Close(1000)");
+            ws.send_close(1000);
+            return Ok(());
+        }
         match load_auth() {
             Some(a) if a.token == token => {}
             _ => {
@@ -590,6 +608,10 @@ pub fn spawn_ynison_thread(stop_flag: &'static AtomicBool) {
         let device_id = ynison_device_id();
         let mut backoff_sec = 2u64;
         while !stop_flag.load(Ordering::SeqCst) {
+            if !is_ynison_enabled() {
+                thread::sleep(Duration::from_secs(1));
+                continue;
+            }
             let Some(auth) = load_auth() else {
                 thread::sleep(Duration::from_secs(1));
                 continue;

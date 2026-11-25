@@ -416,6 +416,7 @@ impl YMusicStatus {
             ("repeat", Json::Bool(self.repeat)),
             ("can_prev", Json::Bool(self.can_prev)),
             ("can_next", Json::Bool(self.can_next)),
+            ("ynison_enabled", Json::Bool(crate::ynison::is_ynison_enabled())),
             (
                 "queue_ids",
                 Json::Arr(
