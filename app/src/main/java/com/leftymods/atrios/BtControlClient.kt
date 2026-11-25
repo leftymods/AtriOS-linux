@@ -528,14 +528,12 @@ class BtControlClient(
     fun ymusicLogin(token: String) {
         val clean = token.trim().removePrefix("OAuth ").trim()
         directYmToken = clean
-        YandexMusicDirectClient.clearCache()
         sendCommand(JSONObject().put("cmd", "ymusic_login").put("token", clean))
     }
 
     fun ymusicLogout() {
         directYmToken = ""
         directYmUid = 0L
-        YandexMusicDirectClient.clearCache()
         sendCommand(JSONObject().put("cmd", "ymusic_logout"))
     }
 
@@ -552,62 +550,16 @@ class BtControlClient(
             scope.launch(Dispatchers.Main) { onYMusicSearchResults(emptyList(), emptyList()) }
             return
         }
-        val tok = directYmToken
-        if (tok.isNotBlank()) {
-            searchJob = scope.launch(Dispatchers.IO) {
-                try {
-                    val (tracks, albums) = YandexMusicDirectClient.searchCatalog(tok, trimmed)
-                    withContext(Dispatchers.Main) { onYMusicSearchResults(tracks, albums) }
-                    return@launch
-                } catch (e: kotlinx.coroutines.CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    DebugLogStore.log("WARN", "DIRECT_YM", "search fallback: ${e.message}")
-                }
-                sendServerOffloadOrFallback("search", JSONObject().put("cmd", "ymusic_search").put("query", trimmed))
-            }
-            return
-        }
         val payload = JSONObject().put("cmd", "ymusic_search").put("query", trimmed)
         sendServerOffloadOrFallback("search", payload)
     }
 
     fun ymusicOrbs() {
-        val tok = directYmToken
-        if (tok.isNotBlank()) {
-            scope.launch(Dispatchers.IO) {
-                try {
-                    val orbs = YandexMusicDirectClient.fetchOrbs(tok, directYmUid)
-                    if (orbs.isNotEmpty()) {
-                        withContext(Dispatchers.Main) { onYMusicOrbsUpdate(orbs) }
-                        return@launch
-                    }
-                } catch (e: Exception) {
-                    DebugLogStore.log("WARN", "DIRECT_YM", "orbs fallback: ${e.message}")
-                }
-                sendServerOffloadOrFallback("orbs", JSONObject().put("cmd", "ymusic_orbs"))
-            }
-            return
-        }
         val payload = JSONObject().put("cmd", "ymusic_orbs")
         sendServerOffloadOrFallback("orbs", payload)
     }
 
     fun ymusicCollection(force: Boolean = false) {
-        val tok = directYmToken
-        if (tok.isNotBlank()) {
-            scope.launch(Dispatchers.IO) {
-                try {
-                    val col = YandexMusicDirectClient.fetchCollection(tok, directYmUid, force = force)
-                    withContext(Dispatchers.Main) { onYMusicCollectionUpdate(col) }
-                    return@launch
-                } catch (e: Exception) {
-                    DebugLogStore.log("WARN", "DIRECT_YM", "collection fallback: ${e.message}")
-                }
-                sendServerOffloadOrFallback("collection", JSONObject().put("cmd", "ymusic_collection"))
-            }
-            return
-        }
         val payload = JSONObject().put("cmd", "ymusic_collection")
         sendServerOffloadOrFallback("collection", payload)
     }

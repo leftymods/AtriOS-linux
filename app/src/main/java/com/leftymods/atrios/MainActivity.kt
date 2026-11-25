@@ -74,11 +74,10 @@ import com.leftymods.atrios.model.YMusicOrb
 import com.leftymods.atrios.model.YMusicTrack
 import com.leftymods.atrios.ui.AiAssistantCard
 import com.leftymods.atrios.ui.AsyncCoverArt
+import com.leftymods.atrios.ui.AtriHomeScreen
 import com.leftymods.atrios.ui.AudioCard
-import com.leftymods.atrios.ui.BigPlayerOverlay
-import com.leftymods.atrios.ui.CollectionScreen
 import com.leftymods.atrios.ui.EqualizerPanel
-import com.leftymods.atrios.ui.SwipeableTwoCardRibbon
+import com.leftymods.atrios.ui.IntegrationsScreen
 import com.leftymods.atrios.ui.BluetoothCard
 import com.leftymods.atrios.ui.DevicePickerSection
 import com.leftymods.atrios.ui.LedAndScreenCard
@@ -87,8 +86,8 @@ import com.leftymods.atrios.ui.TelemetryCard
 import com.leftymods.atrios.ui.TimeAndTimezoneCard
 import com.leftymods.atrios.ui.TimersAndAlarmsCard
 import com.leftymods.atrios.ui.WifiCard
-import com.leftymods.atrios.ui.YandexAccountCard
-import com.leftymods.atrios.ui.YandexWaveFullScreen
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import com.leftymods.atrios.ui.theme.AppPalette
 import com.leftymods.atrios.ui.theme.AtriOSTheme
 import com.leftymods.atrios.ui.theme.OledBlack
@@ -122,8 +121,8 @@ class MainActivity : ComponentActivity() {
 }
 
 private enum class AppTab(val label: String, val icon: ImageVector) {
-    WAVE("Волна", Icons.Rounded.AutoAwesome),
-    COLLECTION("Коллекция", Icons.Rounded.Favorite),
+    HOME("Главная", Icons.Rounded.GraphicEq),
+    INTEGRATIONS("Сервисы", Icons.Rounded.Extension),
     TIMERS("Таймеры", Icons.Rounded.Timer),
     SETTINGS("Настройки", Icons.Rounded.Tune)
 }
@@ -204,7 +203,19 @@ fun AtriOSApp(
     var savedSpeakers by remember { mutableStateOf(storage.loadSpeakers()) }
     var relayConfig by remember { mutableStateOf(storage.loadRelayConfig()) }
 
-    var selectedTab by remember { mutableStateOf(AppTab.WAVE) }
+    val accountClient = remember { AtriAccountClient(context) }
+    var accountState by remember { mutableStateOf(accountClient.loadCachedState()) }
+    var accountBusy by remember { mutableStateOf(false) }
+    var accountError by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(Unit) {
+        if (accountState.loggedIn) {
+            withContext(Dispatchers.IO) { accountClient.syncVault() }
+                .onSuccess { accountState = it }
+        }
+    }
+
+    var selectedTab by remember { mutableStateOf(AppTab.HOME) }
     var settingsPage by remember { mutableStateOf(SettingsPage.ROOT) }
     var showBigPlayer by remember { mutableStateOf(false) }
     val lastUserActionRef = remember { java.util.concurrent.atomic.AtomicLong(0L) }
@@ -232,8 +243,8 @@ fun AtriOSApp(
         val srv = status.ymusic.positionMs.coerceAtLeast(0L)
         if (kotlin.math.abs(srv - liveElapsedMs) >= 2000L) liveElapsedMs = srv
     }
-    LaunchedEffect(status.ymusic.trackId, status.ymusic.state, selectedTab, showBigPlayer, palette.isYandexOriginal) {
-        if (selectedTab != AppTab.WAVE && !showBigPlayer && palette.isYandexOriginal) {
+    LaunchedEffect(status.ymusic.trackId, status.ymusic.state, selectedTab) {
+        if (selectedTab != AppTab.HOME) {
             while (status.ymusic.state == "playing") {
                 delay(500)
                 val dur = status.ymusic.durationMs
@@ -563,13 +574,12 @@ fun AtriOSApp(
     }
 
     // System Back gesture navigates cleanly inside the app instead of closing it!
-    BackHandler(enabled = connected && (showBigPlayer || showVolumeSheet || showEqSheet || settingsPage != SettingsPage.ROOT || selectedTab != AppTab.WAVE)) {
+    BackHandler(enabled = connected && (showVolumeSheet || showEqSheet || settingsPage != SettingsPage.ROOT || selectedTab != AppTab.HOME)) {
         when {
             showEqSheet -> showEqSheet = false
             showVolumeSheet -> showVolumeSheet = false
-            showBigPlayer -> showBigPlayer = false
             selectedTab == AppTab.SETTINGS && settingsPage != SettingsPage.ROOT -> settingsPage = SettingsPage.ROOT
-            selectedTab != AppTab.WAVE -> selectedTab = AppTab.WAVE
+            selectedTab != AppTab.HOME -> selectedTab = AppTab.HOME
         }
     }
 
@@ -804,70 +814,6 @@ fun AtriOSApp(
                             .padding(bottom = 12.dp),
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
-                        // Synchronous 2-card ribbon bottom mini-player (entire card + cover + text + heart + pause drags, with next/prev card right behind!)
-                        val ym = status.ymusic
-                        if (selectedTab != AppTab.WAVE && (ym.isActive || ym.title.isNotBlank())) {
-                            val progressFrac = if (ym.durationMs > 0L) {
-                                (liveElapsedMs.toFloat() / ym.durationMs.toFloat()).coerceIn(0f, 1f)
-                            } else 0f
-
-                            SwipeableTwoCardRibbon(
-                                trackKey = ym.trackId,
-                                onSwipeNext = { dispatchYMusicControl("next") },
-                                onSwipePrev = { dispatchYMusicControl("prev") },
-                                canSwipeNext = !isTrackTransitioning && status.ymusic.state != "loading" && status.ymusic.canNext,
-                                canSwipePrev = status.ymusic.canPrev && !isTrackTransitioning,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 16.dp, vertical = 6.dp),
-                                currentCard = {
-                                    MiniPlayerCard(
-                                        title = ym.title,
-                                        artist = ym.artist,
-                                        coverUrl = ym.coverUrl,
-                                        liked = ym.liked,
-                                        playing = ym.state == "playing",
-                                        progressFrac = progressFrac,
-                                        palette = palette,
-                                        interactive = true,
-                                        onOpenBigPlayer = { showBigPlayer = true },
-                                        onLike = { dispatchYMusicControl("like") },
-                                        onTogglePlay = { dispatchYMusicControl(if (ym.state == "playing") "pause" else "play") }
-                                    )
-                                },
-                                nextCard = {
-                                    MiniPlayerCard(
-                                        title = ym.nextTitle.ifBlank { "Следующий трек" },
-                                        artist = ym.nextArtist,
-                                        coverUrl = ym.nextCoverUrl,
-                                        liked = false,
-                                        playing = ym.state == "playing",
-                                        progressFrac = 0f,
-                                        palette = palette,
-                                        interactive = false,
-                                        onOpenBigPlayer = {},
-                                        onLike = {},
-                                        onTogglePlay = {}
-                                    )
-                                },
-                                prevCard = {
-                                    MiniPlayerCard(
-                                        title = ym.prevTitle.ifBlank { "Предыдущий трек" },
-                                        artist = ym.prevArtist,
-                                        coverUrl = ym.prevCoverUrl,
-                                        liked = false,
-                                        playing = ym.state == "playing",
-                                        progressFrac = 0f,
-                                        palette = palette,
-                                        interactive = false,
-                                        onOpenBigPlayer = {},
-                                        onLike = {},
-                                        onTogglePlay = {}
-                                    )
-                                }
-                            )
-                        }
-
                         // Floating Rounded Capsule Bottom Navigation Bar!
                         Surface(
                             shape = RoundedCornerShape(99.dp),
@@ -901,8 +847,16 @@ fun AtriOSApp(
                                                 selectedTab = tab
                                                 if (tab == AppTab.SETTINGS) settingsPage = SettingsPage.ROOT
                                                 when (tab) {
-                                                    AppTab.WAVE -> { client.ymusicStatus(); if (ymOrbs.isEmpty()) client.ymusicOrbs() }
-                                                    AppTab.COLLECTION -> { if (!ymCollection.loaded) client.ymusicCollection() }
+                                                    AppTab.HOME -> client.ymusicStatus()
+                                                    AppTab.INTEGRATIONS -> {
+                                                        client.ymusicStatus()
+                                                        if (accountState.loggedIn) {
+                                                            scope.launch {
+                                                                withContext(Dispatchers.IO) { accountClient.syncVault() }
+                                                                    .onSuccess { accountState = it }
+                                                            }
+                                                        }
+                                                    }
                                                     AppTab.TIMERS -> { client.getTimers(); client.getAlarms() }
                                                     AppTab.SETTINGS -> client.otaStatus()
                                                 }
@@ -942,46 +896,152 @@ fun AtriOSApp(
                     },
                     label = "tabTransition"
                 ) { currentTab ->
+                    val currentDeviceId = relayConfig.deviceId
+                    val currentSpeakerName = activeDevice?.name?.takeIf { it.isNotBlank() } ?: "AtriStation"
+                    val transportLabel = if (client.isRelayActive()) "TLS Relay" else "Bluetooth SPP"
+
                     when (currentTab) {
-                        AppTab.WAVE -> {
-                            YandexWaveFullScreen(
-                                ymusic = status.ymusic,
+                        AppTab.HOME -> {
+                            AtriHomeScreen(
+                                status = status,
+                                speakerName = currentSpeakerName,
+                                transportLabel = transportLabel,
+                                accountState = accountState,
                                 palette = palette,
-                                orbs = ymOrbs,
-                                searchResults = ymSearchResults,
-                                albumResults = ymAlbumResults,
-                                onRefresh = { client.ymusicStatus(); client.ymusicOrbs() },
-                                onLogin = { tok ->
+                                volumePct = sliderVol.roundToInt().coerceIn(0, 100),
+                                onBlobTap = {
+                                    if (status.ymusic.state == "playing") {
+                                        dispatchYMusicControl("pause")
+                                    } else if (status.ymusic.title.isNotBlank()) {
+                                        dispatchYMusicControl("play")
+                                    } else if (status.ymusic.loggedIn) {
+                                        dispatchYMusicPlay("wave", null)
+                                    } else {
+                                        selectedTab = AppTab.INTEGRATIONS
+                                    }
+                                },
+                                onPrev = { dispatchYMusicControl("prev") },
+                                onPlayPause = {
+                                    dispatchYMusicControl(if (status.ymusic.state == "playing") "pause" else "play")
+                                },
+                                onNext = { dispatchYMusicControl("next") },
+                                onOpenVolume = { showVolumeSheet = true },
+                                onOpenEq = { showEqSheet = true },
+                                onOpenIntegrations = { selectedTab = AppTab.INTEGRATIONS },
+                                onStartWaveVoice = {
+                                    if (status.ymusic.loggedIn) dispatchYMusicPlay("wave", null)
+                                    else selectedTab = AppTab.INTEGRATIONS
+                                }
+                            )
+                        }
+                        AppTab.INTEGRATIONS -> {
+                            IntegrationsScreen(
+                                accountState = accountState,
+                                accountBusy = accountBusy,
+                                accountError = accountError,
+                                currentDeviceId = currentDeviceId,
+                                currentSpeakerName = currentSpeakerName,
+                                ymStatus = status.ymusic,
+                                palette = palette,
+                                onAccountRegister = { u, p ->
+                                    accountBusy = true; accountError = null
+                                    scope.launch {
+                                        val initVault = AtriVaultData(
+                                            yandexMusicToken = storage.loadYMusicToken(),
+                                            yandexMusicLogin = status.ymusic.login,
+                                            boundDeviceIds = if (currentDeviceId.isNotBlank()) listOf(currentDeviceId) else emptyList()
+                                        )
+                                        val res = withContext(Dispatchers.IO) { accountClient.register(u, p, initVault) }
+                                        res.onSuccess { st ->
+                                            accountState = st
+                                            if (currentDeviceId.isNotBlank()) {
+                                                withContext(Dispatchers.IO) { accountClient.bindDevice(currentDeviceId, currentSpeakerName) }
+                                                    .onSuccess { devs -> accountState = accountState.copy(devices = devs) }
+                                            }
+                                        }.onFailure { accountError = it.message }
+                                        accountBusy = false
+                                    }
+                                },
+                                onAccountLogin = { u, p ->
+                                    accountBusy = true; accountError = null
+                                    scope.launch {
+                                        val res = withContext(Dispatchers.IO) { accountClient.login(u, p) }
+                                        res.onSuccess { st ->
+                                            accountState = st
+                                            val tok = st.vault.yandexMusicToken
+                                            if (tok.isNotBlank() && !status.ymusic.loggedIn) {
+                                                storage.saveYMusicToken(tok)
+                                                client.setDirectYMusicAuth(tok)
+                                                client.ymusicLogin(tok)
+                                            }
+                                        }.onFailure { accountError = it.message }
+                                        accountBusy = false
+                                    }
+                                },
+                                onAccountSync = {
+                                    accountBusy = true; accountError = null
+                                    scope.launch {
+                                        val res = withContext(Dispatchers.IO) { accountClient.syncVault() }
+                                        res.onSuccess { st ->
+                                            accountState = st
+                                            val tok = st.vault.yandexMusicToken
+                                            if (tok.isNotBlank() && !status.ymusic.loggedIn) {
+                                                storage.saveYMusicToken(tok)
+                                                client.setDirectYMusicAuth(tok)
+                                                client.ymusicLogin(tok)
+                                            }
+                                        }.onFailure { accountError = it.message }
+                                        accountBusy = false
+                                    }
+                                },
+                                onAccountLogout = {
+                                    scope.launch {
+                                        withContext(Dispatchers.IO) { accountClient.logout() }
+                                        accountState = AtriAccountState()
+                                    }
+                                },
+                                onBindCurrentSpeaker = {
+                                    if (currentDeviceId.isNotBlank()) {
+                                        accountBusy = true
+                                        scope.launch {
+                                            withContext(Dispatchers.IO) { accountClient.bindDevice(currentDeviceId, currentSpeakerName) }
+                                                .onSuccess { devs -> accountState = accountState.copy(devices = devs) }
+                                                .onFailure { accountError = it.message }
+                                            accountBusy = false
+                                        }
+                                    }
+                                },
+                                onUnbindSpeaker = { did ->
+                                    accountBusy = true
+                                    scope.launch {
+                                        withContext(Dispatchers.IO) { accountClient.unbindDevice(did) }
+                                            .onSuccess { devs -> accountState = accountState.copy(devices = devs) }
+                                            .onFailure { accountError = it.message }
+                                        accountBusy = false
+                                    }
+                                },
+                                onYandexLoginToken = { tok ->
                                     storage.saveYMusicToken(tok)
                                     client.setDirectYMusicAuth(tok)
                                     client.ymusicLogin(tok)
+                                    if (accountState.loggedIn) {
+                                        scope.launch {
+                                            val updated = accountState.vault.copy(yandexMusicToken = tok)
+                                            withContext(Dispatchers.IO) { accountClient.saveVault(updated) }
+                                                .onSuccess { accountState = it }
+                                        }
+                                    }
                                 },
-                                onPlay = { mode, q -> dispatchYMusicPlay(mode, q) },
-                                onSearch = { q -> client.ymusicSearch(q) },
-                                onControl = { action -> dispatchYMusicControl(action) },
-                                onOpenAccountSettings = {
-                                    selectedTab = AppTab.SETTINGS
-                                    settingsPage = SettingsPage.ACCOUNT
-                                },
-                                onOpenBigPlayer = { showBigPlayer = true },
-                                onOpenVolumeSheet = { showVolumeSheet = true },
-                                onOpenEqualizer = { showEqSheet = true },
-                                volume = sliderVol,
-                                mute = status.mute,
-                                canSwipeNext = !isTrackTransitioning && status.ymusic.state != "loading" && status.ymusic.canNext,
-                                canSwipePrev = status.ymusic.canPrev && !isTrackTransitioning
-                            )
-                        }
-                        AppTab.COLLECTION -> {
-                            CollectionScreen(
-                                ymusic = status.ymusic,
-                                collection = ymCollection,
-                                palette = palette,
-                                onRefresh = { client.ymusicCollection(force = true) },
-                                onPlay = { mode, q -> dispatchYMusicPlay(mode, q) },
-                                onOpenAccountSettings = {
-                                    selectedTab = AppTab.SETTINGS
-                                    settingsPage = SettingsPage.ACCOUNT
+                                onYandexLogout = {
+                                    storage.saveYMusicToken("")
+                                    client.ymusicLogout()
+                                    if (accountState.loggedIn) {
+                                        scope.launch {
+                                            val updated = accountState.vault.copy(yandexMusicToken = "", yandexMusicLogin = "")
+                                            withContext(Dispatchers.IO) { accountClient.saveVault(updated) }
+                                                .onSuccess { accountState = it }
+                                        }
+                                    }
                                 }
                             )
                         }
@@ -1183,23 +1243,27 @@ fun AtriOSApp(
                                     when (curPage) {
                                         SettingsPage.ACCOUNT -> {
                                             item {
-                                                YandexAccountCard(
-                                                    ymusic = status.ymusic,
-                                                    onLogin = { tok ->
-                                    storage.saveYMusicToken(tok)
-                                    client.setDirectYMusicAuth(tok)
-                                    client.ymusicLogin(tok)
-                                },
-                                                    onLogout = {
-                                                        storage.saveYMusicToken("")
-                                                        ymOrbs = emptyList()
-                                                        ymCollection = YMusicCollection()
-                                                        ymSearchResults = emptyList()
-                                                        ymAlbumResults = emptyList()
-                                                        client.ymusicLogout()
-                                                    },
-                                                    onRefresh = { client.ymusicStatus(); client.ymusicOrbs() }
-                                                )
+                                                Surface(shape = RoundedCornerShape(22.dp), color = OledCard) {
+                                                    Column(
+                                                        modifier = Modifier.fillMaxWidth().padding(18.dp),
+                                                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                                                    ) {
+                                                        Text(
+                                                            "Управление аккаунтом AtriOS и интеграцией Яндекс Музыки (Ynison) перенесено во вкладку «Сервисы».",
+                                                            color = Color(0xFFB0B0C0),
+                                                            fontSize = 14.sp
+                                                        )
+                                                        Button(
+                                                            onClick = {
+                                                                settingsPage = SettingsPage.ROOT
+                                                                selectedTab = AppTab.INTEGRATIONS
+                                                            },
+                                                            colors = ButtonDefaults.buttonColors(containerColor = palette.accent, contentColor = Color.Black)
+                                                        ) {
+                                                            Text("Открыть «Сервисы»", fontWeight = FontWeight.SemiBold)
+                                                        }
+                                                    }
+                                                }
                                             }
                                         }
                                         SettingsPage.WIFI -> {
@@ -1780,32 +1844,6 @@ fun AtriOSApp(
                         }
                     )
                 }
-            }
-
-            // Full-screen Big Player overlay!
-            AnimatedVisibility(
-                visible = showBigPlayer,
-                enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
-                exit = slideOutVertically(targetOffsetY = { it }) + fadeOut()
-            ) {
-                BigPlayerOverlay(
-                    ymusic = status.ymusic,
-                    palette = palette,
-                    volume = sliderVol,
-                    mute = status.mute,
-                    searchResults = ymSearchResults,
-                    albumResults = ymAlbumResults,
-                    onSearch = { q -> client.ymusicSearch(q) },
-                    onPlay = { mode, q -> dispatchYMusicPlay(mode, q) },
-                    onVolumeChange = { dispatchVolumeLive(it, forceCommit = false) },
-                    onVolumeCommit = { dispatchVolumeLive(latestSliderPctRef.get().toFloat(), forceCommit = true) },
-                    onControl = { action -> dispatchYMusicControl(action) },
-                    onPlayWave = { dispatchYMusicPlay("wave", null) },
-                    onDismiss = { showBigPlayer = false },
-                    onOpenEqualizer = { showEqSheet = true },
-                    canSwipeNext = !isTrackTransitioning && status.ymusic.state != "loading" && status.ymusic.canNext,
-                    canSwipePrev = status.ymusic.canPrev && !isTrackTransitioning
-                )
             }
         }
 
