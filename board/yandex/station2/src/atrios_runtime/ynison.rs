@@ -396,10 +396,9 @@ fn run_ynison_session(token: &str, device_id: &str, stop_flag: &'static AtomicBo
             last_ping = Instant::now();
         }
 
-        // Hybrid Initiator + Status Sync:
-        // 1) If speaker started playing autonomously (voice / button / wave), claim active device & publish full queue!
-        // 2) If speaker is already active, push track/pause/progress/volume changes back to Ynison!
-        if last_status_push.elapsed() >= Duration::from_secs(2) {
+        // Hybrid Initiator + Low-Latency Status Sync (checks every 400ms for instant track/pause sync,
+        // and pushes periodic progress every 2s while playing)
+        if last_status_push.elapsed() >= Duration::from_millis(400) {
             let st = read_status();
             let cur_vol_pct = crate::bt_control::get_current_volume();
             if (cur_vol_pct - last_remote_vol_pct).abs() >= 1 {
@@ -428,7 +427,7 @@ fn run_ynison_session(token: &str, device_id: &str, stop_flag: &'static AtomicBo
                     last_paused = Some(false);
                     last_pushed_track = st.track_id;
                     last_pushed_paused = false;
-                } else {
+                } else if last_status_push.elapsed() >= Duration::from_secs(2) {
                     let pos = if st.started_ts > 0 {
                         st.position_ms + (now_ms() - st.started_ts).max(0)
                     } else {
@@ -442,12 +441,13 @@ fn run_ynison_session(token: &str, device_id: &str, stop_flag: &'static AtomicBo
                     ));
                 }
             } else if is_active {
-                let pos = if !paused && st.started_ts > 0 {
-                    st.position_ms + (now_ms() - st.started_ts).max(0)
-                } else {
-                    st.position_ms
-                };
-                if st.track_id != last_pushed_track || paused != last_pushed_paused || !paused {
+                let changed = st.track_id != last_pushed_track || paused != last_pushed_paused;
+                if changed || (!paused && last_status_push.elapsed() >= Duration::from_secs(2)) {
+                    let pos = if !paused && st.started_ts > 0 {
+                        st.position_ms + (now_ms() - st.started_ts).max(0)
+                    } else {
+                        st.position_ms
+                    };
                     let _ = ws.send_text(&build_playing_status_msg(
                         device_id,
                         paused,
@@ -461,7 +461,7 @@ fn run_ynison_session(token: &str, device_id: &str, stop_flag: &'static AtomicBo
             last_status_push = Instant::now();
         }
 
-        let Some(frame) = ws.recv_frame(300)? else {
+        let Some(frame) = ws.recv_frame(80)? else {
             continue;
         };
         let txt = match frame {
