@@ -955,7 +955,7 @@ pub(crate) fn process_command(cmd_obj: &Json) -> Result<Json, String> {
             ]))
         }
         "set_ynison_enabled" => {
-            let en = req.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+            let en = map.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
             crate::ynison::set_ynison_enabled(en);
             let st = crate::ymusic::read_status();
             Ok(obj(vec![
