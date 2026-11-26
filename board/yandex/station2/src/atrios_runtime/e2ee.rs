@@ -11,6 +11,7 @@ use crate::sys::Sha256;
 
 const IDENTITY_KEY_PEM: &str = "/var/lib/atrios/e2ee_identity.pem";
 const IDENTITY_PUB_DER: &str = "/var/lib/atrios/e2ee_identity.pub.der";
+const IDENTITY_LOCK_FILE: &str = "/var/lib/atrios/e2ee_identity.lock";
 
 pub fn base64_encode(input: &[u8]) -> String {
     const TBL: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -28,44 +29,142 @@ pub fn base64_encode(input: &[u8]) -> String {
     out
 }
 
-/// Ensure a persistent long-term ECDSA P-256 station identity keypair exists (0600)
-/// and return its X.509 SPKI DER public key encoded as base64.
+fn derive_spki_der_from_pem(pem_path: &str) -> Result<Vec<u8>, String> {
+    let out = Command::new("openssl")
+        .args(["pkey", "-in", pem_path, "-pubout", "-outform", "DER"])
+        .stderr(Stdio::null())
+        .output()
+        .map_err(|e| format!("openssl pkey pubout failed: {e}"))?;
+    if !out.status.success() || out.stdout.len() < 64 {
+        return Err("Failed deriving valid SPKI DER from station identity PEM".into());
+    }
+    Ok(out.stdout)
+}
+
+fn write_atomic_strict(path: &Path, bytes: &[u8], mode: u32) -> Result<(), String> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut rnd = [0u8; 6];
+    random_bytes(&mut rnd)?;
+    let tmp = path.with_extension(format!("tmp.{}", hex_encode(&rnd)));
+    let res = (|| -> Result<(), String> {
+        let mut f = fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(mode)
+            .open(&tmp)
+            .map_err(|e| format!("Failed creating {}: {e}", tmp.display()))?;
+        f.write_all(bytes)
+            .map_err(|e| format!("Failed writing {}: {e}", tmp.display()))?;
+        f.sync_all()
+            .map_err(|e| format!("Failed syncing {}: {e}", tmp.display()))?;
+        drop(f);
+        fs::rename(&tmp, path)
+            .map_err(|e| format!("Failed renaming {} -> {}: {e}", tmp.display(), path.display()))?;
+        Ok(())
+    })();
+    if res.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    res
+}
+
+fn verify_strict_0600(path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    let meta = fs::metadata(path)
+        .map_err(|e| format!("Failed stat {}: {e}", path.display()))?;
+    let perms = meta.permissions().mode() & 0o777;
+    if perms != 0o600 {
+        return Err(format!(
+            "Refusing station identity key {} with insecure mode {:04o} (expected 0600)",
+            path.display(),
+            perms
+        ));
+    }
+    Ok(())
+}
+
+/// Ensure a persistent long-term ECDSA P-256 station identity keypair exists with strict 0600
+/// permissions, atomic creation under lock, and verified PEM/SPKI consistency.
+/// Returns the X.509 SPKI DER public key encoded as base64.
 pub fn ensure_station_identity_pub_b64() -> Result<String, String> {
+    use std::os::unix::io::AsRawFd;
+    use std::sync::{Mutex, OnceLock};
+    static ID_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    let _guard = ID_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| "Identity key mutex poisoned")?;
+
+    let _ = fs::create_dir_all("/var/lib/atrios");
+    let lock_f = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(IDENTITY_LOCK_FILE)
+        .map_err(|e| format!("Failed opening identity lock: {e}"))?;
+    if unsafe { crate::sys::flock(lock_f.as_raw_fd(), crate::sys::LOCK_EX) } != 0 {
+        return Err("Failed acquiring exclusive lock for station identity key".into());
+    }
+
     let key_p = Path::new(IDENTITY_KEY_PEM);
     let pub_p = Path::new(IDENTITY_PUB_DER);
+
     if !key_p.exists() {
-        let _ = fs::create_dir_all("/var/lib/atrios");
-        let st = Command::new("openssl")
-            .args(["ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", IDENTITY_KEY_PEM])
-            .stdout(Stdio::null())
+        // Generate ECDSA P-256 private key to stdout (never touches disk with loose permissions!)
+        let gen = Command::new("openssl")
+            .args(["ecparam", "-name", "prime256v1", "-genkey", "-noout"])
             .stderr(Stdio::null())
-            .status()
+            .output()
             .map_err(|e| format!("openssl ecparam failed: {e}"))?;
-        if !st.success() {
+        if !gen.status.success() || gen.stdout.is_empty() {
             return Err("Failed generating station ECDSA P-256 identity key".into());
         }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(key_p, fs::Permissions::from_mode(0o600));
+        // Write temp PEM with 0600 BEFORE deriving SPKI, then atomically swap both into place
+        let mut rnd = [0u8; 6];
+        random_bytes(&mut rnd)?;
+        let tmp_pem = key_p.with_extension(format!("gen.{}", hex_encode(&rnd)));
+        let res = (|| -> Result<Vec<u8>, String> {
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut f = fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .mode(0o600)
+                .open(&tmp_pem)
+                .map_err(|e| format!("Failed creating temp PEM: {e}"))?;
+            f.write_all(&gen.stdout)
+                .map_err(|e| format!("Failed writing temp PEM: {e}"))?;
+            f.sync_all()
+                .map_err(|e| format!("Failed syncing temp PEM: {e}"))?;
+            drop(f);
+            let tmp_pem_str = tmp_pem.to_str().ok_or("Non-UTF8 temp PEM path")?;
+            let der = derive_spki_der_from_pem(tmp_pem_str)?;
+            write_atomic_strict(pub_p, &der, 0o644)?;
+            fs::rename(&tmp_pem, key_p)
+                .map_err(|e| format!("Failed installing station identity PEM: {e}"))?;
+            Ok(der)
+        })();
+        if res.is_err() {
+            let _ = fs::remove_file(&tmp_pem);
         }
+        let der = res?;
+        verify_strict_0600(key_p)?;
+        return Ok(base64_encode(&der));
     }
-    if !pub_p.exists() {
-        let st = Command::new("openssl")
-            .args(["pkey", "-in", IDENTITY_KEY_PEM, "-pubout", "-outform", "DER", "-out", IDENTITY_PUB_DER])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map_err(|e| format!("openssl pkey pubout failed: {e}"))?;
-        if !st.success() {
-            return Err("Failed exporting station ECDSA public key".into());
+
+    // Existing key: fail-closed if permissions are not strictly 0600!
+    verify_strict_0600(key_p)?;
+    let expected_der = derive_spki_der_from_pem(IDENTITY_KEY_PEM)?;
+    if pub_p.exists() {
+        let stored_der = fs::read(pub_p)
+            .map_err(|e| format!("Failed reading station identity pub: {e}"))?;
+        if stored_der != expected_der {
+            return Err("Station identity PEM/SPKI mismatch (refusing inconsistent keypair)".into());
         }
+    } else {
+        write_atomic_strict(pub_p, &expected_der, 0o644)?;
     }
-    let der = fs::read(pub_p).map_err(|e| format!("Failed reading station identity pub: {e}"))?;
-    if der.len() < 64 {
-        return Err("Invalid station identity public key DER".into());
-    }
-    Ok(base64_encode(&der))
+    Ok(base64_encode(&expected_der))
 }
 
 /// Sign a canonical E2EE handshake transcript with the station's long-term ECDSA P-256 key.

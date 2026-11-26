@@ -1285,10 +1285,14 @@ pub(crate) fn process_command(cmd_obj: &Json) -> Result<Json, String> {
         "term_e2ee_init" => {
             use std::collections::HashMap;
             use std::sync::{Mutex, OnceLock};
-            static E2EE_SESSIONS: OnceLock<Mutex<HashMap<String, ([u8; 32], i64)>>> = OnceLock::new();
+            static E2EE_SESSIONS: OnceLock<Mutex<HashMap<String, ([u8; 32], String, i64)>>> = OnceLock::new();
             let store = E2EE_SESSIONS.get_or_init(|| Mutex::new(HashMap::new()));
-            let client_pub = map.get("client_pub").and_then(|v| v.as_str()).unwrap_or("").trim();
-            let client_nonce = map.get("client_nonce").and_then(|v| v.as_str()).unwrap_or("").trim();
+            let client_pub = map.get("client_pub").and_then(|v| v.as_str()).unwrap_or("").trim().to_ascii_lowercase();
+            let client_nonce = map.get("client_nonce").and_then(|v| v.as_str()).unwrap_or("").trim().to_ascii_lowercase();
+            let client_pub_bytes = crate::e2ee::hex_decode(&client_pub)?;
+            if client_pub_bytes.len() != 32 || client_nonce.len() < 16 || client_nonce.len() > 64 {
+                return Err("Invalid client_pub or client_nonce in term_e2ee_init".into());
+            }
             let mut priv_k = [0u8; 32];
             let mut sid_raw = [0u8; 8];
             crate::e2ee::random_bytes(&mut priv_k)?;
@@ -1303,16 +1307,16 @@ pub(crate) fn process_command(cmd_obj: &Json) -> Result<Json, String> {
             let (identity_pub, sig_b64) = crate::e2ee::sign_handshake_transcript(transcript.as_bytes())?;
             let now = now_unix_i64();
             if let Ok(mut g) = store.lock() {
-                g.retain(|_, (_, ts)| now - *ts < 1800);
+                g.retain(|_, (_, _, ts)| now - *ts < 1800);
                 if g.len() >= 8 { g.clear(); }
-                g.insert(sid.clone(), (priv_k, now));
+                g.insert(sid.clone(), (priv_k, client_pub.clone(), now));
             }
             if let Ok(mut used) = E2EE_USED_IVS.lock() {
                 used.clear();
             }
-            // Also persist active E2EE session key in /var/run/atrios/term_e2ee.key (0600, tmpfs) so any handler thread sees it
+            // Persist active E2EE session key + bound client_pub in /var/run/atrios/term_e2ee.key (0600, tmpfs)
             let _ = fs::create_dir_all("/var/run/atrios");
-            let key_line = format!("{}:{}\n", sid, crate::e2ee::hex_encode(&priv_k));
+            let key_line = format!("{}:{}:{}\n", sid, crate::e2ee::hex_encode(&priv_k), client_pub);
             let _ = atomic_write_bytes(Path::new("/var/run/atrios/term_e2ee.key"), key_line.as_bytes(), 0o600, false);
             Ok(obj(vec![
                 ("type", Json::Str("term_e2ee_init_response".into())),
@@ -1326,17 +1330,23 @@ pub(crate) fn process_command(cmd_obj: &Json) -> Result<Json, String> {
         }
         "term_e2ee_exec" => {
             let sid = map.get("sid").and_then(|v| v.as_str()).unwrap_or("").trim();
-            let peer_pub_hex = map.get("pub").and_then(|v| v.as_str()).unwrap_or("");
+            let peer_pub_hex = map.get("pub").and_then(|v| v.as_str()).unwrap_or("").trim().to_ascii_lowercase();
             let iv_hex = map.get("iv").and_then(|v| v.as_str()).unwrap_or("");
             let ct_hex = map.get("ct").and_then(|v| v.as_str()).unwrap_or("");
             let mac_hex = map.get("mac").and_then(|v| v.as_str()).unwrap_or("");
             let key_txt = fs::read_to_string("/var/run/atrios/term_e2ee.key").map_err(|_| "E2EE session not initialized")?;
-            let (stored_sid, priv_hex) = key_txt.trim().split_once(':').ok_or("Invalid E2EE session state")?;
+            let mut parts = key_txt.trim().splitn(3, ':');
+            let stored_sid = parts.next().ok_or("Invalid E2EE session state")?;
+            let priv_hex = parts.next().ok_or("Invalid E2EE session state")?;
+            let bound_client_pub = parts.next().ok_or("E2EE session missing bound client_pub")?;
             if stored_sid != sid {
                 return Err("E2EE session expired — reconnect terminal".into());
             }
+            if peer_pub_hex != bound_client_pub {
+                return Err("E2EE client_pub mismatch with signed handshake".into());
+            }
             let priv_vec = crate::e2ee::hex_decode(priv_hex)?;
-            let peer_vec = crate::e2ee::hex_decode(peer_pub_hex)?;
+            let peer_vec = crate::e2ee::hex_decode(&peer_pub_hex)?;
             let iv_vec = crate::e2ee::hex_decode(iv_hex)?;
             let ct_vec = crate::e2ee::hex_decode(ct_hex)?;
             let mac_vec = crate::e2ee::hex_decode(mac_hex)?;
