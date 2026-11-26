@@ -36,11 +36,16 @@ const DEVICE_FILE: &str = "/etc/atrios-device";
 static CLIENT_COUNT: Mutex<usize> = Mutex::new(0);
 static SCREEN_GEN: AtomicU64 = AtomicU64::new(0);
 static SCREEN_LOCK: Mutex<()> = Mutex::new(());
-static E2EE_USED_IVS: OnceLock<Mutex<HashMap<c_int, Vec<[u8; 12]>>>> = OnceLock::new();
-fn e2ee_used_ivs() -> &'static Mutex<HashMap<c_int, Vec<[u8; 12]>>> {
+static E2EE_USED_IVS: OnceLock<Mutex<HashMap<String, Vec<[u8; 12]>>>> = OnceLock::new();
+fn e2ee_used_ivs() -> &'static Mutex<HashMap<String, Vec<[u8; 12]>>> {
     E2EE_USED_IVS.get_or_init(|| Mutex::new(HashMap::new()))
 }
-struct E2eeSessionCleanup(c_int);
+fn new_e2ee_connection_id() -> Result<String, String> {
+    let mut id = [0u8; 16];
+    crate::e2ee::random_bytes(&mut id)?;
+    Ok(crate::e2ee::hex_encode(&id))
+}
+struct E2eeSessionCleanup(String);
 impl Drop for E2eeSessionCleanup {
     fn drop(&mut self) {
         if let Ok(mut used) = e2ee_used_ivs().lock() { used.remove(&self.0); }
@@ -648,7 +653,7 @@ fn truncate_utf8(text: &mut String, max_bytes: usize) {
     text.truncate(end);
 }
 
-fn process_command_for_connection(cmd_obj: &Json, connection_id: Option<c_int>) -> Result<Json, String> {
+fn process_command_for_connection(cmd_obj: &Json, connection_id: Option<&str>) -> Result<Json, String> {
     let Some(map) = cmd_obj.as_obj() else {
         return Err("Command must be a JSON object".into());
     };
@@ -1356,7 +1361,7 @@ fn process_command_for_connection(cmd_obj: &Json, connection_id: Option<c_int>) 
             atomic_write_bytes(Path::new(&key_path), key_line.as_bytes(), 0o600, false)
                 .map_err(|e| format!("Failed storing temporary E2EE session: {e}"))?;
             if let Ok(mut used) = e2ee_used_ivs().lock() {
-                used.insert(connection_id, Vec::new());
+                used.insert(connection_id.to_string(), Vec::new());
             } else {
                 let _ = fs::remove_file(&key_path);
                 return Err("E2EE replay state unavailable".into());
@@ -1413,7 +1418,7 @@ fn process_command_for_connection(cmd_obj: &Json, connection_id: Option<c_int>) 
             }
             {
                 let mut sessions = e2ee_used_ivs().lock().map_err(|_| "E2EE replay state unavailable")?;
-                let used = sessions.get_mut(&connection_id).ok_or("E2EE session expired")?;
+                let used = sessions.get_mut(connection_id).ok_or("E2EE session expired")?;
                 if used.contains(&iv) { return Err("Replayed E2EE command rejected".into()); }
                 if used.len() >= 1024 { return Err("E2EE session command limit reached".into()); }
                 used.push(iv);
@@ -1469,7 +1474,15 @@ fn process_command_for_connection(cmd_obj: &Json, connection_id: Option<c_int>) 
 }
 
 fn handle_client(fd: c_int, mac: String) {
-    let _session_cleanup = E2eeSessionCleanup(fd);
+    let connection_id = match new_e2ee_connection_id() {
+        Ok(id) => id,
+        Err(e) => {
+            eprintln!("[bt-control] Failed to allocate terminal session ID: {e}");
+            unsafe { close(fd) };
+            return;
+        }
+    };
+    let _session_cleanup = E2eeSessionCleanup(connection_id.clone());
     println!("[bt-control] Client connected via Bluetooth RFCOMM: {mac}");
     if !send_json_line(fd, &build_status_payload()) {
         unsafe { close(fd) };
@@ -1521,7 +1534,7 @@ fn handle_client(fd: c_int, mac: String) {
                 if line.is_empty() {
                     continue;
                 }
-                match Json::parse(&line).and_then(|c| process_command_for_connection(&c, Some(fd))) {
+                match Json::parse(&line).and_then(|c| process_command_for_connection(&c, Some(&connection_id))) {
                     Ok(resp) => {
                         if !send_json_line(fd, &resp) {
                             unsafe { close(fd) };
