@@ -637,6 +637,17 @@ fn collect_limited_output(
     Ok((status, stdout, stderr))
 }
 
+fn truncate_utf8(text: &mut String, max_bytes: usize) {
+    if text.len() <= max_bytes {
+        return;
+    }
+    let mut end = max_bytes;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.truncate(end);
+}
+
 fn process_command_for_connection(cmd_obj: &Json, connection_id: Option<c_int>) -> Result<Json, String> {
     let Some(map) = cmd_obj.as_obj() else {
         return Err("Command must be a JSON object".into());
@@ -1421,7 +1432,7 @@ fn process_command_for_connection(cmd_obj: &Json, connection_id: Option<c_int>) 
                 combined.push_str("\n[command timed out after 8 seconds]");
             }
             if combined.len() > 14000 {
-                combined.truncate(14000);
+                truncate_utf8(&mut combined, 14000);
                 combined.push_str("\n... [truncated]");
             }
             let mut resp_iv = [0u8; 12];
@@ -1814,6 +1825,14 @@ pub fn run(_args: &[String]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_output_truncation_preserves_utf8_boundaries() {
+        let mut text = format!("{}€tail", "a".repeat(13_999));
+        truncate_utf8(&mut text, 14_000);
+        assert_eq!(text.len(), 13_999);
+        assert!(text.is_char_boundary(text.len()));
+    }
 
     #[test]
     fn ble_ota_status_and_device_command_validation() {
