@@ -2,10 +2,97 @@
 //! Pure Rust, zero external crates. Used for E2EE terminal between Android app and speaker
 //! so the relay server never sees commands or terminal output.
 
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::Read;
+use std::path::Path;
+use std::process::{Command, Stdio};
 
 use crate::sys::Sha256;
+
+const IDENTITY_KEY_PEM: &str = "/var/lib/atrios/e2ee_identity.pem";
+const IDENTITY_PUB_DER: &str = "/var/lib/atrios/e2ee_identity.pub.der";
+
+pub fn base64_encode(input: &[u8]) -> String {
+    const TBL: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(((input.len() + 2) / 3) * 4);
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(TBL[((n >> 18) & 63) as usize] as char);
+        out.push(TBL[((n >> 12) & 63) as usize] as char);
+        out.push(if chunk.len() > 1 { TBL[((n >> 6) & 63) as usize] as char } else { '=' });
+        out.push(if chunk.len() > 2 { TBL[(n & 63) as usize] as char } else { '=' });
+    }
+    out
+}
+
+/// Ensure a persistent long-term ECDSA P-256 station identity keypair exists (0600)
+/// and return its X.509 SPKI DER public key encoded as base64.
+pub fn ensure_station_identity_pub_b64() -> Result<String, String> {
+    let key_p = Path::new(IDENTITY_KEY_PEM);
+    let pub_p = Path::new(IDENTITY_PUB_DER);
+    if !key_p.exists() {
+        let _ = fs::create_dir_all("/var/lib/atrios");
+        let st = Command::new("openssl")
+            .args(["ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", IDENTITY_KEY_PEM])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map_err(|e| format!("openssl ecparam failed: {e}"))?;
+        if !st.success() {
+            return Err("Failed generating station ECDSA P-256 identity key".into());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(key_p, fs::Permissions::from_mode(0o600));
+        }
+    }
+    if !pub_p.exists() {
+        let st = Command::new("openssl")
+            .args(["pkey", "-in", IDENTITY_KEY_PEM, "-pubout", "-outform", "DER", "-out", IDENTITY_PUB_DER])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map_err(|e| format!("openssl pkey pubout failed: {e}"))?;
+        if !st.success() {
+            return Err("Failed exporting station ECDSA public key".into());
+        }
+    }
+    let der = fs::read(pub_p).map_err(|e| format!("Failed reading station identity pub: {e}"))?;
+    if der.len() < 64 {
+        return Err("Invalid station identity public key DER".into());
+    }
+    Ok(base64_encode(&der))
+}
+
+/// Sign a canonical E2EE handshake transcript with the station's long-term ECDSA P-256 key.
+/// Returns (identity_pub_b64, sig_der_b64).
+pub fn sign_handshake_transcript(transcript: &[u8]) -> Result<(String, String), String> {
+    use std::io::Write;
+    let pub_b64 = ensure_station_identity_pub_b64()?;
+    let mut child = Command::new("openssl")
+        .args(["dgst", "-sha256", "-sign", IDENTITY_KEY_PEM])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("openssl dgst -sign failed: {e}"))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(transcript)
+            .map_err(|e| format!("Failed writing transcript to openssl: {e}"))?;
+    }
+    let out = child
+        .wait_with_output()
+        .map_err(|e| format!("openssl sign wait failed: {e}"))?;
+    if !out.status.success() || out.stdout.is_empty() {
+        return Err("Station ECDSA handshake signing failed".into());
+    }
+    Ok((pub_b64, base64_encode(&out.stdout)))
+}
 
 // --- Field arithmetic mod p = 2^255 - 19 (16 limbs of 16-bit signed i64) ---
 type Fe = [i64; 16];
@@ -271,17 +358,11 @@ pub fn decrypt_e2ee(shared: &[u8; 32], nonce: &[u8; 12], ct: &[u8], mac: &[u8; 3
     Ok(chacha20_xor(&enc_key, nonce, ct))
 }
 
-pub fn random_bytes(buf: &mut [u8]) {
-    if let Ok(mut f) = File::open("/dev/urandom") {
-        if f.read_exact(buf).is_ok() {
-            return;
-        }
-    }
-    let mut seed = crate::sys::now_unix_i64() as u64 ^ (std::process::id() as u64).wrapping_mul(0x9e3779b97f4a7c15);
-    for b in buf.iter_mut() {
-        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-        *b = (seed >> 33) as u8;
-    }
+pub fn random_bytes(buf: &mut [u8]) -> Result<(), String> {
+    let mut f = File::open("/dev/urandom")
+        .map_err(|e| format!("Secure random source unavailable: {e}"))?;
+    f.read_exact(buf)
+        .map_err(|e| format!("Secure random read failed: {e}"))
 }
 
 pub fn hex_encode(bytes: &[u8]) -> String {

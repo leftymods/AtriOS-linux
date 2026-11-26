@@ -35,6 +35,7 @@ const DEVICE_FILE: &str = "/etc/atrios-device";
 static CLIENT_COUNT: Mutex<usize> = Mutex::new(0);
 static SCREEN_GEN: AtomicU64 = AtomicU64::new(0);
 static SCREEN_LOCK: Mutex<()> = Mutex::new(());
+static E2EE_USED_IVS: Mutex<Vec<[u8; 12]>> = Mutex::new(Vec::new());
 
 fn read_device_meta() -> (String, String, String, String, String) {
     let mut name = "AtriStation Max".to_string();
@@ -613,12 +614,14 @@ pub(crate) fn process_command(cmd_obj: &Json) -> Result<Json, String> {
         "get_status" | "status" => Ok(build_status_payload()),
         "get_relay_info" => {
             let cfg = crate::atriai::load_config();
+            let id_pub = crate::e2ee::ensure_station_identity_pub_b64().unwrap_or_default();
             Ok(obj(vec![
                 ("type", Json::Str("relay_info".into())),
                 ("device_id", Json::Str(device_relay_id())),
                 ("gateway", Json::Str(cfg.server)),
                 ("token", Json::Str(cfg.token.clone())),
                 ("has_token", Json::Bool(!cfg.token.is_empty())),
+                ("e2ee_identity_pub", Json::Str(id_pub)),
             ]))
         }
         "set_volume" | "volume" => {
@@ -1284,17 +1287,28 @@ pub(crate) fn process_command(cmd_obj: &Json) -> Result<Json, String> {
             use std::sync::{Mutex, OnceLock};
             static E2EE_SESSIONS: OnceLock<Mutex<HashMap<String, ([u8; 32], i64)>>> = OnceLock::new();
             let store = E2EE_SESSIONS.get_or_init(|| Mutex::new(HashMap::new()));
+            let client_pub = map.get("client_pub").and_then(|v| v.as_str()).unwrap_or("").trim();
+            let client_nonce = map.get("client_nonce").and_then(|v| v.as_str()).unwrap_or("").trim();
             let mut priv_k = [0u8; 32];
             let mut sid_raw = [0u8; 8];
-            crate::e2ee::random_bytes(&mut priv_k);
-            crate::e2ee::random_bytes(&mut sid_raw);
+            crate::e2ee::random_bytes(&mut priv_k)?;
+            crate::e2ee::random_bytes(&mut sid_raw)?;
             let pub_k = crate::e2ee::x25519_public_key(&priv_k);
+            let pub_hex = crate::e2ee::hex_encode(&pub_k);
             let sid = crate::e2ee::hex_encode(&sid_raw);
+            let device_id = crate::hardware::device_identity().device_id;
+            let transcript = format!(
+                "atrios-term-e2ee-v2|{device_id}|{sid}|{client_pub}|{client_nonce}|{pub_hex}"
+            );
+            let (identity_pub, sig_b64) = crate::e2ee::sign_handshake_transcript(transcript.as_bytes())?;
             let now = now_unix_i64();
             if let Ok(mut g) = store.lock() {
                 g.retain(|_, (_, ts)| now - *ts < 1800);
                 if g.len() >= 8 { g.clear(); }
                 g.insert(sid.clone(), (priv_k, now));
+            }
+            if let Ok(mut used) = E2EE_USED_IVS.lock() {
+                used.clear();
             }
             // Also persist active E2EE session key in /var/run/atrios/term_e2ee.key (0600, tmpfs) so any handler thread sees it
             let _ = fs::create_dir_all("/var/run/atrios");
@@ -1304,7 +1318,10 @@ pub(crate) fn process_command(cmd_obj: &Json) -> Result<Json, String> {
                 ("type", Json::Str("term_e2ee_init_response".into())),
                 ("success", Json::Bool(true)),
                 ("sid", Json::Str(sid)),
-                ("pub", Json::Str(crate::e2ee::hex_encode(&pub_k))),
+                ("pub", Json::Str(pub_hex)),
+                ("device_id", Json::Str(device_id)),
+                ("identity_pub", Json::Str(identity_pub)),
+                ("sig", Json::Str(sig_b64)),
             ]))
         }
         "term_e2ee_exec" => {
@@ -1331,10 +1348,23 @@ pub(crate) fn process_command(cmd_obj: &Json) -> Result<Json, String> {
             let iv: [u8; 12] = iv_vec.try_into().unwrap();
             let mac: [u8; 32] = mac_vec.try_into().unwrap();
             let shared = crate::e2ee::x25519(&priv_k, &peer_pub);
+            if shared.iter().all(|b| *b == 0) {
+                return Err("Invalid low-order E2EE public key".into());
+            }
             let pt = crate::e2ee::decrypt_e2ee(&shared, &iv, &ct_vec, &mac)?;
             let shell_cmd = String::from_utf8_lossy(&pt).trim().to_string();
             if shell_cmd.is_empty() || shell_cmd.len() > 2048 {
                 return Err("Empty or oversized command".into());
+            }
+            {
+                let mut used = E2EE_USED_IVS.lock().map_err(|_| "E2EE replay state unavailable")?;
+                if used.contains(&iv) {
+                    return Err("Replayed E2EE command rejected".into());
+                }
+                if used.len() >= 1024 {
+                    return Err("E2EE session command limit reached".into());
+                }
+                used.push(iv);
             }
             let out = Command::new("/bin/sh")
                 .args(["-c", &format!("timeout 8 sh -c {} 2>&1 || true", shell_quote_single(&shell_cmd))])
@@ -1351,7 +1381,7 @@ pub(crate) fn process_command(cmd_obj: &Json) -> Result<Json, String> {
                 combined.push_str("\n... [truncated]");
             }
             let mut resp_iv = [0u8; 12];
-            crate::e2ee::random_bytes(&mut resp_iv);
+            crate::e2ee::random_bytes(&mut resp_iv)?;
             let (resp_ct, resp_mac) = crate::e2ee::encrypt_e2ee(&shared, &resp_iv, combined.as_bytes());
             Ok(obj(vec![
                 ("type", Json::Str("term_e2ee_response".into())),
