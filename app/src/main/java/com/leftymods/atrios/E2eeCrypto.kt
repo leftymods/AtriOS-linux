@@ -1,11 +1,11 @@
 package com.leftymods.atrios
 
-import android.util.Base64
 import java.security.KeyFactory
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.security.Signature
 import java.security.spec.X509EncodedKeySpec
+import java.util.Base64
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 
@@ -234,8 +234,8 @@ object E2eeCrypto {
      */
     fun verifyEcdsaP256(spkiDerB64: String, transcript: ByteArray, sigDerB64: String): Boolean {
         return try {
-            val spki = Base64.decode(spkiDerB64.trim(), Base64.DEFAULT)
-            val sigBytes = Base64.decode(sigDerB64.trim(), Base64.DEFAULT)
+            val spki = Base64.getMimeDecoder().decode(spkiDerB64.trim())
+            val sigBytes = Base64.getMimeDecoder().decode(sigDerB64.trim())
             if (spki.size < 64 || sigBytes.isEmpty()) return false
             val kf = KeyFactory.getInstance("EC")
             val pubKey = kf.generatePublic(X509EncodedKeySpec(spki))

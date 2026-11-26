@@ -1043,9 +1043,15 @@ fun AtriOSApp(
                                 },
                                 onAccountLogin = { u, p ->
                                     accountBusy = true; accountError = null
+                                    val prevUser = accountState.username
                                     scope.launch {
                                         val res = withContext(Dispatchers.IO) { accountClient.login(u, p) }
                                         res.onSuccess { st ->
+                                            if (prevUser.isNotBlank() && !prevUser.equals(st.username, ignoreCase = true)) {
+                                                storage.clearSensitiveTokens()
+                                                client.setDirectYMusicAuth("")
+                                                relayConfig = storage.loadRelayConfig()
+                                            }
                                             accountState = st
                                             val tok = st.vault.yandexMusicToken
                                             if (tok.isNotBlank() && !status.ymusic.loggedIn) {
@@ -1076,6 +1082,9 @@ fun AtriOSApp(
                                 onAccountLogout = {
                                     scope.launch {
                                         withContext(Dispatchers.IO) { accountClient.logout() }
+                                        storage.clearSensitiveTokens()
+                                        client.setDirectYMusicAuth("")
+                                        relayConfig = storage.loadRelayConfig()
                                         accountState = AtriAccountState()
                                     }
                                 },

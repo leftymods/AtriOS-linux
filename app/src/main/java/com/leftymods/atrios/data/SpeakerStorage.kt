@@ -2,6 +2,9 @@ package com.leftymods.atrios.data
 
 import android.content.Context
 import com.leftymods.atrios.model.SavedSpeaker
+import com.leftymods.atrios.security.KeystoreSecretStore
+import com.leftymods.atrios.security.SecretReadResult
+import com.leftymods.atrios.security.SharedPrefsBacking
 import org.json.JSONArray
 
 
@@ -11,8 +14,20 @@ data class RelayConfig(
     val token: String = ""
 )
 
-class SpeakerStorage(context: Context) {
+class SpeakerStorage(
+    context: Context,
+    private val secretStore: KeystoreSecretStore = KeystoreSecretStore.create(context)
+) {
     private val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+
+    init {
+        // Fail-safe migration of legacy plaintext tokens into Android Keystore AEAD AES-256-GCM.
+        // Legacy keys are removed ONLY after verified encrypted read-back succeeds.
+        secretStore.migrateFromLegacy(
+            legacyBacking = SharedPrefsBacking(prefs),
+            keys = listOf(KEY_RELAY_TOKEN, KEY_YMUSIC_TOKEN)
+        )
+    }
 
     fun loadSpeakers(): List<SavedSpeaker> {
         val raw = prefs.getString(KEY_SPEAKERS, null) ?: return emptyList()
@@ -48,19 +63,33 @@ class SpeakerStorage(context: Context) {
         prefs.edit().putString(KEY_SPEAKERS, arr.toString()).apply()
     }
 
+    private fun readSecretFailClosed(key: String): String {
+        return when (val r = secretStore.getSecret(key)) {
+            is SecretReadResult.Found -> r.value.trim()
+            is SecretReadResult.Missing -> ""
+            is SecretReadResult.Corrupted -> "" // Fail closed: corrupted entry already purged, never fall back to plaintext
+        }
+    }
+
     fun loadRelayConfig(): RelayConfig = RelayConfig(
         gatewayUrl = prefs.getString(KEY_RELAY_URL, "https://ai.leftymods.tech")
             ?.trim()?.ifBlank { "https://ai.leftymods.tech" } ?: "https://ai.leftymods.tech",
         deviceId = prefs.getString(KEY_RELAY_DID, "")?.trim().orEmpty(),
-        token = prefs.getString(KEY_RELAY_TOKEN, "")?.trim().orEmpty()
+        token = readSecretFailClosed(KEY_RELAY_TOKEN)
     )
 
     fun saveRelayConfig(cfg: RelayConfig) {
         prefs.edit()
             .putString(KEY_RELAY_URL, cfg.gatewayUrl.trim())
             .putString(KEY_RELAY_DID, cfg.deviceId.trim())
-            .putString(KEY_RELAY_TOKEN, cfg.token.trim())
+            .remove(KEY_RELAY_TOKEN) // Ensure legacy plaintext token is never written back
             .apply()
+        val tok = cfg.token.trim()
+        if (tok.isEmpty()) {
+            secretStore.removeSecret(KEY_RELAY_TOKEN)
+        } else {
+            secretStore.putSecret(KEY_RELAY_TOKEN, tok)
+        }
     }
 
     companion object {
@@ -69,6 +98,7 @@ class SpeakerStorage(context: Context) {
         private const val KEY_RELAY_URL = "relay_gateway_url_v1"
         private const val KEY_RELAY_DID = "relay_device_id_v1"
         private const val KEY_RELAY_TOKEN = "relay_token_v1"
+        private const val KEY_YMUSIC_TOKEN = "ymusic_token_v1"
     }
 
     fun loadPaletteId(): String = prefs.getString("app_palette", "yandex") ?: "yandex"
@@ -90,10 +120,23 @@ class SpeakerStorage(context: Context) {
             .apply()
     }
 
-    fun loadYMusicToken(): String = prefs.getString("ymusic_token_v1", "")?.trim().orEmpty()
+    fun loadYMusicToken(): String = readSecretFailClosed(KEY_YMUSIC_TOKEN)
 
     fun saveYMusicToken(token: String) {
-        prefs.edit().putString("ymusic_token_v1", token.trim()).apply()
+        prefs.edit().remove(KEY_YMUSIC_TOKEN).apply()
+        val clean = token.trim()
+        if (clean.isEmpty()) {
+            secretStore.removeSecret(KEY_YMUSIC_TOKEN)
+        } else {
+            secretStore.putSecret(KEY_YMUSIC_TOKEN, clean)
+        }
+    }
+
+    /** Clears locally cached service/relay bearer tokens (used on account logout or switch). */
+    fun clearSensitiveTokens() {
+        prefs.edit().remove(KEY_RELAY_TOKEN).remove(KEY_YMUSIC_TOKEN).apply()
+        secretStore.removeSecret(KEY_RELAY_TOKEN)
+        secretStore.removeSecret(KEY_YMUSIC_TOKEN)
     }
 
     fun loadPinnedStationKey(deviceId: String): String {

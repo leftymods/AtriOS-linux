@@ -1,12 +1,16 @@
 package com.leftymods.atrios
 
 import android.content.Context
-import android.util.Base64
+import com.leftymods.atrios.security.KeyValueBacking
+import com.leftymods.atrios.security.KeystoreSecretStore
+import com.leftymods.atrios.security.SecretReadResult
+import com.leftymods.atrios.security.SharedPrefsBacking
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.URL
 import java.net.URLEncoder
 import java.security.SecureRandom
+import java.util.Base64
 import javax.crypto.Cipher
 import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.GCMParameterSpec
@@ -78,11 +82,44 @@ data class AtriAccountState(
  * - MasterKey = PBKDF2-HMAC-SHA256(password, salt, 210_000, 64 bytes)
  *   - bytes[0..31]  = AuthKey (sent only on register/login; scrypt-hashed on server)
  *   - bytes[32..63] = VaultKey (NEVER leaves phone; AES-256-GCM encrypts the vault blob)
+ * - Local session_token, vault_key_b64, and vault_cache are stored ONLY in Android Keystore
+ *   AEAD AES-256-GCM (KeystoreSecretStore) — never in plaintext SharedPreferences.
  */
-class AtriAccountClient(context: Context) {
-    private val prefs = context.getSharedPreferences("atrios_zk_account_v1", Context.MODE_PRIVATE)
+class AtriAccountClient(
+    private val metaBacking: KeyValueBacking,
+    private val secretStore: KeystoreSecretStore
+) {
+    constructor(context: Context) : this(
+        metaBacking = SharedPrefsBacking(
+            context.applicationContext.getSharedPreferences(META_PREFS_NAME, Context.MODE_PRIVATE)
+        ),
+        secretStore = KeystoreSecretStore.create(context)
+    )
+
+    companion object {
+        const val META_PREFS_NAME = "atrios_zk_account_v1"
+        const val KEY_USERNAME = "username"
+        const val KEY_VAULT_VERSION = "vault_version"
+        const val KEY_SESSION_TOKEN = "session_token"
+        const val KEY_VAULT_KEY_B64 = "vault_key_b64"
+        const val KEY_VAULT_CACHE = "vault_cache"
+        private val LEGACY_SECRET_KEYS = listOf(KEY_SESSION_TOKEN, KEY_VAULT_KEY_B64, KEY_VAULT_CACHE)
+    }
+
     private val baseUrl = "https://ai.leftymods.tech/relay/v1/account"
-    private val gatewayToken = "024ef8b87fe7313f981287e81326ef10b39421ee84a121cc"
+
+    /**
+     * Public client gateway identifier required by the reverse-proxy nginx layer.
+     * NOT an account secret and grants ZERO account privileges (account endpoints strictly require
+     * a user-bound X-Atri-Account-Session token; requests with only this header return HTTP 401).
+     */
+    private val gatewayClientId = "024ef8b87fe7313f981287e81326ef10b39421ee84a121cc"
+
+    init {
+        // Fail-safe migration: encrypts legacy plaintext secrets in Android Keystore, verifies
+        // decrypt read-back, and removes old plaintext keys ONLY on verified success.
+        secretStore.migrateFromLegacy(metaBacking, LEGACY_SECRET_KEYS)
+    }
 
     private fun toHex(bytes: ByteArray): String = bytes.joinToString("") { "%02x".format(it) }
     private fun fromHex(hex: String): ByteArray {
@@ -103,7 +140,7 @@ class AtriAccountClient(context: Context) {
         return authKeyHex to vaultKey
     }
 
-    private fun encryptVault(vault: AtriVaultData, vaultKey: ByteArray): String {
+    internal fun encryptVault(vault: AtriVaultData, vaultKey: ByteArray): String {
         val iv = ByteArray(12).also { SecureRandom().nextBytes(it) }
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(vaultKey, "AES"), GCMParameterSpec(128, iv))
@@ -111,12 +148,12 @@ class AtriAccountClient(context: Context) {
         val packed = ByteArray(iv.size + ct.size)
         System.arraycopy(iv, 0, packed, 0, iv.size)
         System.arraycopy(ct, 0, packed, iv.size, ct.size)
-        return Base64.encodeToString(packed, Base64.NO_WRAP)
+        return Base64.getEncoder().encodeToString(packed)
     }
 
-    private fun decryptVault(blobB64: String, vaultKey: ByteArray): AtriVaultData {
+    internal fun decryptVault(blobB64: String, vaultKey: ByteArray): AtriVaultData {
         if (blobB64.isBlank()) return AtriVaultData()
-        val packed = Base64.decode(blobB64, Base64.DEFAULT)
+        val packed = Base64.getMimeDecoder().decode(blobB64)
         if (packed.size < 28) return AtriVaultData()
         val iv = packed.copyOfRange(0, 12)
         val ct = packed.copyOfRange(12, packed.size)
@@ -131,7 +168,7 @@ class AtriAccountClient(context: Context) {
             requestMethod = method
             connectTimeout = 10_000
             readTimeout = 15_000
-            setRequestProperty("Authorization", "Bearer $gatewayToken")
+            setRequestProperty("Authorization", "Bearer $gatewayClientId")
             setRequestProperty("Accept", "application/json")
             if (sessionToken.isNotBlank()) {
                 setRequestProperty("X-Atri-Account-Session", sessionToken)
@@ -172,26 +209,73 @@ class AtriAccountClient(context: Context) {
         }
     }
 
-    private fun saveLocalSession(username: String, sessionTok: String, vaultKey: ByteArray, vaultVer: Int, vault: AtriVaultData) {
-        prefs.edit()
-            .putString("username", username)
-            .putString("session_token", sessionTok)
-            .putString("vault_key_b64", Base64.encodeToString(vaultKey, Base64.NO_WRAP))
-            .putInt("vault_version", vaultVer)
-            .putString("vault_cache", vault.toJson())
-            .apply()
+    /**
+     * Clears all local account secrets (Keystore) and metadata (SharedPreferences).
+     * Called on logout, account switch, or Keystore corruption/reset (fail-closed).
+     */
+    fun clearLocalSessionState() {
+        secretStore.removeSecret(KEY_SESSION_TOKEN)
+        secretStore.removeSecret(KEY_VAULT_KEY_B64)
+        secretStore.removeSecret(KEY_VAULT_CACHE)
+        metaBacking.clear()
+    }
+
+    internal fun saveLocalSession(username: String, sessionTok: String, vaultKey: ByteArray, vaultVer: Int, vault: AtriVaultData) {
+        val prevUser = metaBacking.getString(KEY_USERNAME).orEmpty()
+        if (prevUser.isNotBlank() && !prevUser.equals(username, ignoreCase = true)) {
+            // Switching accounts: wipe all previous account secrets before writing new ones
+            clearLocalSessionState()
+        }
+        val keyB64 = java.util.Base64.getEncoder().encodeToString(vaultKey)
+        val okTok = secretStore.putSecret(KEY_SESSION_TOKEN, sessionTok)
+        val okKey = secretStore.putSecret(KEY_VAULT_KEY_B64, keyB64)
+        val okCache = secretStore.putSecret(KEY_VAULT_CACHE, vault.toJson())
+        if (!okTok || !okKey || !okCache) {
+            // Fail closed: never fall back to plaintext SharedPreferences!
+            clearLocalSessionState()
+            throw IllegalStateException("keystore_secret_write_failed")
+        }
+        // Only non-secret metadata goes to regular prefs (and ensure legacy plaintext keys stay absent)
+        metaBacking.remove(KEY_SESSION_TOKEN)
+        metaBacking.remove(KEY_VAULT_KEY_B64)
+        metaBacking.remove(KEY_VAULT_CACHE)
+        metaBacking.putString(KEY_USERNAME, username)
+        metaBacking.putString(KEY_VAULT_VERSION, vaultVer.toString())
+    }
+
+    private fun readRequiredSecret(key: String): String? {
+        return when (val r = secretStore.getSecret(key)) {
+            is SecretReadResult.Found -> r.value
+            is SecretReadResult.Missing -> null
+            is SecretReadResult.Corrupted -> {
+                // Fail closed on Keystore reset, tampered ciphertext, or restored backup without hardware key
+                clearLocalSessionState()
+                null
+            }
+        }
     }
 
     fun loadCachedState(): AtriAccountState {
-        val u = prefs.getString("username", "").orEmpty()
-        val tok = prefs.getString("session_token", "").orEmpty()
-        if (u.isBlank() || tok.isBlank()) return AtriAccountState()
-        val v = runCatching { AtriVaultData.fromJson(prefs.getString("vault_cache", "").orEmpty()) }
-            .getOrDefault(AtriVaultData())
+        val u = metaBacking.getString(KEY_USERNAME).orEmpty()
+        if (u.isBlank()) return AtriAccountState()
+        val tok = readRequiredSecret(KEY_SESSION_TOKEN)
+        val keyB64 = readRequiredSecret(KEY_VAULT_KEY_B64)
+        if (tok.isNullOrBlank() || keyB64.isNullOrBlank()) {
+            return AtriAccountState()
+        }
+        val v = when (val c = secretStore.getSecret(KEY_VAULT_CACHE)) {
+            is SecretReadResult.Found -> runCatching { AtriVaultData.fromJson(c.value) }.getOrDefault(AtriVaultData())
+            is SecretReadResult.Missing -> AtriVaultData()
+            is SecretReadResult.Corrupted -> {
+                clearLocalSessionState()
+                return AtriAccountState()
+            }
+        }
+        val ver = metaBacking.getString(KEY_VAULT_VERSION)?.toIntOrNull() ?: 1
         return AtriAccountState(
             loggedIn = true,
             username = u,
-            vaultVersion = prefs.getInt("vault_version", 1),
+            vaultVersion = ver,
             vault = v
         )
     }
@@ -218,7 +302,7 @@ class AtriAccountClient(context: Context) {
         val ver = res.optInt("vault_version", 1)
         val devs = parseDevices(res.optJSONArray("devices"))
         saveLocalSession(u, sessionTok, vaultKey, ver, initialVault)
-        DebugLogStore.log("OK", "ACCOUNT", "Registered Zero-Knowledge AtriOS account @$u")
+        DebugLogStore.log("OK", "ACCOUNT", "Registered Zero-Knowledge AtriOS account (vault v$ver)")
         AtriAccountState(true, u, ver, initialVault, devs)
     }
 
@@ -245,20 +329,20 @@ class AtriAccountClient(context: Context) {
         val vault = decryptVault(res.optString("vault_blob", ""), vaultKey)
         val devs = parseDevices(res.optJSONArray("devices"))
         saveLocalSession(u, sessionTok, vaultKey, ver, vault)
-        DebugLogStore.log("OK", "ACCOUNT", "Signed in @$u (vault v$ver, ${devs.size} devices)")
+        DebugLogStore.log("OK", "ACCOUNT", "Signed in (vault v$ver, ${devs.size} devices)")
         AtriAccountState(true, u, ver, vault, devs)
     }
 
     fun syncVault(): Result<AtriAccountState> = runCatching {
-        val tok = prefs.getString("session_token", "").orEmpty()
-        val keyB64 = prefs.getString("vault_key_b64", "").orEmpty()
-        if (tok.isBlank() || keyB64.isBlank()) throw IllegalStateException("not_logged_in")
-        val vaultKey = Base64.decode(keyB64, Base64.DEFAULT)
+        val tok = readRequiredSecret(KEY_SESSION_TOKEN)
+        val keyB64 = readRequiredSecret(KEY_VAULT_KEY_B64)
+        if (tok.isNullOrBlank() || keyB64.isNullOrBlank()) throw IllegalStateException("not_logged_in")
+        val vaultKey = java.util.Base64.getDecoder().decode(keyB64)
         val (code, res) = httpJson("GET", "/vault", null, tok)
         if (code != 200 || !res.optBoolean("ok", false)) {
             throw IllegalStateException(res.optString("error", "vault_get_$code"))
         }
-        val u = res.optString("username", prefs.getString("username", "").orEmpty())
+        val u = res.optString("username", metaBacking.getString(KEY_USERNAME).orEmpty())
         val ver = res.optInt("vault_version", 1)
         val vault = decryptVault(res.optString("vault_blob", ""), vaultKey)
         val devs = parseDevices(res.optJSONArray("devices"))
@@ -267,11 +351,11 @@ class AtriAccountClient(context: Context) {
     }
 
     fun saveVault(vault: AtriVaultData): Result<AtriAccountState> = runCatching {
-        val tok = prefs.getString("session_token", "").orEmpty()
-        val keyB64 = prefs.getString("vault_key_b64", "").orEmpty()
-        val u = prefs.getString("username", "").orEmpty()
-        if (tok.isBlank() || keyB64.isBlank()) throw IllegalStateException("not_logged_in")
-        val vaultKey = Base64.decode(keyB64, Base64.DEFAULT)
+        val tok = readRequiredSecret(KEY_SESSION_TOKEN)
+        val keyB64 = readRequiredSecret(KEY_VAULT_KEY_B64)
+        val u = metaBacking.getString(KEY_USERNAME).orEmpty()
+        if (tok.isNullOrBlank() || keyB64.isNullOrBlank()) throw IllegalStateException("not_logged_in")
+        val vaultKey = java.util.Base64.getDecoder().decode(keyB64)
         val blob = encryptVault(vault, vaultKey)
         val req = JSONObject().apply {
             put("vault_blob", blob)
@@ -280,15 +364,16 @@ class AtriAccountClient(context: Context) {
         if (code != 200 || !res.optBoolean("ok", false)) {
             throw IllegalStateException(res.optString("error", "vault_put_$code"))
         }
-        val ver = res.optInt("vault_version", prefs.getInt("vault_version", 1) + 1)
+        val prevVer = metaBacking.getString(KEY_VAULT_VERSION)?.toIntOrNull() ?: 1
+        val ver = res.optInt("vault_version", prevVer + 1)
         saveLocalSession(u, tok, vaultKey, ver, vault)
         DebugLogStore.log("OK", "ACCOUNT", "Encrypted Vault synced (v$ver)")
         syncVault().getOrElse { AtriAccountState(true, u, ver, vault) }
     }
 
     fun bindDevice(deviceId: String, name: String, pubkeyB64: String = ""): Result<List<BoundSpeakerInfo>> = runCatching {
-        val tok = prefs.getString("session_token", "").orEmpty()
-        if (tok.isBlank()) throw IllegalStateException("not_logged_in")
+        val tok = readRequiredSecret(KEY_SESSION_TOKEN)
+        if (tok.isNullOrBlank()) throw IllegalStateException("not_logged_in")
         val req = JSONObject().apply {
             put("device_id", deviceId)
             put("name", name)
@@ -298,13 +383,13 @@ class AtriAccountClient(context: Context) {
         if (code != 200 || !res.optBoolean("ok", false)) {
             throw IllegalStateException(res.optString("error", "bind_failed_$code"))
         }
-        DebugLogStore.log("OK", "ACCOUNT", "Bound speaker $name ($deviceId) to AtriOS account")
+        DebugLogStore.log("OK", "ACCOUNT", "Bound speaker ($deviceId) to AtriOS account")
         parseDevices(res.optJSONArray("devices"))
     }
 
     fun unbindDevice(deviceId: String): Result<List<BoundSpeakerInfo>> = runCatching {
-        val tok = prefs.getString("session_token", "").orEmpty()
-        if (tok.isBlank()) throw IllegalStateException("not_logged_in")
+        val tok = readRequiredSecret(KEY_SESSION_TOKEN)
+        if (tok.isNullOrBlank()) throw IllegalStateException("not_logged_in")
         val req = JSONObject().apply { put("device_id", deviceId) }
         val (code, res) = httpJson("POST", "/devices/unbind", req, tok)
         if (code != 200 || !res.optBoolean("ok", false)) {
@@ -314,11 +399,14 @@ class AtriAccountClient(context: Context) {
     }
 
     fun logout() {
-        val tok = prefs.getString("session_token", "").orEmpty()
+        val tok = when (val r = secretStore.getSecret(KEY_SESSION_TOKEN)) {
+            is SecretReadResult.Found -> r.value
+            else -> ""
+        }
         if (tok.isNotBlank()) {
             runCatching { httpJson("POST", "/logout", JSONObject(), tok) }
         }
-        prefs.edit().clear().apply()
+        clearLocalSessionState()
         DebugLogStore.log("INFO", "ACCOUNT", "Signed out of AtriOS account")
     }
 }

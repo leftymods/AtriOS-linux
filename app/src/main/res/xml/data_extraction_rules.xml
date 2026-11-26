@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<data-extraction-rules>
+    <cloud-backup disableIfNoEncryptionCapabilities="true">
+        <exclude domain="sharedpref" path="atrios_keystore_secrets_v1.xml" />
+        <exclude domain="sharedpref" path="atrios_zk_account_v1.xml" />
+        <exclude domain="sharedpref" path="atrios_speakers.xml" />
+    </cloud-backup>
+    <device-transfer>
+        <!-- Prevent Android 12+ Device-to-Device transfer from copying local secrets or Keystore blobs -->
+        <exclude domain="sharedpref" path="atrios_keystore_secrets_v1.xml" />
+        <exclude domain="sharedpref" path="atrios_zk_account_v1.xml" />
+        <exclude domain="sharedpref" path="atrios_speakers.xml" />
+    </device-transfer>
+</data-extraction-rules>

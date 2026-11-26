@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<full-backup-content>
+    <!-- Exclude all secret, account, and speaker preference files from Auto Backup (API <= 30) -->
+    <exclude domain="sharedpref" path="atrios_keystore_secrets_v1.xml" />
+    <exclude domain="sharedpref" path="atrios_zk_account_v1.xml" />
+    <exclude domain="sharedpref" path="atrios_speakers.xml" />
+</full-backup-content>
