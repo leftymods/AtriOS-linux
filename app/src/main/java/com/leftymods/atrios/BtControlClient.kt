@@ -892,9 +892,15 @@ class BtControlClient(
                         if (!E2eeCrypto.verifyEcdsaP256(idPubB64, transcript.toByteArray(Charsets.UTF_8), sigB64)) {
                             throw SecurityException("Неверная ECDSA-подпись станции (возможна атака MITM)")
                         }
-                        // 2. Identity pinning: pin ONLY over trusted local Bluetooth; fail-closed over Internet Relay!
+                        // 2. Identity pinning + target binding:
+                        // Over Relay, strictly verify signed device_id matches the selected relayDeviceId
+                        // so a rogue relay cannot redirect commands to a different pinned station!
                         val pinned = onLoadPinnedStationKey(did)
                         if (isRelayActive()) {
+                            val expectedDid = relayDeviceId.trim()
+                            if (expectedDid.isEmpty() || did != expectedDid) {
+                                throw SecurityException("КРИТИЧНО: ответ от другой станции ($did != $expectedDid)!")
+                            }
                             if (pinned.isBlank()) {
                                 throw SecurityException("Ключ станции не подтверждён — подключитесь 1 раз по Bluetooth для привязки ключа")
                             }
