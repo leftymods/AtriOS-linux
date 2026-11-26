@@ -36,6 +36,7 @@ fun AtriHomeScreen(
     accountState: AtriAccountState,
     palette: AppPalette,
     volumePct: Int,
+    progressFrac: Float = 0f,
     onBlobTap: () -> Unit,
     onPrev: () -> Unit,
     onPlayPause: () -> Unit,
@@ -45,10 +46,12 @@ fun AtriHomeScreen(
     onOpenIntegrations: () -> Unit,
     onOpenTimers: () -> Unit
 ) {
+    val context = androidx.compose.ui.platform.LocalContext.current
     val ym = status.ymusic
     val isPlaying = ym.state == "playing"
     val isLoading = ym.state == "loading"
     val hasTrack = ym.title.isNotBlank()
+    val accountDisplay = if (accountState.username.contains("@")) accountState.username else "@${accountState.username}"
 
     Column(
         modifier = Modifier
@@ -56,9 +59,9 @@ fun AtriHomeScreen(
             .background(OledBlack)
             .statusBarsPadding()
             .verticalScroll(rememberScrollState())
-            .padding(horizontal = 20.dp, vertical = 14.dp),
+            .padding(horizontal = 20.dp, vertical = 10.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(16.dp)
+        verticalArrangement = Arrangement.spacedBy(11.dp)
     ) {
         // Top status bar (no duplicate EQ/Volume buttons — those live in the 2x2 Quick Action grid below)
         Row(
@@ -89,7 +92,7 @@ fun AtriHomeScreen(
                         text = buildString {
                             append(transportLabel)
                             append(" · Подключена")
-                            if (accountState.loggedIn) append(" · @${accountState.username}")
+                            if (accountState.loggedIn) append(" · $accountDisplay")
                         },
                         color = Color(0xFFA0A0B0),
                         fontSize = 12.sp,
@@ -104,8 +107,8 @@ fun AtriHomeScreen(
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(276.dp)
-                .clip(RoundedCornerShape(32.dp))
+                .height(220.dp)
+                .clip(RoundedCornerShape(30.dp))
                 .clickable { onBlobTap() },
             contentAlignment = Alignment.Center
         ) {
@@ -157,74 +160,101 @@ fun AtriHomeScreen(
             }
         }
 
-        // Compact Now Playing status card
+        // Compact Now Playing status card with live progress bar + 1-tap launch official Yandex Music
         if (hasTrack) {
-            Row(
+            Column(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(22.dp))
                     .background(OledCard)
                     .border(1.dp, Color.White.copy(alpha = 0.06f), RoundedCornerShape(22.dp))
-                    .padding(12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                AsyncCoverArt(
-                    url = ym.coverUrl,
-                    shape = RoundedCornerShape(12.dp),
-                    modifier = Modifier.size(52.dp)
-                )
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = ym.title,
-                        color = Color.White,
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                            runCatching {
+                                context.packageManager.getLaunchIntentForPackage("ru.yandex.music")?.let {
+                                    context.startActivity(it)
+                                }
+                            }
+                        }
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    AsyncCoverArt(
+                        url = ym.coverUrl,
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.size(46.dp)
                     )
-                    Text(
-                        text = ym.artist.ifBlank { if (ym.loggedIn) "Яндекс Музыка" else "AtriStation" },
-                        color = Color(0xFFA0A0B0),
-                        fontSize = 12.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = ym.title,
+                            color = Color.White,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Text(
+                            text = ym.artist.ifBlank { if (ym.loggedIn) "Яндекс Музыка" else "AtriStation" },
+                            color = Color(0xFFA0A0B0),
+                            fontSize = 12.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(
+                            onClick = onPrev,
+                            enabled = ym.canPrev,
+                            modifier = Modifier.size(36.dp)
+                        ) {
+                            Icon(
+                                Icons.Rounded.SkipPrevious,
+                                contentDescription = "Назад",
+                                tint = if (ym.canPrev) Color.White else Color.White.copy(alpha = 0.25f)
+                            )
+                        }
+                        IconButton(
+                            onClick = onPlayPause,
+                            modifier = Modifier
+                                .size(40.dp)
+                                .clip(CircleShape)
+                                .background(palette.accent)
+                        ) {
+                            Icon(
+                                if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
+                                contentDescription = "Пуск/Пауза",
+                                tint = palette.onAccent
+                            )
+                        }
+                        IconButton(
+                            onClick = onNext,
+                            enabled = ym.canNext && !isLoading,
+                            modifier = Modifier.size(36.dp)
+                        ) {
+                            Icon(
+                                Icons.Rounded.SkipNext,
+                                contentDescription = "Вперёд",
+                                tint = if (ym.canNext && !isLoading) Color.White else Color.White.copy(alpha = 0.25f)
+                            )
+                        }
+                    }
                 }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(
-                        onClick = onPrev,
-                        enabled = ym.canPrev,
-                        modifier = Modifier.size(36.dp)
-                    ) {
-                        Icon(
-                            Icons.Rounded.SkipPrevious,
-                            contentDescription = "Назад",
-                            tint = if (ym.canPrev) Color.White else Color.White.copy(alpha = 0.25f)
-                        )
-                    }
-                    IconButton(
-                        onClick = onPlayPause,
+                if (ym.durationMs > 0L) {
+                    Box(
                         modifier = Modifier
-                            .size(40.dp)
-                            .clip(CircleShape)
-                            .background(palette.accent)
+                            .fillMaxWidth()
+                            .height(2.5.dp)
+                            .background(Color.White.copy(alpha = 0.08f))
                     ) {
-                        Icon(
-                            if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
-                            contentDescription = "Пуск/Пауза",
-                            tint = Color.Black
-                        )
-                    }
-                    IconButton(
-                        onClick = onNext,
-                        enabled = ym.canNext && !isLoading,
-                        modifier = Modifier.size(36.dp)
-                    ) {
-                        Icon(
-                            Icons.Rounded.SkipNext,
-                            contentDescription = "Вперёд",
-                            tint = if (ym.canNext && !isLoading) Color.White else Color.White.copy(alpha = 0.25f)
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth(progressFrac.coerceIn(0f, 1f))
+                                .fillMaxHeight()
+                                .background(palette.accent)
                         )
                     }
                 }
@@ -294,17 +324,17 @@ private fun QuickTile(
             .background(OledCard)
             .border(1.dp, Color.White.copy(alpha = 0.06f), RoundedCornerShape(20.dp))
             .clickable { onClick() }
-            .padding(14.dp),
-        verticalArrangement = Arrangement.spacedBy(6.dp)
+            .padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp)
     ) {
         Box(
             modifier = Modifier
-                .size(34.dp)
+                .size(32.dp)
                 .clip(RoundedCornerShape(10.dp))
                 .background(OledCardHigh),
             contentAlignment = Alignment.Center
         ) {
-            Icon(icon, contentDescription = null, tint = accent, modifier = Modifier.size(19.dp))
+            Icon(icon, contentDescription = null, tint = accent, modifier = Modifier.size(18.dp))
         }
         Text(title, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
         Text(subtitle, color = Color(0xFFA0A0B0), fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)

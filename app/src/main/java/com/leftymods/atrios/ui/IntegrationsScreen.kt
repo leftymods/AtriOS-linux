@@ -123,8 +123,9 @@ fun IntegrationsScreen(
                     Icon(Icons.Rounded.VerifiedUser, contentDescription = null, tint = palette.accent)
                 }
                 Column(modifier = Modifier.weight(1f)) {
+                    val idLabel = if (accountState.username.contains("@")) accountState.username else "@${accountState.username}"
                     Text(
-                        text = if (accountState.loggedIn) "AtriOS ID · @${accountState.username}" else "Аккаунт AtriOS",
+                        text = if (accountState.loggedIn) "AtriOS ID · $idLabel" else "Аккаунт AtriOS",
                         color = Color.White,
                         fontSize = 16.sp,
                         fontWeight = FontWeight.SemiBold

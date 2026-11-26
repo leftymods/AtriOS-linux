@@ -256,7 +256,7 @@ fun AtriOSApp(
         if (kotlin.math.abs(srv - liveElapsedMs) >= 2000L) liveElapsedMs = srv
     }
     LaunchedEffect(status.ymusic.trackId, status.ymusic.state, selectedTab) {
-        if (selectedTab != AppTab.HOME) {
+        if (selectedTab == AppTab.HOME) {
             while (status.ymusic.state == "playing") {
                 delay(500)
                 val dur = status.ymusic.durationMs
@@ -974,6 +974,9 @@ fun AtriOSApp(
 
                     when (currentTab) {
                         AppTab.HOME -> {
+                            val homeProgress = if (status.ymusic.durationMs > 0L) {
+                                (liveElapsedMs.toFloat() / status.ymusic.durationMs.toFloat()).coerceIn(0f, 1f)
+                            } else 0f
                             AtriHomeScreen(
                                 status = status,
                                 speakerName = currentSpeakerName,
@@ -981,6 +984,7 @@ fun AtriOSApp(
                                 accountState = accountState,
                                 palette = palette,
                                 volumePct = sliderVol.roundToInt().coerceIn(0, 100),
+                                progressFrac = homeProgress,
                                 onBlobTap = {
                                     if (status.ymusic.state == "playing") {
                                         dispatchYMusicControl("pause")
