@@ -43,7 +43,12 @@ interface KeyValueBacking {
 }
 
 class SharedPrefsBacking(private val prefs: SharedPreferences) : KeyValueBacking {
-    override fun getString(key: String): String? = prefs.getString(key, null)
+    override fun getString(key: String): String? = try {
+        prefs.getString(key, null)
+    } catch (_: ClassCastException) {
+        // Legacy keys (e.g. v2.6 Int vault_version) may be stored as non-String primitives
+        prefs.all[key]?.toString()
+    }
     override fun putString(key: String, value: String): Boolean =
         prefs.edit().putString(key, value).commit()
     override fun remove(key: String): Boolean =

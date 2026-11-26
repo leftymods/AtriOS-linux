@@ -347,4 +347,38 @@ class KeystoreSecretStoreTest {
         assertTrue(E2eeCrypto.verifyEcdsaP256(spkiB64, transcript, sigB64))
         assertFalse(E2eeCrypto.verifyEcdsaP256(spkiB64, "tampered".toByteArray(Charsets.UTF_8), sigB64))
     }
+
+    @Test
+    fun legacyTypedIntVaultVersionConvertsSafelyOnUpgrade() {
+        val rawMap = linkedMapOf<String, Any?>(
+            AtriAccountClient.KEY_USERNAME to "alice",
+            AtriAccountClient.KEY_VAULT_VERSION to 7, // v2.6 stored vault_version as Int
+            AtriAccountClient.KEY_SESSION_TOKEN to "sess_v26_upgrade",
+            AtriAccountClient.KEY_VAULT_KEY_B64 to Base64.getEncoder().encodeToString(ByteArray(32) { 5 }),
+            AtriAccountClient.KEY_VAULT_CACHE to AtriVaultData(yandexMusicToken = "ym_v26").toJson()
+        )
+        val legacyTypedBacking = object : KeyValueBacking {
+            override fun getString(key: String): String? = rawMap[key]?.toString()
+            override fun putString(key: String, value: String): Boolean {
+                rawMap[key] = value
+                return true
+            }
+            override fun remove(key: String): Boolean {
+                rawMap.remove(key)
+                return true
+            }
+            override fun clear(): Boolean {
+                rawMap.clear()
+                return true
+            }
+            override fun allKeys(): Set<String> = rawMap.keys.toSet()
+        }
+        val encBacking = InMemoryKeyValueBacking()
+        val client = AtriAccountClient(legacyTypedBacking, KeystoreSecretStore(encBacking, SoftwareAesGcmBackend()))
+        val state = client.loadCachedState()
+        assertTrue(state.loggedIn)
+        assertEquals("alice", state.username)
+        assertEquals(7, state.vaultVersion)
+        assertEquals("ym_v26", state.vault.yandexMusicToken)
+    }
 }
