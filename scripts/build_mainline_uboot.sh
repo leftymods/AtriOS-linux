@@ -52,34 +52,79 @@ case "$OUTPUT_DIR" in "$PROJECT_ROOT"/*) ;; *) exit_with_error "UPGRADE_DIR esca
 [ "$(realpath -m "$BOOTLOADER_BIN")" = "$OUTPUT_DIR/u-boot.bin.sd.bin" ] || \
     exit_with_error "BOOTLOADER_BIN must reference the selected UPGRADE_DIR/u-boot.bin.sd.bin"
 
-UBOOT_SRC="${UBOOT_SRC:-$PROJECT_ROOT/cache/uboot}"
-FIP_TOOL_DIR="${FIP_TOOL_DIR:-$PROJECT_ROOT/cache/fip}"
+# A branch/tag name is not a source pin. Existing local trees are verified,
+# never reset or cleaned; each new pin gets its own cache by default.
+for pin in UBOOT_GIT_COMMIT FIP_GIT_COMMIT; do
+    [[ "${!pin:-}" =~ ^[0-9a-f]{40}$ ]] || exit_with_error "Boot recipe requires immutable $pin (40 lowercase hex characters)"
+done
+: "${UBOOT_GIT_URL:?Boot recipe requires UBOOT_GIT_URL}"
+: "${FIP_GIT_URL:?Boot recipe requires FIP_GIT_URL}"
+
+select_source_cache() {
+    local explicit="$1" legacy="$2" kind="$3" commit="$4"
+    if [ -n "$explicit" ]; then
+        printf '%s\n' "$explicit"
+    elif [ -d "$legacy" ] && [ "$(git -C "$legacy" rev-parse HEAD 2>/dev/null)" = "$commit" ]; then
+        # Reuse a previously validated tree without moving users' local files.
+        printf '%s\n' "$legacy"
+    else
+        printf '%s/cache/sources/%s-%s\n' "$PROJECT_ROOT" "$kind" "$commit"
+    fi
+}
+
+verify_source_pin() {
+    local directory="$1" commit="$2" label="$3" actual top
+    [ -d "$directory" ] || exit_with_error "$label source directory is unavailable"
+    top=$(git -C "$directory" rev-parse --show-toplevel 2>/dev/null) || \
+        exit_with_error "$label source is not a Git worktree; existing files were preserved"
+    [ "$(realpath -e "$top")" = "$(realpath -e "$directory")" ] || \
+        exit_with_error "$label source must be the Git worktree root"
+    actual=$(git -C "$directory" rev-parse --verify HEAD) || exit_with_error "$label source has no valid HEAD"
+    [ "$actual" = "$commit" ] || \
+        exit_with_error "$label source pin mismatch: expected $commit, found $actual; existing files were preserved"
+}
+
+prepare_git_source() {
+    local directory="$1" url="$2" commit="$3" label="$4" parent temporary
+    if [ -e "$directory" ] || [ -L "$directory" ]; then
+        verify_source_pin "$directory" "$commit" "$label"
+        return
+    fi
+    parent=$(dirname "$directory")
+    mkdir -p "$parent"
+    temporary=$(mktemp -d "$parent/.atrios-git-fetch.XXXXXXXX")
+    if ! (
+        git -C "$temporary" init -q &&
+        git -C "$temporary" remote add origin "$url" &&
+        git -C "$temporary" fetch --depth=1 origin "$commit" &&
+        git -C "$temporary" -c advice.detachedHead=false checkout --detach FETCH_HEAD &&
+        verify_source_pin "$temporary" "$commit" "$label"
+    ); then
+        rm -rf -- "$temporary"
+        exit_with_error "Failed to fetch the pinned $label source"
+    fi
+    # Do not replace a tree created by another builder while fetch was running.
+    if ! mv -T --no-clobber "$temporary" "$directory" || [ -e "$temporary" ]; then
+        rm -rf -- "$temporary"
+        exit_with_error "$label source path appeared concurrently; existing files were preserved"
+    fi
+    verify_source_pin "$directory" "$commit" "$label"
+}
+
+UBOOT_SRC=$(select_source_cache "${UBOOT_SRC:-}" "$PROJECT_ROOT/cache/uboot" uboot "$UBOOT_GIT_COMMIT")
+FIP_TOOL_DIR=$(select_source_cache "${FIP_TOOL_DIR:-}" "$PROJECT_ROOT/cache/fip" fip "$FIP_GIT_COMMIT")
 CROSS_COMPILE="${CROSS_COMPILE:-aarch64-linux-gnu-}"
 export ARCH="${UBOOT_ARCH:-arm}" CROSS_COMPILE
 
 echo "Building U-Boot for $BOARD using $BOOTLOADER_PROFILE / FIP $FIP_PROFILE"
-if [ ! -d "$UBOOT_SRC" ]; then
-    if [ -e "$UBOOT_SRC" ] || [ -L "$UBOOT_SRC" ]; then
-        exit_with_error "Refusing to replace existing UBOOT_SRC path"
-    fi
-    mkdir -p "$(dirname "$UBOOT_SRC")"
-    if [ -d "$PROJECT_ROOT/u-boot-mainline" ]; then
-        ln -s "$PROJECT_ROOT/u-boot-mainline" "$UBOOT_SRC"
-    else
-        git clone --depth 1 -b "${UBOOT_GIT_REF:-master}" \
-            "${UBOOT_GIT_URL:-https://github.com/leftymods/u-boot.git}" "$UBOOT_SRC"
-    fi
-fi
+prepare_git_source "$UBOOT_SRC" "$UBOOT_GIT_URL" "$UBOOT_GIT_COMMIT" U-Boot
+prepare_git_source "$FIP_TOOL_DIR" "$FIP_GIT_URL" "$FIP_GIT_COMMIT" FIP
 [ -f "$UBOOT_SRC/Makefile" ] || exit_with_error "Invalid UBOOT_SRC tree"
-if [ ! -d "$FIP_TOOL_DIR/$FIP_PROFILE" ]; then
-    if [ -e "$FIP_TOOL_DIR" ] || [ -L "$FIP_TOOL_DIR" ]; then
-        exit_with_error "FIP tree does not contain selected profile: $FIP_PROFILE"
-    fi
-    mkdir -p "$(dirname "$FIP_TOOL_DIR")"
-    git clone --depth 1 https://github.com/LibreELEC/amlogic-boot-fip.git "$FIP_TOOL_DIR"
-fi
 [ -d "$FIP_TOOL_DIR/$FIP_PROFILE" ] && [ -f "$FIP_TOOL_DIR/build-fip.sh" ] || \
     exit_with_error "Invalid FIP tool/profile tree"
+SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(git -C "$UBOOT_SRC" show -s --format=%ct HEAD)}"
+[[ "$SOURCE_DATE_EPOCH" =~ ^[0-9]+$ ]] || exit_with_error "Invalid SOURCE_DATE_EPOCH"
+export SOURCE_DATE_EPOCH
 
 stage_source() {
     local destination base
@@ -121,4 +166,63 @@ for artifact in u-boot.bin u-boot.bin.sd.bin u-boot.bin.usb.bl2 u-boot.bin.usb.t
     [ -s "$OUTPUT_DIR/$artifact" ] || exit_with_error "FIP did not generate $artifact for $BOARD"
 done
 cp "$OUTPUT_DIR/u-boot.bin" "$OUTPUT_DIR/bootloader.img"
-echo "SUCCESS: $BOARD bootloader assets in $OUTPUT_DIR"
+
+# Record the actual validated bases and local staging delta. A locally modified
+# tree remains intact and is visibly different from a clean pinned checkout.
+python3 - "$UBOOT_SRC" "$FIP_TOOL_DIR" "$OUTPUT_DIR/bootloader-sources.json" \
+    "$BOARD" "$BOOTLOADER_PROFILE" "$UBOOT_CONFIG_SOURCE" "$UBOOT_DTS_SOURCE" "$SOURCE_DATE_EPOCH" <<'PYPROVENANCE'
+import hashlib
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+
+uboot, fip, output, board, profile, config, dts, epoch = sys.argv[1:]
+
+def git(tree, *args):
+    return subprocess.check_output(['git', '-C', tree, *args])
+
+def sources(tree):
+    untracked = {}
+    for name in git(tree, 'ls-files', '--others', '--exclude-standard', '-z').split(b'\0'):
+        if not name:
+            continue
+        relative = os.fsdecode(name)
+        path = Path(tree) / relative
+        if path.is_symlink():
+            untracked[relative] = {'symlink': os.readlink(path)}
+        elif path.is_file():
+            digest = hashlib.sha256()
+            with path.open('rb') as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+                    digest.update(chunk)
+            untracked[relative] = {'sha256': digest.hexdigest()}
+    return {'commit': git(tree, 'rev-parse', 'HEAD').decode().strip(),
+            'tree': git(tree, 'rev-parse', 'HEAD^{tree}').decode().strip(),
+            'tracked_diff_sha256': hashlib.sha256(git(tree, 'diff', '--binary', 'HEAD')).hexdigest(),
+            'dirty': bool(git(tree, 'status', '--porcelain', '--untracked-files=normal')),
+            'untracked': untracked}
+
+value = {'schema': 1, 'board': board, 'profile': profile,
+         'source_date_epoch': int(epoch), 'uboot': sources(uboot), 'fip': sources(fip),
+         'config_sha256': hashlib.sha256(Path(config).read_bytes()).hexdigest(),
+         'dts_sha256': hashlib.sha256(Path(dts).read_bytes()).hexdigest(),
+         'resolved_config_sha256': hashlib.sha256((Path(uboot) / '.config').read_bytes()).hexdigest(),
+         'artifacts': {name: hashlib.sha256((Path(output).parent / name).read_bytes()).hexdigest()
+                       for name in ('u-boot.bin', 'u-boot.bin.sd.bin', 'u-boot.bin.usb.bl2', 'u-boot.bin.usb.tpl', 'bootloader.img')}}
+target = Path(output)
+fd, temporary = tempfile.mkstemp(prefix='.bootloader-sources-', dir=target.parent)
+try:
+    with os.fdopen(fd, 'w') as stream:
+        json.dump(value, stream, sort_keys=True, indent=2)
+        stream.write('\n')
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temporary, target)
+finally:
+    if os.path.exists(temporary):
+        os.unlink(temporary)
+PYPROVENANCE
+echo "SUCCESS: $BOARD bootloader assets and source provenance in $OUTPUT_DIR"

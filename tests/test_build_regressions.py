@@ -78,7 +78,11 @@ def generated_packages(tmp_path):
     project = tmp_path / 'project'
     (project / 'lib').mkdir(parents=True)
     shutil.copy(ROOT / 'lib/package-boot.sh', project / 'lib/package-boot.sh')
-    (project / 'cache/kernel').mkdir(parents=True)
+    profile = project / 'cache/kernel-profiles/unit-test/selected'
+    (profile / 'arch/arm64/boot/dts/amlogic').mkdir(parents=True)
+    (profile / 'Makefile').write_text('# mocked kernel build interface\n')
+    (profile / 'arch/arm64/boot/Image').write_bytes(b'kernel payload')
+    (profile / 'arch/arm64/boot/dts/amlogic/meson-sm1-yandex-station-max.dtb').write_bytes(b'dtb payload')
     (project / 'Image').write_bytes(b'kernel payload')
     (project / 'board.dtb').write_bytes(b'dtb payload')
     (project / 'u-boot.bin').write_bytes(b'u' * 4096)
@@ -102,7 +106,13 @@ for name in ['kernel/net/wifi.ko','kernel/drivers/atrios/screen.ko','modules.ord
            'DTB_IMAGE': str(project / 'board.dtb'), 'BOOTLOADER_BIN': str(project / 'u-boot.bin'),
            'PATH': str(binaries) + os.pathsep + os.environ['PATH'],
            'DEPMOD_LOG': str(tmp_path / 'depmod.log')}
-    result = shell(library('packages.sh') + 'build_u_boot_package; build_kernel_package', env=env)
+    result = shell(library('packages.sh') + """
+resolve_kernel_build_profile() {
+ KERNEL_BUILD_DIR="$PROJECT_ROOT/cache/kernel-profiles/unit-test/selected"
+ KERNEL_BUILD_ARCH=arm64 KERNEL_BUILD_IMAGE_TARGET=Image KERNEL_BUILD_DTS_SUBDIR=amlogic
+}
+build_u_boot_package; build_kernel_package
+""", env=env)
     assert result.returncode == 0, result.stdout + result.stderr
     return project, tmp_path / 'depmod.log'
 
@@ -663,14 +673,25 @@ def test_board_profile_cannot_emit_artifacts_for_a_different_id(tmp_path):
     assert 'Board profile identity mismatch' in result.stdout
 
 
-@pytest.mark.parametrize('override,expected', [('', '1.1.2'), ('2.7.4', '2.7.4')])
-def test_release_version_default_and_explicit_override_reach_child_process(override, expected):
+@pytest.mark.parametrize('configured,override', [(None, ''), ('1.2.3', ''), ('1.2.3', '2.7.4')])
+def test_release_version_default_and_explicit_override_reach_child_process(tmp_path, configured, override):
+    # A release workflow replaces this configuration with its tag before tests.
+    # Exercise another real config value rather than pinning tests to today's tag.
+    project = tmp_path / 'project'
+    shutil.copytree(ROOT / 'config', project / 'config')
+    if configured is not None:
+        system = project / 'config/system.conf'
+        lines = system.read_text().splitlines()
+        system.write_text('\n'.join('RELEASE_VERSION="' + configured + '"' if line.startswith('RELEASE_VERSION=') else line for line in lines) + '\n')
+    expected_config = subprocess.check_output(['bash', '-c', 'source "$1"; printf "%s" "$RELEASE_VERSION"',
+        'version-config', str(project / 'config/system.conf')], text=True)
+    expected = override or expected_config
     command = library('config.sh') + '''
 load_board_config yndxsttion53
 printf 'PARENT_VERSION=%s\\n' "$RELEASE_VERSION"
 /bin/sh -c 'printf "CHILD_VERSION=%s\\n" "$RELEASE_VERSION"'
 '''
-    result = shell(command, env={'PROJECT_ROOT': str(ROOT), 'BOARD': 'yndxsttion53',
+    result = shell(command, env={'PROJECT_ROOT': str(project), 'BOARD': 'yndxsttion53',
                                 'RELEASE_VERSION': override})
     assert result.returncode == 0, result.stderr
     assert 'PARENT_VERSION=' + expected in result.stdout

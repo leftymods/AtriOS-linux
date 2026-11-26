@@ -45,18 +45,18 @@ jobs:
           set -euo pipefail
           source lib/release-board.sh
           release_board_config "$BOARD"
-          printf 'ROOTFS_OVERLAY_PATH=%s\nDTB_IMAGE=%s\nIMAGE_FILENAME=%s\n' \
-            "$ROOTFS_OVERLAY_PATH" "$DTB_IMAGE" "$IMAGE_FILENAME" >> "$GITHUB_ENV"
+          printf 'ROOTFS_OVERLAY_PATH=%s\nDTB_IMAGE=%s\nIMAGE_FILENAME=%s\nOTA_RUNTIME_MANIFEST_PATH=%s\n' \
+            "$ROOTFS_OVERLAY_PATH" "$DTB_IMAGE" "$IMAGE_FILENAME" "$OTA_RUNTIME_MANIFEST_PATH" >> "$GITHUB_ENV"
       - name: Install mainline build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
             bc bison flex libssl-dev libelf-dev libncurses-dev libgnutls28-dev uuid-dev device-tree-compiler \
-            python3 python3-pytest python3-yaml python3-pyelftools python3-setuptools \
+            python3 python3-pytest python3-yaml python3-aiohttp python3-pyelftools python3-setuptools \
             swig openssl ca-certificates git make patch rsync file xz-utils \
             debootstrap debian-archive-keyring qemu-user-static binfmt-support \
-            dosfstools mtools fdisk u-boot-tools kmod dpkg-dev
+            dosfstools mtools fdisk u-boot-tools kmod dpkg-dev ncurses-bin
           sudo update-binfmts --enable qemu-aarch64
       - name: Provision OTA signing key and image trust anchor
         env:
@@ -74,31 +74,25 @@ jobs:
           printf '%s\n' "${RELEASE_TAG#v}" > "$ROOTFS_OVERLAY_PATH/etc/atrios-version"
           sed -i "s/^RELEASE_VERSION=.*/RELEASE_VERSION=\"${RELEASE_TAG#v}\"/" config/system.conf
       - name: Run local build and release regressions
-        run: python3 -m pytest -q tests/test_build_regressions.py tests/test_release_bundle.py
+        run: bash .github/scripts/run-firmware-tests.sh
       - name: Build complete mainline image and current modules
         run: bash ./compile.sh "BOARD=$BOARD" TARGET=image
       - name: Create signed OTA bundle
         run: |
           set -euo pipefail
-          KERNEL_RELEASE="$(cat cache/kernel/include/config/kernel.release)"
+          source lib/release-board.sh
+          release_board_config "$BOARD"
+          source lib/compilation-kernel.sh
+          resolve_kernel_build_profile
+          KERNEL_RELEASE="$(cat "$KERNEL_BUILD_DIR/include/config/kernel.release")"
           export OTA_OVERLAY="$RUNNER_TEMP/ota-overlay"
-          python3 - <<'PY'
-          import os
-          from pathlib import Path
-          import shutil
-          source = Path('output/rootfs_debian_staging')
-          target = Path(os.environ['OTA_OVERLAY'])
-          target.mkdir()
-          # Use the built staging tree after command modes have been normalized.
-          # Select runtime code/config, not Debian libraries or rootfs symlinks.
-          for name in ['usr/lib/atrios', 'usr/bin/atrios', 'etc/atrios', 'etc/init.d']:
-              src, dst = source / name, target / name
-              dst.parent.mkdir(parents=True, exist_ok=True)
-              if src.is_dir():
-                  shutil.copytree(src, dst, symlinks=True)
-              else:
-                  shutil.copy2(src, dst, follow_symlinks=False)
-          PY
+          manifest_args=()
+          if [ -n "$OTA_RUNTIME_MANIFEST_PATH" ]; then
+            manifest_args+=(--runtime-manifest "$OTA_RUNTIME_MANIFEST_PATH")
+          fi
+          python3 tools/stage_ota_runtime.py \
+            --source output/rootfs_debian_staging --destination "$OTA_OVERLAY" \
+            --board "$BOARD" --version "${RELEASE_TAG#v}" "${manifest_args[@]}"
           python3 tools/create_ota_bundle.py \
             --board "$BOARD" --version "${RELEASE_TAG#v}" \
             --kernel-release "$KERNEL_RELEASE" \

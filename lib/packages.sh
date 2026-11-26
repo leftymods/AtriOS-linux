@@ -2,7 +2,9 @@
 # Build packages from the same kernel/U-Boot artifacts used by the image.
 
 kernel_release() {
-    make -s -C "$PROJECT_ROOT/cache/kernel" ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" kernelrelease
+    resolve_kernel_build_profile
+    [ -f "$KERNEL_BUILD_DIR/Makefile" ] || exit_with_error "Build the selected kernel profile before packaging"
+    make -s -C "$KERNEL_BUILD_DIR" ARCH="$KERNEL_BUILD_ARCH" CROSS_COMPILE="$CROSS_COMPILE" kernelrelease
 }
 
 package_postinst_header() {
@@ -50,18 +52,21 @@ PST
 
 build_kernel_package() {
     local krel pkg_version pkg_name="atrios-linux-image-${BOARD}" pkg_arch="$ARCH"
+    resolve_kernel_build_profile
     krel=$(kernel_release)
     [[ "$krel" =~ ^[0-9][a-zA-Z0-9.+~-]*$ ]] || exit_with_error "Invalid kernel release: $krel"
     pkg_version="${krel}-1"
     local pkg_dir="$PROJECT_ROOT/output/packages/${pkg_name}_${pkg_version}_${pkg_arch}"
     KERNEL_DEB="${pkg_dir}.deb"
-    [ -s "$KERNEL_IMAGE" ] || exit_with_error "Kernel Image not found: $KERNEL_IMAGE"
-    [ -s "$DTB_IMAGE" ] || exit_with_error "DTB not found: $DTB_IMAGE"
+    local profile_image="$KERNEL_BUILD_DIR/arch/$KERNEL_BUILD_ARCH/boot/$KERNEL_BUILD_IMAGE_TARGET"
+    local profile_dtb="$KERNEL_BUILD_DIR/arch/$KERNEL_BUILD_ARCH/boot/dts/${KERNEL_BUILD_DTS_SUBDIR:+$KERNEL_BUILD_DTS_SUBDIR/}${DTS_NAME}.dtb"
+    [ -s "$profile_image" ] || exit_with_error "Kernel Image not found for selected profile: $profile_image"
+    [ -s "$profile_dtb" ] || exit_with_error "DTB not found for selected profile: $profile_dtb"
     rm -rf "$pkg_dir"
     mkdir -p "$pkg_dir/DEBIAN" "$pkg_dir/usr/lib/atrios-kernel/$krel"
-    cp "$KERNEL_IMAGE" "$pkg_dir/usr/lib/atrios-kernel/$krel/Image"
-    cp "$DTB_IMAGE" "$pkg_dir/usr/lib/atrios-kernel/$krel/$DTS_NAME.dtb"
-    make -C "$PROJECT_ROOT/cache/kernel" ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" \
+    cp "$profile_image" "$pkg_dir/usr/lib/atrios-kernel/$krel/Image"
+    cp "$profile_dtb" "$pkg_dir/usr/lib/atrios-kernel/$krel/$DTS_NAME.dtb"
+    make -C "$KERNEL_BUILD_DIR" ARCH="$KERNEL_BUILD_ARCH" CROSS_COMPILE="$CROSS_COMPILE" \
         INSTALL_MOD_PATH="$pkg_dir/usr" DEPMOD=true modules_install
     local mod_dir="$pkg_dir/usr/lib/modules/$krel"
     [ -d "$mod_dir" ] || exit_with_error "modules_install did not install $krel"

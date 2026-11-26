@@ -19,17 +19,9 @@ jobs:
       - name: Install test dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y python3-pytest python3-yaml python3-aiohttp openssl gcc patch kmod dpkg-dev dosfstools mtools fdisk u-boot-tools
+          sudo apt-get install -y python3-pytest python3-yaml python3-aiohttp openssl gcc patch rsync ncurses-bin kmod dpkg-dev dosfstools mtools fdisk u-boot-tools
       - name: Check build, drivers, HTTPS, updates and C protocol regressions
         env:
           PYTHONDONTWRITEBYTECODE: "1"
         run: |
-          python3 -B -m pytest -p no:cacheprovider -q \
-            tests/test_build_regressions.py tests/test_driver_regressions.py \
-            tests/test_runtime_regressions.py tests/test_https_transport_integration.py \
-            tests/test_ota_regressions.py tests/test_release_bundle.py \
-            tests/test_voice_https_server.py \
-            tests/tier2_boundaries/test_aml_c_regression.py \
-            tests/tier1_features/test_r1_aml_burn_protocol.py \
-            tests/tier2_boundaries/test_r1_aml_burn_boundaries.py \
-            tests/tier4_scenarios/test_e2e_aml_burn_simulation.py
+          bash .github/scripts/run-firmware-tests.sh

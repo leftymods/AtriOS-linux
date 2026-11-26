@@ -157,7 +157,7 @@ fn write_status(state: &str, last_asr: &str, last_answer: &str, error: &str) {
     let _ = atomic_write_bytes(
         Path::new(STATUS_FILE),
         j.to_string_compact().as_bytes(),
-        0o644,
+        0o600,
         false,
     );
 }
@@ -2146,6 +2146,7 @@ fn send_phrase_to_server(
     pcm: &[u8],
     wake_word: &str,
     force_active: bool,
+    streamed_command: Option<(String, bool)>,
 ) -> Result<(String, String, bool), String> {
     if pcm.len() > SR * 2 * 30 || pcm.len() % 2 != 0 {
         return Err("Invalid or oversized PCM16 phrase".into());
@@ -2162,11 +2163,29 @@ fn send_phrase_to_server(
 
     let res: Result<(String, String, bool), String> = (|| {
         let mut had_unk = false;
-        let text = if use_local_stt {
+        let mut text = if use_local_stt {
             let t0 = Instant::now();
-            let (t, unk) = crate::local_stt::transcribe_command_pcm16(pcm)?;
+            let (t, unk) = if force_active || wake_word.is_empty() {
+                match crate::local_stt::transcribe_pcm16(pcm) {
+                    Ok(full) if !full.is_empty() => {
+                        let unk = full.split_whitespace().any(|w| w == "[unk]");
+                        println!("[local-stt] full ({}ms) text={full:?}", t0.elapsed().as_millis());
+                        (full, unk)
+                    }
+                    _ => match streamed_command {
+                        Some(result) => result,
+                        None => crate::local_stt::transcribe_command_pcm16(pcm)?,
+                    },
+                }
+            } else if let Some(result) = streamed_command {
+                result
+            } else {
+                crate::local_stt::transcribe_command_pcm16(pcm)?
+            };
             had_unk = unk;
-            println!("[local-stt] fast ({}ms, unk={unk}) text={t:?}", t0.elapsed().as_millis());
+            if !(force_active || wake_word.is_empty()) {
+                println!("[local-stt] fast/streamed ({}ms, unk={unk}) text={t:?}", t0.elapsed().as_millis());
+            }
             t
         } else {
             let wav = prepare_asr_wav(pcm);
@@ -2250,6 +2269,8 @@ fn send_phrase_to_server(
                         verified_wake_only = false;
                     }
                 }
+                had_unk = full_text.split_whitespace().any(|w| w == "[unk]");
+                text = full_text;
             }
         }
         user_addressed = true;
@@ -2593,23 +2614,57 @@ impl VadProcessor {
         self.noise_rms = (self.noise_rms * 0.70 + mean_rms * 0.30).clamp(60.0, 1800.0);
     }
 
-    fn thresholds(&self, mode: PipelineMode, vad_thr: f64, silence_cfg: f64) -> (f64, f64, f64, f64) {
+    fn thresholds(
+        &self,
+        mode: PipelineMode,
+        vad_thr: f64,
+        silence_cfg: f64,
+        music_on: bool,
+    ) -> (f64, f64, f64, f64) {
         match mode {
             PipelineMode::WakeSpotter => {
-                let start = (self.noise_rms * 2.35 + 130.0).clamp(vad_thr, 2600.0);
-                let keep = (self.noise_rms * 1.55 + 75.0).clamp(vad_thr * 0.68, start * 0.80);
+                let (start_gain, start_offset, start_floor, start_ceiling) = if music_on {
+                    // The AEC residual still contains music. Use a lower, bounded
+                    // onset threshold and let wake-word recognition reject lyrics.
+                    (1.35, 80.0, vad_thr * 0.65, 1700.0)
+                } else {
+                    (1.80, 70.0, vad_thr * 0.55, 2300.0)
+                };
+                let keep_gain = if music_on { 0.95 } else { 1.25 };
+                let keep_offset = if music_on { 40.0 } else { 60.0 };
+                let keep_floor = vad_thr * 0.45;
+                let start = (self.noise_rms * start_gain + start_offset)
+                    .clamp(start_floor, start_ceiling);
+                let keep = (self.noise_rms * keep_gain + keep_offset)
+                    .clamp(keep_floor, start * 0.80);
                 (start, keep, 3200.0, 420.0)
             }
             PipelineMode::ActiveCommand => {
-                let start = (self.noise_rms * 1.75 + 85.0).clamp(vad_thr * 0.72, 2200.0);
-                let keep = (self.noise_rms * 1.30 + 50.0).clamp(vad_thr * 0.55, start * 0.78);
+                let (start_gain, start_offset, start_floor, start_ceiling) = if music_on {
+                    (1.20, 55.0, vad_thr * 0.55, 1500.0)
+                } else {
+                    (1.15, 35.0, vad_thr * 0.45, 1800.0)
+                };
+                let keep_gain = if music_on { 0.90 } else { 0.85 };
+                let keep_offset = if music_on { 30.0 } else { 25.0 };
+                let keep_floor = vad_thr * 0.35;
+                let start = (self.noise_rms * start_gain + start_offset)
+                    .clamp(start_floor, start_ceiling);
+                let keep = (self.noise_rms * keep_gain + keep_offset)
+                    .clamp(keep_floor, start * 0.78);
                 (start, keep, 8000.0, silence_cfg)
             }
         }
     }
 }
 
-fn is_valid_speech(frame_rms: &[f64], noise_rms: f64, start_thr: f64, music_on: bool) -> bool {
+fn is_valid_speech(
+    frame_rms: &[f64],
+    noise_rms: f64,
+    start_thr: f64,
+    music_on: bool,
+    mode: PipelineMode,
+) -> bool {
     if frame_rms.is_empty() {
         return false;
     }
@@ -2623,10 +2678,29 @@ fn is_valid_speech(frame_rms: &[f64], noise_rms: f64, start_thr: f64, music_on: 
             max_r = r;
         }
     }
-    if music_on {
-        max_r >= start_thr * 1.03 && max_r >= noise_rms * 1.65 + 80.0 && max_r >= min_r * 1.22
-    } else {
-        max_r >= start_thr * 1.08 && max_r >= noise_rms * 2.1 + 100.0 && max_r >= min_r * 1.45
+    match (mode, music_on) {
+        (PipelineMode::ActiveCommand, true) => {
+            max_r >= start_thr * 0.90
+                && max_r >= noise_rms * 1.00 + 35.0
+                && max_r >= min_r * 1.08
+        }
+        (PipelineMode::ActiveCommand, false) => {
+            max_r >= start_thr * 1.02
+                && max_r >= noise_rms * 1.25 + 35.0
+                && max_r >= min_r * 1.12
+        }
+        (PipelineMode::WakeSpotter, true) => {
+            // Playback raises the broadband floor; look for a distinct near-field
+            // rise instead of demanding a large absolute jump over that floor.
+            max_r >= start_thr * 0.95
+                && max_r >= noise_rms * 1.15 + 60.0
+                && max_r >= min_r * 1.15
+        }
+        (PipelineMode::WakeSpotter, false) => {
+            max_r >= start_thr * 1.04
+                && max_r >= noise_rms * 1.60 + 50.0
+                && max_r >= min_r * 1.25
+        }
     }
 }
 
@@ -2733,6 +2807,11 @@ fn run_daemon() -> i32 {
         };
         let ww_cfg = cfg.wake_word.trim().to_string();
         let wake_required = !ww_cfg.is_empty() && !matches!(ww_cfg.to_ascii_lowercase().as_str(), "off" | "none" | "false");
+        // Stream the fast constrained Vosk recognizer alongside VAD so the
+        // wake animation can react before the utterance-end/final STT pass.
+        let wake_partial_enabled = wake_required && !force_active && crate::local_stt::is_available();
+        let mut wake_stream_started = false;
+        let mut wake_visual_lit = false;
         let mut wait_speech_ms = 0.0f64;
         let mut silence_ms = 0.0f64;
         let frame_ms = (FRAME_SAMPLES as f64 / SR as f64) * 1000.0;
@@ -2810,9 +2889,8 @@ fn run_daemon() -> i32 {
                 music_on = playback_running();
             }
             frame_idx = frame_idx.wrapping_add(1);
-            let eff_thr = if music_on { vad_thr * 1.05 } else { vad_thr };
             let (start_thr, keep_thr, max_utt_ms, end_silence_ms) =
-                vad.thresholds(mode, eff_thr, cfg.silence_ms);
+                vad.thresholds(mode, vad_thr, cfg.silence_ms, music_on);
             last_start_thr = start_thr;
 
             if !speaking {
@@ -2842,6 +2920,18 @@ fn run_daemon() -> i32 {
                         buf.extend_from_slice(&chunk);
                         utt_rms.push(rms);
                         silence_ms = 0.0;
+                        if wake_partial_enabled {
+                            wake_stream_started = crate::local_stt::reset_command_stream();
+                            if wake_stream_started {
+                              if let Some(partial) = crate::local_stt::command_stream_partial(&buf) {
+                                if matches_wake_word(&partial, &ww_cfg) {
+                                    wake_visual_lit = true;
+                                    set_vad_visual("vad", false, "default");
+                                    println!("[wake] partial activation detected ({partial:?}) -> listening visual");
+                                }
+                              }
+                            }
+                        }
                         if force_active || !wake_required {
                             set_vad_visual("vad", false, "default");
                         }
@@ -2866,10 +2956,19 @@ fn run_daemon() -> i32 {
                 speech_hits = 0;
                 buf.extend_from_slice(&chunk);
                 utt_rms.push(rms);
+                if wake_partial_enabled && wake_stream_started && !wake_visual_lit {
+                    if let Some(partial) = crate::local_stt::command_stream_partial(&chunk) {
+                        if matches_wake_word(&partial, &ww_cfg) {
+                            wake_visual_lit = true;
+                            set_vad_visual("vad", false, "default");
+                            println!("[wake] partial activation detected ({partial:?}) -> listening visual");
+                        }
+                    }
+                }
                 if rms > utt_peak {
                     utt_peak = rms;
                 }
-                let eff_keep_thr = keep_thr.max((utt_peak * 0.22).min(680.0));
+                let eff_keep_thr = keep_thr.max((utt_peak * 0.18).min(680.0));
                 if rms >= eff_keep_thr {
                     silence_ms = 0.0;
                 } else {
@@ -2878,10 +2977,10 @@ fn run_daemon() -> i32 {
                 let utt_ms = (buf.len() as f64) / ((SR * 2) as f64) * 1000.0;
                 let eff_end_silence_ms = match mode {
                     PipelineMode::WakeSpotter => {
-                        if utt_ms <= 1100.0 { 260.0 } else { 320.0 }
+                        if utt_ms <= 1100.0 { 100.0 } else { 145.0 }
                     }
                     PipelineMode::ActiveCommand => {
-                        if utt_ms <= 950.0 { 280.0 } else { end_silence_ms.min(400.0) }
+                        if utt_ms <= 950.0 { 100.0 } else { end_silence_ms.min(200.0).max(140.0) }
                     }
                 };
                 if silence_ms >= eff_end_silence_ms {
@@ -2893,6 +2992,11 @@ fn run_daemon() -> i32 {
                     buf.clear();
                     utt_rms.clear();
                     silence_ms = 0.0;
+                    wake_stream_started = false;
+                    if wake_visual_lit {
+                        wake_visual_lit = false;
+                        set_vad_visual("idle", false, "default");
+                    }
                 } else if utt_ms >= max_utt_ms {
                     hit_max_utt = true;
                     break;
@@ -2907,14 +3011,22 @@ fn run_daemon() -> i32 {
         if speaking && buf.len() >= min_bytes && !is_mic_muted() {
             let peak_rms = utt_rms.iter().copied().fold(0.0f64, f64::max);
             let mean_rms = utt_rms.iter().sum::<f64>() / (utt_rms.len().max(1) as f64);
-            if !is_valid_speech(&utt_rms, vad.noise_rms, last_start_thr, music_on) {
-                vad.adapt_rejected(mean_rms);
+            if !is_valid_speech(&utt_rms, vad.noise_rms, last_start_thr, music_on, mode) {
+                // Rejected playback/lyrics must not become the new VAD floor;
+                // otherwise the threshold keeps climbing while music plays.
+                if !music_on {
+                    vad.adapt_rejected(mean_rms);
+                }
                 if mode == PipelineMode::WakeSpotter && hit_max_utt {
                     vad.wait_quiet_frames = 10;
                 }
                 if force_active {
                     set_vad_visual("idle", false, "default");
                     empty_followups = 0;
+                }
+                if wake_visual_lit {
+                    wake_visual_lit = false;
+                    set_vad_visual("idle", false, "default");
                 }
                 println!(
                     "[vad] rejected flat/noise: peak={peak_rms:.0} mean={mean_rms:.0} noise={:.0} thr={last_start_thr:.0}",
@@ -2928,12 +3040,17 @@ fn run_daemon() -> i32 {
                 vad.noise_rms,
                 mode.as_str()
             );
+            let streamed_command = if wake_stream_started {
+                crate::local_stt::finish_command_stream()
+            } else {
+                None
+            };
             write_status("thinking", "", "", "");
             if force_active || !wake_required {
                 set_vad_visual("thinking", false, "default");
             }
             let ww = if force_active { "" } else { ww_cfg.as_str() };
-            match send_phrase_to_server(&cfg.server, &buf, ww, force_active) {
+            match send_phrase_to_server(&cfg.server, &buf, ww, force_active, streamed_command) {
                 Ok((asr, ans, stay_active)) => {
                     let drain_ms = if stay_active && ans.is_empty() {
                         30
@@ -3096,7 +3213,7 @@ pub fn run(args: &[String]) -> i32 {
                     }
                 }
             }
-            match send_phrase_to_server(&cfg.server, &raw, &cfg.wake_word, false) {
+            match send_phrase_to_server(&cfg.server, &raw, &cfg.wake_word, false, None) {
                 Ok((asr, ans, _)) => {
                     println!(
                         "{}",

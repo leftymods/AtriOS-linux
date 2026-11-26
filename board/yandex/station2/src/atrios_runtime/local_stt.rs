@@ -71,6 +71,7 @@ struct VoskFns {
     vosk_recognizer_new_grm: Option<unsafe extern "C" fn(*mut c_void, c_float, *const c_char) -> *mut c_void>,
     vosk_recognizer_accept_waveform: unsafe extern "C" fn(*mut c_void, *const c_char, c_int) -> c_int,
     vosk_recognizer_final_result: unsafe extern "C" fn(*mut c_void) -> *const c_char,
+    vosk_recognizer_partial_result: Option<unsafe extern "C" fn(*mut c_void) -> *const c_char>,
     vosk_recognizer_reset: unsafe extern "C" fn(*mut c_void),
 }
 
@@ -79,6 +80,7 @@ struct VoskEngine {
     _model: *mut c_void,
     rec: *mut c_void,
     cmd_rec: *mut c_void,
+    cmd_prev_sample: f64,
 }
 
 unsafe impl Send for VoskEngine {}
@@ -151,6 +153,7 @@ fn load_engine() -> Option<Mutex<VoskEngine>> {
                 vosk_recognizer_new_grm: sym_opt(handle, "vosk_recognizer_new_grm"),
                 vosk_recognizer_accept_waveform: sym(handle, "vosk_recognizer_accept_waveform")?,
                 vosk_recognizer_final_result: sym(handle, "vosk_recognizer_final_result")?,
+                vosk_recognizer_partial_result: sym_opt(handle, "vosk_recognizer_partial_result"),
                 vosk_recognizer_reset: sym(handle, "vosk_recognizer_reset")?,
             })
         })() {
@@ -188,6 +191,7 @@ fn load_engine() -> Option<Mutex<VoskEngine>> {
             _model: model,
             rec,
             cmd_rec,
+            cmd_prev_sample: 0.0,
         }))
     }
 }
@@ -198,6 +202,104 @@ pub fn init() -> bool {
 
 pub fn is_available() -> bool {
     ENGINE.get().map(|o| o.is_some()).unwrap_or(false)
+}
+
+/// Reset the constrained recognizer before starting a live wake-word segment.
+pub fn reset_command_stream() -> bool {
+    let Some(Some(mtx)) = ENGINE.get().map(|o| o.as_ref()) else {
+        return false;
+    };
+    let Ok(mut guard) = mtx.lock() else {
+        return false;
+    };
+    if guard.cmd_rec.is_null() || guard.fns.vosk_recognizer_partial_result.is_none() {
+        return false;
+    }
+    unsafe { (guard.fns.vosk_recognizer_reset)(guard.cmd_rec) };
+    guard.cmd_prev_sample = 0.0;
+    true
+}
+
+/// Feed one live PCM chunk and return Vosk's current partial command transcript.
+pub fn command_stream_partial(pcm: &[u8]) -> Option<String> {
+    let Some(Some(mtx)) = ENGINE.get().map(|o| o.as_ref()) else {
+        return None;
+    };
+    let mut guard = mtx.lock().ok()?;
+    if guard.cmd_rec.is_null() {
+        return None;
+    }
+    let partial_result = guard.fns.vosk_recognizer_partial_result?;
+    let samples = pcm.chunks_exact(2)
+        .map(|b| i16::from_le_bytes([b[0], b[1]]) as f64)
+        .collect::<Vec<_>>();
+    if samples.is_empty() {
+        return None;
+    }
+    let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+    let mut conditioned = Vec::with_capacity(samples.len() * 2);
+    let mut peak = 0.0f64;
+    let mut values = Vec::with_capacity(samples.len());
+    for sample in samples {
+        let raw = sample - mean;
+        let emph = raw - 0.90 * guard.cmd_prev_sample;
+        guard.cmd_prev_sample = raw;
+        let value = 0.55 * raw + 0.45 * emph;
+        peak = peak.max(value.abs());
+        values.push(value);
+    }
+    let gain = if (80.0..14000.0).contains(&peak) {
+        (14000.0 / peak).min(8.0)
+    } else {
+        1.0
+    };
+    for value in values {
+        let sample = (value * gain).round().clamp(-32767.0, 32767.0) as i16;
+        conditioned.extend_from_slice(&sample.to_le_bytes());
+    }
+    let accepted = unsafe {
+        (guard.fns.vosk_recognizer_accept_waveform)(
+            guard.cmd_rec,
+            conditioned.as_ptr() as *const c_char,
+            conditioned.len() as c_int,
+        )
+    };
+    if accepted < 0 {
+        return None;
+    }
+    let raw_ptr = unsafe { partial_result(guard.cmd_rec) };
+    if raw_ptr.is_null() {
+        return Some(String::new());
+    }
+    let json = unsafe { CStr::from_ptr(raw_ptr) }.to_string_lossy();
+    Some(Json::parse(&json).ok()?.get_str("partial")?.trim().to_string())
+}
+
+/// Finish the live constrained-recognizer pass and return its final transcript.
+/// This avoids decoding the same wake-word utterance from scratch after VAD ends.
+pub fn finish_command_stream() -> Option<(String, bool)> {
+    let Some(Some(mtx)) = ENGINE.get().map(|o| o.as_ref()) else {
+        return None;
+    };
+    let mut guard = mtx.lock().ok()?;
+    if guard.cmd_rec.is_null() {
+        return None;
+    }
+    let raw_ptr = unsafe { (guard.fns.vosk_recognizer_final_result)(guard.cmd_rec) };
+    let raw = if raw_ptr.is_null() {
+        String::new()
+    } else {
+        let json = unsafe { CStr::from_ptr(raw_ptr) }.to_string_lossy();
+        Json::parse(&json).ok()?.get_str("text")?.trim().to_string()
+    };
+    unsafe { (guard.fns.vosk_recognizer_reset)(guard.cmd_rec) };
+    guard.cmd_prev_sample = 0.0;
+    let mut had_unk = false;
+    let mut clean = Vec::new();
+    for word in raw.split_whitespace() {
+        if word == "[unk]" { had_unk = true; } else { clean.push(word); }
+    }
+    Some((clean.join(" "), had_unk))
 }
 
 fn condition_pcm16_for_vosk(pcm: &[u8]) -> Vec<u8> {
@@ -226,8 +328,8 @@ fn condition_pcm16_for_vosk(pcm: &[u8]) -> Vec<u8> {
         }
         centered.push(v);
     }
-    let gain = if (350.0..14000.0).contains(&peak) {
-        (14000.0 / peak).min(4.0)
+    let gain = if (80.0..14000.0).contains(&peak) {
+        (14000.0 / peak).min(8.0)
     } else {
         1.0
     };

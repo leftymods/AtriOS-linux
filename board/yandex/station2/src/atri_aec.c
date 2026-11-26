@@ -5,7 +5,7 @@
  *   arecord (hw:0,3, 48 kHz, 8ch S32_LE PDM mics)
  *     -> channels 0..6 (7 physical mics), 48 kHz LPF + decimate 48k -> 16k
  *     -> 4th-order 192 Hz Butterworth HPF per mic (kills DC/hum/rumble)
- *     -> VQE MicChooser (RmsAlgo alpha=0.90, micSwitchThreshold=0.20) + coherent blend
+ *     -> per-channel VQE MicChooser; single best-SNR capsule during speech
  *     -> NLMS echo cancellation with double-talk protection
  *     -> 480 ms stationary background noise reducer + smooth speech AGC + soft limiter
  *     -> 16 kHz mono S16_LE on stdout
@@ -26,6 +26,7 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+#include "gtcrn_ns.h"
 
 #define SR        16000
 #define CAP_CH    8
@@ -56,8 +57,12 @@ static float g_e_win[FFT_N];
 static float g_r_win[FFT_N];
 static float g_ola[BLK];
 static float g_srr[FFT_HALF];
-static float g_ser[FFT_HALF];
+static float g_ser_re[FFT_HALF];
+static float g_ser_im[FFT_HALF];
 static float g_see[FFT_HALF];
+static float g_noise_psd[FFT_HALF];
+static float g_nr_bin_gain[FFT_HALF];
+static int g_noise_psd_ready = 0;
 static float g_snr_speech_db = 0.0f;
 static int g_barge_streak = 0;
 static int g_barge_active = 0;
@@ -68,8 +73,11 @@ static void init_stft(void) {
     }
     for (int k = 0; k < FFT_HALF; k++) {
         g_srr[k] = 1e3f;
-        g_ser[k] = 0.0f;
+        g_ser_re[k] = 0.0f;
+        g_ser_im[k] = 0.0f;
         g_see[k] = 1e3f;
+        g_noise_psd[k] = 1e3f;
+        g_nr_bin_gain[k] = 1.0f;
     }
 }
 
@@ -127,19 +135,35 @@ static void stft_kalman_process_block(float *e_blk, const float *r_blk, int ref_
     fft256(ere, eim, 0);
     fft256(rre, rim, 0);
 
+    double block_power = 0.0;
+    for (int i = 0; i < BLK; i++) block_power += (double)e_blk[i] * e_blk[i];
+    float block_rms = sqrtf((float)(block_power / BLK));
+    int speech_active = block_rms > fmaxf(g_noise_env * 1.45f + 15.0f, 55.0f);
+    if (!speech_active && !g_noise_psd_ready) {
+        for (int k = 0; k < FFT_HALF; k++) {
+            g_noise_psd[k] = ere[k] * ere[k] + eim[k] * eim[k];
+        }
+        g_noise_psd_ready = 1;
+    }
+
     /* Bins 5..54 correspond to ~312 Hz .. 3375 Hz (SberDevices speech band 300..3400 Hz) */
     double speech_p = 0.0, resid_p = 0.0;
     for (int k = 0; k < FFT_HALF; k++) {
         float pe = ere[k] * ere[k] + eim[k] * eim[k];
         float pr = rre[k] * rre[k] + rim[k] * rim[k];
-        float xcor = sqrtf(pe * pr);
+        /* Complex cross spectrum E * conj(R); magnitude-only correlation makes
+         * coherence approach 1 even for unrelated signals with similar levels. */
+        float cross_re = ere[k] * rre[k] + eim[k] * rim[k];
+        float cross_im = eim[k] * rre[k] - ere[k] * rim[k];
         g_see[k] = 0.82f * g_see[k] + 0.18f * pe;
         g_srr[k] = 0.82f * g_srr[k] + 0.18f * pr;
-        g_ser[k] = 0.86f * g_ser[k] + 0.14f * xcor;
+        g_ser_re[k] = 0.86f * g_ser_re[k] + 0.14f * cross_re;
+        g_ser_im[k] = 0.86f * g_ser_im[k] + 0.14f * cross_im;
 
         float gain = 1.0f;
         if (ref_active && g_srr[k] > 500.0f) {
-            float coh = (g_ser[k] * g_ser[k]) / (g_see[k] * g_srr[k] + 1.0f);
+            float cross_power = g_ser_re[k] * g_ser_re[k] + g_ser_im[k] * g_ser_im[k];
+            float coh = cross_power / (g_see[k] * g_srr[k] + 1.0f);
             if (coh > 1.0f) coh = 1.0f;
             /* Kalman-Wiener residual echo suppressor: preserves speech, crushes coherent echo */
             float echo_est = coh * g_see[k] * 1.15f;
@@ -149,6 +173,25 @@ static void stft_kalman_process_block(float *e_blk, const float *r_blk, int ref_
             if (gain < 0.14f) gain = 0.14f;
             if (gain > 1.0f) gain = 1.0f;
         }
+        float clean_power = pe * gain * gain;
+        if (!speech_active && g_noise_psd_ready) {
+            float alpha = clean_power < g_noise_psd[k] ? 0.08f : 0.003f;
+            g_noise_psd[k] += alpha * (clean_power - g_noise_psd[k]);
+        }
+        float noise_gain = 1.0f;
+        if (g_noise_psd_ready && clean_power > 1.0f) {
+            /* Conservative spectral BNR: reduce the stationary noise floor
+             * while keeping a nonzero floor for low-level speech components. */
+            float subtraction = speech_active ? 0.70f : 1.10f;
+            float power_gain = 1.0f - subtraction * g_noise_psd[k] / (clean_power + 1.0f);
+            if (power_gain < 0.0f) power_gain = 0.0f;
+            noise_gain = sqrtf(power_gain);
+            if (noise_gain < 0.28f) noise_gain = 0.28f;
+        }
+        float gain_target = gain * noise_gain;
+        float gain_rate = gain_target < g_nr_bin_gain[k] ? 0.45f : 0.18f;
+        g_nr_bin_gain[k] += gain_rate * (gain_target - g_nr_bin_gain[k]);
+        gain = g_nr_bin_gain[k];
         ere[k] *= gain;
         eim[k] *= gain;
         if (k > 0 && k < FFT_N / 2) {
@@ -214,8 +257,6 @@ static float g_m_weight[VQE_MICS] = {
     1.0f / VQE_MICS, 1.0f / VQE_MICS, 1.0f / VQE_MICS
 };
 static int g_best_mic = 0;
-static int g_second_mic = 1;
-static int g_speech_focused = 0;
 
 /* ---- BNR + speech AGC state ---- */
 static float g_nr_hist[NR_HOPS];
@@ -349,18 +390,39 @@ static void estimate_delay(void) {
 
 static void write_stat(double ratio_db, int active) {
     long lag_ms = g_delay * 1000 / SR;
+    gtcrn_metrics_t gm;
+    gtcrn_ns_get_metrics(&gm);
     FILE *f = fopen(STAT_FILE ".tmp", "w");
     if (f) {
-        fprintf(f, "delay_ms=%ld\nreduction_db=%.1f\nref_active=%d\n", lag_ms, ratio_db, active);
+        fprintf(f,
+                "delay_ms=%ld\nreduction_db=%.1f\nref_active=%d\n"
+                "gtcrn_enabled=%d\ngtcrn_active=%d\ngtcrn_mode=%s\n"
+                "gtcrn_hops=%llu\ngtcrn_infer_ms_avg=%.3f\ngtcrn_infer_ms_max=%.3f\n"
+                "gtcrn_rtf_avg=%.4f\ngtcrn_queue_ms=%.2f\ngtcrn_deadline_misses=%llu\ngtcrn_rss_kb=%ld\n",
+                lag_ms, ratio_db, active,
+                gm.enabled, gm.active, gm.mode,
+                (unsigned long long)gm.hops, gm.infer_ms_avg, gm.infer_ms_max,
+                gm.rtf_avg, gm.queue_ms, (unsigned long long)gm.deadline_misses, gm.rss_kb);
         fclose(f);
         rename(STAT_FILE ".tmp", STAT_FILE);
     }
     FILE *jf = fopen(VQE_JSON ".tmp", "w");
     if (jf) {
-        fprintf(jf, "{\"erle_db\":%.1f,\"snr_db\":%.1f,\"lag_ms\":%ld,\"best_mic\":%d,\"barge_in\":%s,\"ref_active\":%s}\n",
+        fprintf(jf,
+                "{\"erle_db\":%.1f,\"snr_db\":%.1f,\"lag_ms\":%ld,\"best_mic\":%d,\"barge_in\":%s,\"ref_active\":%s,"
+                "\"gtcrn\":{\"enabled\":%s,\"active\":%s,\"mode\":\"%s\",\"hops\":%llu,"
+                "\"infer_ms_last\":%.3f,\"infer_ms_avg\":%.3f,\"infer_ms_max\":%.3f,"
+                "\"rtf_avg\":%.4f,\"rtf_max\":%.4f,\"queue_ms\":%.2f,\"deadline_misses\":%llu,\"rss_kb\":%ld}}\n",
                 ratio_db, g_snr_speech_db, lag_ms, g_best_mic,
                 g_barge_active ? "true" : "false",
-                active ? "true" : "false");
+                active ? "true" : "false",
+                gm.enabled ? "true" : "false",
+                gm.active ? "true" : "false",
+                gm.mode,
+                (unsigned long long)gm.hops,
+                gm.infer_ms_last, gm.infer_ms_avg, gm.infer_ms_max,
+                gm.rtf_avg, gm.rtf_max, gm.queue_ms,
+                (unsigned long long)gm.deadline_misses, gm.rss_kb);
         fclose(jf);
         rename(VQE_JSON ".tmp", VQE_JSON);
     }
@@ -385,8 +447,12 @@ static int spawn_arecord(void) {
 }
 
 int main(int argc, char **argv) {
+    if (argc == 4 && strcmp(argv[1], "--gtcrn-file") == 0) {
+        return gtcrn_ns_process_raw_file(argv[2], argv[3]);
+    }
     int use_stdin = (argc > 1 && strcmp(argv[1], "--stdin") == 0);
     init_stft();
+    gtcrn_ns_init();
     signal(SIGTERM, on_sig);
     signal(SIGINT, on_sig);
     signal(SIGPIPE, SIG_DFL);
@@ -411,7 +477,7 @@ int main(int argc, char **argv) {
                 close(rs);
                 rs = -1;
             } else {
-                chmod(REF_SOCK, 0666);
+                chmod(REF_SOCK, 0600);
             }
         }
     }
@@ -460,7 +526,8 @@ int main(int argc, char **argv) {
                 g_lp34[m] += 0.58f * (x16 - g_lp34[m]);
                 g_msq_acc[m] += (double)g_lp34[m] * g_lp34[m];
             }
-            /* Weighted mix: listens to ALL mics when idle, focuses on the 2 closest mics on speech detect */
+            /* Listen across the array while idle; active speech selection below
+             * switches to one capsule to avoid uncalibrated phase cancellation. */
             float mic = 0.0f;
             for (int m = 0; m < VQE_MICS; m++) {
                 mic += g_m_weight[m] * s16[m];
@@ -500,9 +567,9 @@ int main(int argc, char **argv) {
             g_macc += fabsf(mic);
             g_racc_env += fabsf(rraw);
             if (++g_ecnt == ENV_HOP) {
-                /* Continuous 7-mic speech-band monitoring + proximity focus on closest 1-2 mics */
-                int cand1 = g_best_mic, cand2 = g_second_mic;
-                float best_snr = -1.0f, second_snr = -1.0f;
+                /* Continuous per-channel SNR monitoring; speech uses the best capsule. */
+                int cand1 = g_best_mic;
+                float best_snr = -1.0f;
                 int healthy[VQE_MICS];
                 int healthy_cnt = 0;
                 for (int m = 0; m < VQE_MICS; m++) {
@@ -521,36 +588,30 @@ int main(int argc, char **argv) {
                         healthy_cnt++;
                         float snr = g_m_ema[m] / (g_m_noise[m] + 1.0f);
                         if (snr > best_snr) {
-                            second_snr = best_snr;
-                            cand2 = cand1;
                             best_snr = snr;
                             cand1 = m;
-                        } else if (snr > second_snr) {
-                            second_snr = snr;
-                            cand2 = m;
                         }
                     }
                 }
                 int speech_now = (best_snr >= 2.2f && g_m_ema[cand1] >= 45.0f);
-                g_speech_focused = speech_now;
                 if (speech_now) {
                     if (g_m_ema[g_best_mic] < 1.0f || g_m_ema[cand1] > g_m_ema[g_best_mic] * 1.15f) {
                         g_best_mic = cand1;
                     }
-                    g_second_mic = (cand2 != g_best_mic) ? cand2 : ((g_best_mic + 1) % VQE_MICS);
                 }
                 float w_sum = 0.0f;
                 for (int m = 0; m < VQE_MICS; m++) {
                     float tgt = 0.0f;
                     if (speech_now) {
-                        if (m == g_best_mic) tgt = 0.65f;
-                        else if (m == g_second_mic && healthy[m]) tgt = 0.35f;
+                        /* Do not sum spatially separated capsules without delay
+                         * calibration: phase cancellation can erase speech bands. */
+                        if (m == g_best_mic) tgt = 1.0f;
                     } else if (healthy_cnt > 0 && healthy[m]) {
                         tgt = 1.0f / (float)healthy_cnt;
                     } else if (m == g_best_mic) {
                         tgt = 1.0f;
                     }
-                    float alpha = speech_now ? 0.25f : 0.05f;
+                    float alpha = speech_now ? 1.0f : 0.05f;
                     g_m_weight[m] += alpha * (tgt - g_m_weight[m]);
                     w_sum += g_m_weight[m];
                 }
@@ -584,6 +645,10 @@ int main(int argc, char **argv) {
         /* Apply Frequency-Domain STFT-Kalman Residual Echo Suppressor + Barge-In VAD */
         stft_kalman_process_block(blk_e, blk_r, blk_ref_active);
 
+        /* Apply local streaming GTCRN neural noise suppressor (16 kHz, 16 ms hop).
+         * Fail-safe: no-op if disabled, unavailable, or real-time deadline overrun occurs. */
+        gtcrn_ns_process_128(blk_e);
+
         for (int i = 0; i < BLK; i++) {
             float e = blk_e[i];
             float ae = fabsf(e);
@@ -597,10 +662,14 @@ int main(int argc, char **argv) {
             }
             g_nr_gain += ((nr_tgt > g_nr_gain) ? 0.15f : 0.01f) * (nr_tgt - g_nr_gain);
 
-            if (g_sig_env > g_noise_env * 2.60f && g_sig_env > 180.0f) {
+            /* Keep whispered speech above the quantization/noise floor after
+             * AEC. A lower noise-relative gate and extra headroom help VAD/STT
+             * without applying gain to near-silence. */
+            float agc_gate = fmaxf(g_noise_env * 1.55f, 70.0f);
+            if (g_sig_env > agc_gate) {
                 float agc_tgt = 2800.0f / g_sig_env;
                 if (agc_tgt < 1.0f) agc_tgt = 1.0f;
-                if (agc_tgt > 2.6f) agc_tgt = 2.6f;
+                if (agc_tgt > 4.0f) agc_tgt = 4.0f;
                 float rate = (agc_tgt < g_agc_gain) ? 0.04f : 0.008f;
                 g_agc_gain += rate * (agc_tgt - g_agc_gain);
             } else {
@@ -642,5 +711,6 @@ int main(int argc, char **argv) {
         waitpid(g_child, NULL, 0);
     }
     if (!use_stdin) unlink(REF_SOCK);
+    gtcrn_ns_shutdown();
     return 0;
 }

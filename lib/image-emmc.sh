@@ -12,6 +12,8 @@ validate_image_geometry() {
 
 build_emmc_image() (
     set -euo pipefail
+    local kernel_boot_command
+    kernel_boot_command=$(resolve_uboot_kernel_boot_command)
     local tool
     for tool in truncate mkfs.vfat mcopy sfdisk dd mkimage stat mktemp; do check_tool "$tool"; done
     local out_dir="$PROJECT_ROOT/output/images"
@@ -44,7 +46,7 @@ if test -z "\${fdt_addr_r}"; then setenv fdt_addr_r 0x08008000; fi
 for devnum in 0 1 2; do
     if load mmc \${devnum}:1 \${kernel_addr_r} Image; then
         if load mmc \${devnum}:1 \${fdt_addr_r} ${DTS_NAME}.dtb; then
-            booti \${kernel_addr_r} - \${fdt_addr_r}
+            ${kernel_boot_command} \${kernel_addr_r} - \${fdt_addr_r}
         fi
     fi
 done
@@ -86,3 +88,26 @@ EOF
     sha256sum "$img_path" > "$img_path.sha256"
     display_alert OK "eMMC image built successfully:" "$img_path"
 )
+
+# This is a command selector, not an arbitrary shell/U-Boot fragment.
+resolve_uboot_kernel_boot_command() {
+    local selected="${UBOOT_KERNEL_BOOT_COMMAND:-}" architecture="${KERNEL_BUILD_ARCH:-${KERNEL_ARCH:-}}"
+    if [ -z "$architecture" ]; then
+        case "${ARCH:-arm64}" in
+            arm64) architecture=arm64 ;;
+            armhf|armel) architecture=arm ;;
+            *) architecture="$ARCH" ;;
+        esac
+    fi
+    if [ -z "$selected" ]; then
+        case "$architecture" in
+            arm64) selected=booti ;;
+            arm) selected=bootz ;;
+            *) exit_with_error "Set UBOOT_KERNEL_BOOT_COMMAND for kernel architecture: $architecture" ;;
+        esac
+    fi
+    case "$selected" in
+        booti|bootz|bootm) printf '%s\n' "$selected" ;;
+        *) exit_with_error "Invalid UBOOT_KERNEL_BOOT_COMMAND: $selected (expected booti, bootz or bootm)" ;;
+    esac
+}
