@@ -58,7 +58,6 @@ fun AtriHomeScreen(
             .fillMaxSize()
             .background(OledBlack)
             .statusBarsPadding()
-            .verticalScroll(rememberScrollState())
             .padding(horizontal = 20.dp, vertical = 10.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(11.dp)
@@ -103,11 +102,12 @@ fun AtriHomeScreen(
             }
         }
 
-        // Hero GPU Blob — Living Atri Core & Audio Visualizer
+        // Hero GPU Blob — Living Atri Core & Audio Visualizer (fills remaining viewport cleanly, zero scroll)
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(220.dp)
+                .weight(1f)
+                .heightIn(min = 150.dp)
                 .clip(RoundedCornerShape(30.dp))
                 .clickable { onBlobTap() },
             contentAlignment = Alignment.Center
@@ -305,7 +305,7 @@ fun AtriHomeScreen(
             )
         }
 
-        Spacer(Modifier.height(16.dp))
+        Spacer(Modifier.height(4.dp))
     }
 }
 
