@@ -13,7 +13,7 @@ const YNISON_REDIRECT_URL: &str =
 const YNISON_STATE_PATH: &str = "/ynison_state.YnisonStateService/PutYnisonState";
 const YNISON_ORIGIN: &str = "https://music.yandex.ru";
 const YNISON_APP_NAME: &str = "AtriStation";
-const YNISON_APP_VERSION: &str = "1.14.0";
+const YNISON_APP_VERSION: &str = "1.15.0";
 const YNISON_DEVICE_ID_FILE: &str = "/var/lib/atrios/ynison_device_id";
 pub const YNISON_ENABLED_FILE: &str = "/var/lib/atrios/ynison_enabled";
 
@@ -256,6 +256,11 @@ fn build_hybrid_full_state(device_id: &str, vol_0_1: f64, st: &YMusicStatus, cla
                 ("playable_type", Json::Str("TRACK".into())),
                 ("from", Json::Str("AtriOS-speaker".into())),
             ];
+            if let Some(aid) = st.queue_album_ids.get(i) {
+                if !aid.is_empty() {
+                    f.push(("album_id_optional", Json::Str(aid.clone())));
+                }
+            }
             if i as i64 == cur_idx {
                 if !st.title.is_empty() {
                     f.push(("title", Json::Str(st.title.clone())));
@@ -318,6 +323,54 @@ fn build_hybrid_full_state(device_id: &str, vol_0_1: f64, st: &YMusicStatus, cla
         ("activity_interception_type", Json::Str(interception.into())),
     ])
     .to_string_compact()
+}
+
+fn build_player_state_index_update(
+    device_id: &str,
+    server_queue: &Json,
+    new_idx: usize,
+    paused: bool,
+    progress_ms: i64,
+    duration_ms: i64,
+) -> String {
+    let mut q_map = match server_queue {
+        Json::Obj(m) => m.clone(),
+        _ => std::collections::BTreeMap::new(),
+    };
+    q_map.insert("current_playable_index".to_string(), Json::Num(new_idx as f64));
+    q_map.insert("version".to_string(), make_version_block(device_id));
+    let player_state = obj(vec![
+        (
+            "status",
+            obj(vec![
+                ("paused", Json::Bool(paused)),
+                ("duration_ms", Json::Str(duration_ms.max(0).to_string())),
+                ("progress_ms", Json::Str(progress_ms.max(0).to_string())),
+                ("playback_speed", Json::Num(1.0)),
+                ("version", make_version_block(device_id)),
+            ]),
+        ),
+        ("player_queue", Json::Obj(q_map)),
+    ]);
+    obj(vec![
+        (
+            "update_player_state",
+            obj(vec![("player_state", player_state)]),
+        ),
+        ("rid", Json::Str(next_rid())),
+        ("player_action_timestamp_ms", Json::Str(now_ms().to_string())),
+        (
+            "activity_interception_type",
+            Json::Str("DO_NOT_INTERCEPT_BY_DEFAULT".into()),
+        ),
+    ])
+    .to_string_compact()
+}
+
+fn find_track_index_in_queue(server_queue: &Json, track_id: &str) -> Option<usize> {
+    let arr = server_queue.get("playable_list")?.as_arr()?;
+    arr.iter()
+        .position(|item| item.get_str("playable_id").map(|s| s.trim() == track_id).unwrap_or(false))
 }
 
 fn send_ymusic_cmd(cmd: &str) {
@@ -383,6 +436,7 @@ fn run_ynison_session(token: &str, device_id: &str, stop_flag: &'static AtomicBo
 
     let mut is_active = false;
     let mut last_queue_sig = String::new();
+    let mut last_server_queue: Option<Json> = None;
     let mut last_idx: i64 = -1;
     let mut last_paused: Option<bool> = None;
     let mut last_remote_vol_pct: i32 = crate::bt_control::get_current_volume();
@@ -392,13 +446,7 @@ fn run_ynison_session(token: &str, device_id: &str, stop_flag: &'static AtomicBo
     let mut last_pushed_paused = true;
 
     while !stop_flag.load(Ordering::SeqCst) {
-        // Auto-remove immediately when user logs out, switches token, or disables Ynison:
-        // send clean RFC 6455 Close(1000) so Ynison removes AtriStation from official app right away!
-        if !is_ynison_enabled() {
-            println!("[ynison] Ynison disabled by user — sending clean Close(1000)");
-            ws.send_close(1000);
-            return Ok(());
-        }
+        // Logout completely removes AtriStation from official Yandex Music app via Close(1000)
         match load_auth() {
             Some(a) if a.token == token => {}
             _ => {
@@ -409,14 +457,25 @@ fn run_ynison_session(token: &str, device_id: &str, stop_flag: &'static AtomicBo
             }
         }
 
+        // Standby mode when toggle is OFF: stay connected so AtriStation stays visible in YM,
+        // release active playback if needed, and wake automatically if user taps AtriStation in YM!
+        let enabled = is_ynison_enabled();
+        if !enabled && is_active {
+            println!("[ynison] Standby enabled — pausing speaker & releasing active status (staying visible in YM)");
+            send_ymusic_cmd("pause");
+            let cur_vol = (crate::bt_control::get_current_volume() as f64 / 100.0).clamp(0.0, 1.0);
+            let _ = ws.send_text(&build_initial_full_state(device_id, cur_vol));
+            is_active = false;
+            last_paused = Some(true);
+        }
+
         if last_ping.elapsed() >= Duration::from_secs(keepalive_sec) {
             ws.send_ping()?;
             last_ping = Instant::now();
         }
 
-        // Hybrid Initiator + Low-Latency Status Sync (checks every 400ms for instant track/pause sync,
-        // and pushes periodic progress every 2s while playing)
-        if last_status_push.elapsed() >= Duration::from_millis(400) {
+        // Hybrid Initiator + Low-Latency Status & Skip Sync (only when enabled, not in Standby)
+        if enabled && last_status_push.elapsed() >= Duration::from_millis(400) {
             let st = read_status();
             let cur_vol_pct = crate::bt_control::get_current_volume();
             if (cur_vol_pct - last_remote_vol_pct).abs() >= 1 {
@@ -459,21 +518,57 @@ fn run_ynison_session(token: &str, device_id: &str, stop_flag: &'static AtomicBo
                     ));
                 }
             } else if is_active {
-                let changed = st.track_id != last_pushed_track || paused != last_pushed_paused;
-                if changed || (!paused && last_status_push.elapsed() >= Duration::from_secs(2)) {
-                    let pos = if !paused && st.started_ts > 0 {
-                        st.position_ms + (now_ms() - st.started_ts).max(0)
+                let track_changed = !st.track_id.is_empty() && st.track_id != last_pushed_track;
+                let pause_changed = paused != last_pushed_paused;
+                let pos = if !paused && st.started_ts > 0 {
+                    st.position_ms + (now_ms() - st.started_ts).max(0)
+                } else {
+                    st.position_ms
+                };
+                if track_changed {
+                    // Speaker skipped Next/Prev (from our app or track auto-advance):
+                    // push updated current_playable_index inside update_player_state so official YM moves to the new track!
+                    if let Some(ref sq) = last_server_queue {
+                        if let Some(real_idx) = find_track_index_in_queue(sq, &st.track_id) {
+                            let _ = ws.send_text(&build_player_state_index_update(
+                                device_id,
+                                sq,
+                                real_idx,
+                                paused,
+                                pos,
+                                st.duration_ms,
+                            ));
+                            last_idx = real_idx as i64;
+                        } else {
+                            let _ = ws.send_text(&build_hybrid_full_state(
+                                device_id,
+                                cur_vol_pct as f64 / 100.0,
+                                &st,
+                                true,
+                            ));
+                            last_idx = st.queue_index as i64;
+                        }
                     } else {
-                        st.position_ms
-                    };
+                        let _ = ws.send_text(&build_hybrid_full_state(
+                            device_id,
+                            cur_vol_pct as f64 / 100.0,
+                            &st,
+                            true,
+                        ));
+                        last_idx = st.queue_index as i64;
+                    }
+                    last_pushed_track = st.track_id;
+                    last_pushed_paused = paused;
+                    last_paused = Some(paused);
+                } else if pause_changed || (!paused && last_status_push.elapsed() >= Duration::from_secs(2)) {
                     let _ = ws.send_text(&build_playing_status_msg(
                         device_id,
                         paused,
                         pos,
                         st.duration_ms,
                     ));
-                    last_pushed_track = st.track_id;
                     last_pushed_paused = paused;
+                    last_paused = Some(paused);
                 }
             }
             last_status_push = Instant::now();
@@ -534,6 +629,12 @@ fn run_ynison_session(token: &str, device_id: &str, stop_flag: &'static AtomicBo
             last_paused = Some(true);
             continue;
         }
+        // Wake-on-Select: if user taps AtriStation inside official Yandex Music while in Standby,
+        // automatically re-enable Ynison and start playing!
+        if !is_active && now_active && !is_ynison_enabled() {
+            println!("[ynison] Wake-on-Select: AtriStation tapped in official YM -> auto-enabling Ynison!");
+            set_ynison_enabled(true);
+        }
         is_active = now_active;
         if !now_active {
             continue;
@@ -562,6 +663,7 @@ fn run_ynison_session(token: &str, device_id: &str, stop_flag: &'static AtomicBo
             .unwrap_or(false);
 
         if let Some(q) = queue {
+            last_server_queue = Some(q.clone());
             let cur_idx = q
                 .get("current_playable_index")
                 .and_then(|v| v.as_i64())
@@ -586,6 +688,8 @@ fn run_ynison_session(token: &str, device_id: &str, stop_flag: &'static AtomicBo
                     last_queue_sig = joined.clone();
                     last_idx = cur_idx;
                     last_paused = Some(paused);
+                    last_pushed_track = ids[cur_idx as usize].clone();
+                    last_pushed_paused = paused;
                     let mode_tag = if paused { "pause" } else { "play" };
                     let cmd = format!("ynison_sync:{mode_tag}:{rel_idx}:{joined}");
                     println!("[ynison] Syncing queue ({} tracks, idx={rel_idx}, {mode_tag})", win_end - win_start);
@@ -608,10 +712,6 @@ pub fn spawn_ynison_thread(stop_flag: &'static AtomicBool) {
         let device_id = ynison_device_id();
         let mut backoff_sec = 2u64;
         while !stop_flag.load(Ordering::SeqCst) {
-            if !is_ynison_enabled() {
-                thread::sleep(Duration::from_secs(1));
-                continue;
-            }
             let Some(auth) = load_auth() else {
                 thread::sleep(Duration::from_secs(1));
                 continue;

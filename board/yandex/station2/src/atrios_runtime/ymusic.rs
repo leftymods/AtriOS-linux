@@ -203,6 +203,7 @@ pub struct TrackInfo {
     pub title: String,
     pub artist: String,
     pub album: String,
+    pub album_id: String,
     pub cover_url: String,
     pub duration_ms: i64,
     pub liked: bool,
@@ -246,6 +247,7 @@ pub struct YMusicStatus {
     pub can_prev: bool,
     pub can_next: bool,
     pub queue_ids: Vec<String>,
+    pub queue_album_ids: Vec<String>,
     pub queue_index: usize,
     pub error: Option<String>,
     pub seq: u64,
@@ -284,6 +286,7 @@ impl YMusicStatus {
             can_prev: false,
             can_next: true,
             queue_ids: Vec::new(),
+            queue_album_ids: Vec::new(),
             queue_index: 0,
             error: None,
             seq: 0,
@@ -348,6 +351,12 @@ impl YMusicStatus {
         }
         if let Some(arr) = j.get("queue_ids").and_then(|v| v.as_arr()) {
             st.queue_ids = arr
+                .iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect::<Vec<String>>();
+        }
+        if let Some(arr) = j.get("queue_album_ids").and_then(|v| v.as_arr()) {
+            st.queue_album_ids = arr
                 .iter()
                 .filter_map(|v| v.as_str().map(|s| s.to_string()))
                 .collect::<Vec<String>>();
@@ -421,6 +430,15 @@ impl YMusicStatus {
                 "queue_ids",
                 Json::Arr(
                     self.queue_ids
+                        .iter()
+                        .map(|s| Json::Str(s.clone()))
+                        .collect::<Vec<Json>>(),
+                ),
+            ),
+            (
+                "queue_album_ids",
+                Json::Arr(
+                    self.queue_album_ids
                         .iter()
                         .map(|s| Json::Str(s.clone()))
                         .collect::<Vec<Json>>(),
@@ -648,11 +666,19 @@ fn parse_track_json(t: &Json, liked_default: bool) -> Option<TrackInfo> {
         .unwrap_or_default();
     let first_album = t.get("albums").and_then(|a| a.as_arr()).and_then(|arr| arr.first());
     let album = first_album.and_then(|al| al.get_str("title")).unwrap_or("").to_string();
+    let album_id = first_album
+        .and_then(|al| al.get("id"))
+        .map(|v| match v {
+            Json::Str(s) => s.clone(),
+            Json::Num(n) => format!("{}", *n as i64),
+            _ => String::new(),
+        })
+        .unwrap_or_default();
     let cover_url = format_cover_url(
         t.get_str("coverUri").or_else(|| first_album.and_then(|al| al.get_str("coverUri")))
     );
     let duration_ms = t.get("durationMs").and_then(|v| v.as_i64()).unwrap_or(0);
-    Some(TrackInfo { id, title, artist, album, cover_url, duration_ms, liked: liked_default })
+    Some(TrackInfo { id, title, artist, album, album_id, cover_url, duration_ms, liked: liked_default })
 }
 
 /// MarshalX rotor_station_tracks: works for user:onyourwave, genre:*, mood:*, activity:*
@@ -1992,6 +2018,12 @@ impl PlayerState {
             .iter()
             .take(40)
             .map(|t| t.id.clone())
+            .collect::<Vec<String>>();
+        self.status.queue_album_ids = self
+            .queue
+            .iter()
+            .take(40)
+            .map(|t| t.album_id.clone())
             .collect::<Vec<String>>();
         self.status.queue_index = self.index.min(self.status.queue_ids.len().saturating_sub(1));
         if self.index > 0 {
