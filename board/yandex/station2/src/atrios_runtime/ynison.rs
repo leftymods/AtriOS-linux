@@ -272,11 +272,13 @@ fn build_hybrid_full_state(device_id: &str, vol_0_1: f64, st: &YMusicStatus, cla
             obj(f)
         })
         .collect::<Vec<Json>>();
-    let entity_type = match st.mode.as_str() {
-        "wave" | "station" => "RADIO",
-        "playlist" | "likes" => "PLAYLIST",
-        "album" => "ALBUM",
-        _ => "VARIOUS",
+    let (entity_type, entity_id) = match st.mode.as_str() {
+        "wave" => ("RADIO", "user:onyourwave".to_string()),
+        "station" => ("RADIO", "user:onyourwave".to_string()),
+        "likes" if st.uid > 0 => ("PLAYLIST", format!("{}:3", st.uid)),
+        "playlist" => ("PLAYLIST", String::new()),
+        "album" => ("ALBUM", st.queue_album_ids.get(st.queue_index).cloned().unwrap_or_default()),
+        _ => ("VARIOUS", String::new()),
     };
     let repeat_mode = if st.repeat { "ONE" } else { "NONE" };
     let player_state = obj(vec![
@@ -294,7 +296,7 @@ fn build_hybrid_full_state(device_id: &str, vol_0_1: f64, st: &YMusicStatus, cla
             "player_queue",
             obj(vec![
                 ("current_playable_index", Json::Num(cur_idx as f64)),
-                ("entity_id", Json::Str(String::new())),
+                ("entity_id", Json::Str(entity_id)),
                 ("entity_type", Json::Str(entity_type.into())),
                 ("playable_list", Json::Arr(playables)),
                 ("options", obj(vec![("repeat_mode", Json::Str(repeat_mode.into()))])),
