@@ -1,9 +1,10 @@
+use std::collections::HashMap;
 use std::fs;
 use std::os::raw::{c_int, c_void};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -35,7 +36,17 @@ const DEVICE_FILE: &str = "/etc/atrios-device";
 static CLIENT_COUNT: Mutex<usize> = Mutex::new(0);
 static SCREEN_GEN: AtomicU64 = AtomicU64::new(0);
 static SCREEN_LOCK: Mutex<()> = Mutex::new(());
-static E2EE_USED_IVS: Mutex<Vec<[u8; 12]>> = Mutex::new(Vec::new());
+static E2EE_USED_IVS: OnceLock<Mutex<HashMap<c_int, Vec<[u8; 12]>>>> = OnceLock::new();
+fn e2ee_used_ivs() -> &'static Mutex<HashMap<c_int, Vec<[u8; 12]>>> {
+    E2EE_USED_IVS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+struct E2eeSessionCleanup(c_int);
+impl Drop for E2eeSessionCleanup {
+    fn drop(&mut self) {
+        if let Ok(mut used) = e2ee_used_ivs().lock() { used.remove(&self.0); }
+        let _ = fs::remove_file(format!("/var/run/atrios/term_e2ee-{}.key", self.0));
+    }
+}
 
 fn read_device_meta() -> (String, String, String, String, String) {
     let mut name = "AtriStation Max".to_string();
@@ -597,11 +608,36 @@ fn send_json_line(fd: c_int, j: &Json) -> bool {
     true
 }
 
-fn shell_quote_single(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\"'\"'"))
+pub(crate) fn process_command(cmd_obj: &Json) -> Result<Json, String> {
+    process_command_for_connection(cmd_obj, None)
+}
+fn collect_limited_output(
+    mut child: std::process::Child,
+    limit: usize,
+) -> Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>), String> {
+    use std::io::Read;
+    fn drain<R: Read>(mut reader: R, limit: usize) -> std::io::Result<Vec<u8>> {
+        let mut kept = Vec::with_capacity(limit.min(4096));
+        let mut buf = [0u8; 4096];
+        loop {
+            let n = reader.read(&mut buf)?;
+            if n == 0 { break; }
+            let remaining = limit.saturating_sub(kept.len());
+            kept.extend_from_slice(&buf[..n.min(remaining)]);
+        }
+        Ok(kept)
+    }
+    let stdout = child.stdout.take().ok_or("Terminal stdout unavailable")?;
+    let stderr = child.stderr.take().ok_or("Terminal stderr unavailable")?;
+    let out_reader = thread::spawn(move || drain(stdout, limit));
+    let err_reader = thread::spawn(move || drain(stderr, limit));
+    let status = child.wait().map_err(|e| format!("Terminal command wait failed: {e}"))?;
+    let stdout = out_reader.join().map_err(|_| "Terminal stdout reader failed")?.map_err(|e| e.to_string())?;
+    let stderr = err_reader.join().map_err(|_| "Terminal stderr reader failed")?.map_err(|e| e.to_string())?;
+    Ok((status, stdout, stderr))
 }
 
-pub(crate) fn process_command(cmd_obj: &Json) -> Result<Json, String> {
+fn process_command_for_connection(cmd_obj: &Json, connection_id: Option<c_int>) -> Result<Json, String> {
     let Some(map) = cmd_obj.as_obj() else {
         return Err("Command must be a JSON object".into());
     };
@@ -1283,14 +1319,12 @@ pub(crate) fn process_command(cmd_obj: &Json) -> Result<Json, String> {
             Ok(build_status_payload())
         }
         "term_e2ee_init" => {
-            use std::collections::HashMap;
-            use std::sync::{Mutex, OnceLock};
-            static E2EE_SESSIONS: OnceLock<Mutex<HashMap<String, ([u8; 32], String, i64)>>> = OnceLock::new();
-            let store = E2EE_SESSIONS.get_or_init(|| Mutex::new(HashMap::new()));
+            let connection_id = connection_id.ok_or("E2EE terminal requires a local Bluetooth client")?;
             let client_pub = map.get("client_pub").and_then(|v| v.as_str()).unwrap_or("").trim().to_ascii_lowercase();
             let client_nonce = map.get("client_nonce").and_then(|v| v.as_str()).unwrap_or("").trim().to_ascii_lowercase();
             let client_pub_bytes = crate::e2ee::hex_decode(&client_pub)?;
-            if client_pub_bytes.len() != 32 || client_nonce.len() < 16 || client_nonce.len() > 64 {
+            let nonce_bytes = crate::e2ee::hex_decode(&client_nonce)?;
+            if client_pub_bytes.len() != 32 || !(8..=32).contains(&nonce_bytes.len()) {
                 return Err("Invalid client_pub or client_nonce in term_e2ee_init".into());
             }
             let mut priv_k = [0u8; 32];
@@ -1305,19 +1339,17 @@ pub(crate) fn process_command(cmd_obj: &Json) -> Result<Json, String> {
                 "atrios-term-e2ee-v2|{device_id}|{sid}|{client_pub}|{client_nonce}|{pub_hex}"
             );
             let (identity_pub, sig_b64) = crate::e2ee::sign_handshake_transcript(transcript.as_bytes())?;
-            let now = now_unix_i64();
-            if let Ok(mut g) = store.lock() {
-                g.retain(|_, (_, _, ts)| now - *ts < 1800);
-                if g.len() >= 8 { g.clear(); }
-                g.insert(sid.clone(), (priv_k, client_pub.clone(), now));
-            }
-            if let Ok(mut used) = E2EE_USED_IVS.lock() {
-                used.clear();
-            }
-            // Persist active E2EE session key + bound client_pub in /var/run/atrios/term_e2ee.key (0600, tmpfs)
-            let _ = fs::create_dir_all("/var/run/atrios");
+            let key_path = format!("/var/run/atrios/term_e2ee-{}.key", connection_id);
+            fs::create_dir_all("/var/run/atrios").map_err(|e| e.to_string())?;
             let key_line = format!("{}:{}:{}\n", sid, crate::e2ee::hex_encode(&priv_k), client_pub);
-            let _ = atomic_write_bytes(Path::new("/var/run/atrios/term_e2ee.key"), key_line.as_bytes(), 0o600, false);
+            atomic_write_bytes(Path::new(&key_path), key_line.as_bytes(), 0o600, false)
+                .map_err(|e| format!("Failed storing temporary E2EE session: {e}"))?;
+            if let Ok(mut used) = e2ee_used_ivs().lock() {
+                used.insert(connection_id, Vec::new());
+            } else {
+                let _ = fs::remove_file(&key_path);
+                return Err("E2EE replay state unavailable".into());
+            }
             Ok(obj(vec![
                 ("type", Json::Str("term_e2ee_init_response".into())),
                 ("success", Json::Bool(true)),
@@ -1329,12 +1361,14 @@ pub(crate) fn process_command(cmd_obj: &Json) -> Result<Json, String> {
             ]))
         }
         "term_e2ee_exec" => {
+            let connection_id = connection_id.ok_or("E2EE terminal requires a local Bluetooth client")?;
             let sid = map.get("sid").and_then(|v| v.as_str()).unwrap_or("").trim();
             let peer_pub_hex = map.get("pub").and_then(|v| v.as_str()).unwrap_or("").trim().to_ascii_lowercase();
             let iv_hex = map.get("iv").and_then(|v| v.as_str()).unwrap_or("");
             let ct_hex = map.get("ct").and_then(|v| v.as_str()).unwrap_or("");
             let mac_hex = map.get("mac").and_then(|v| v.as_str()).unwrap_or("");
-            let key_txt = fs::read_to_string("/var/run/atrios/term_e2ee.key").map_err(|_| "E2EE session not initialized")?;
+            let key_path = format!("/var/run/atrios/term_e2ee-{}.key", connection_id);
+            let key_txt = fs::read_to_string(&key_path).map_err(|_| "E2EE session not initialized")?;
             let mut parts = key_txt.trim().splitn(3, ':');
             let stored_sid = parts.next().ok_or("Invalid E2EE session state")?;
             let priv_hex = parts.next().ok_or("Invalid E2EE session state")?;
@@ -1367,24 +1401,24 @@ pub(crate) fn process_command(cmd_obj: &Json) -> Result<Json, String> {
                 return Err("Empty or oversized command".into());
             }
             {
-                let mut used = E2EE_USED_IVS.lock().map_err(|_| "E2EE replay state unavailable")?;
-                if used.contains(&iv) {
-                    return Err("Replayed E2EE command rejected".into());
-                }
-                if used.len() >= 1024 {
-                    return Err("E2EE session command limit reached".into());
-                }
+                let mut sessions = e2ee_used_ivs().lock().map_err(|_| "E2EE replay state unavailable")?;
+                let used = sessions.get_mut(&connection_id).ok_or("E2EE session expired")?;
+                if used.contains(&iv) { return Err("Replayed E2EE command rejected".into()); }
+                if used.len() >= 1024 { return Err("E2EE session command limit reached".into()); }
                 used.push(iv);
             }
-            let out = Command::new("/bin/sh")
-                .args(["-c", &format!("timeout 8 sh -c {} 2>&1 || true", shell_quote_single(&shell_cmd))])
-                .output()
-                .or_else(|_| Command::new("/bin/sh").args(["-c", &shell_cmd]).output())
-                .map_err(|e| format!("Shell exec failed: {e}"))?;
-            let mut combined = String::from_utf8_lossy(&out.stdout).to_string();
-            if !out.stderr.is_empty() {
+            let child = Command::new("/usr/bin/timeout")
+                .args(["--signal=TERM", "--kill-after=1s", "8s", "/usr/bin/setpriv", "--no-new-privs", "--reuid=65534", "--regid=65534", "--clear-groups", "/bin/sh", "-c", &shell_cmd])
+                .stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()
+                .map_err(|e| format!("Restricted terminal command launch failed: {e}"))?;
+            let (status, stdout, stderr) = collect_limited_output(child, 7168)?;
+            let mut combined = String::from_utf8_lossy(&stdout).to_string();
+            if !stderr.is_empty() {
                 if !combined.is_empty() && !combined.ends_with('\n') { combined.push('\n'); }
-                combined.push_str(&String::from_utf8_lossy(&out.stderr));
+                combined.push_str(&String::from_utf8_lossy(&stderr));
+            }
+            if status.code() == Some(124) || status.code() == Some(137) {
+                combined.push_str("\n[command timed out after 8 seconds]");
             }
             if combined.len() > 14000 {
                 combined.truncate(14000);
@@ -1424,6 +1458,7 @@ pub(crate) fn process_command(cmd_obj: &Json) -> Result<Json, String> {
 }
 
 fn handle_client(fd: c_int, mac: String) {
+    let _session_cleanup = E2eeSessionCleanup(fd);
     println!("[bt-control] Client connected via Bluetooth RFCOMM: {mac}");
     if !send_json_line(fd, &build_status_payload()) {
         unsafe { close(fd) };
@@ -1475,7 +1510,7 @@ fn handle_client(fd: c_int, mac: String) {
                 if line.is_empty() {
                     continue;
                 }
-                match Json::parse(&line).and_then(|c| process_command(&c)) {
+                match Json::parse(&line).and_then(|c| process_command_for_connection(&c, Some(fd))) {
                     Ok(resp) => {
                         if !send_json_line(fd, &resp) {
                             unsafe { close(fd) };
@@ -1754,7 +1789,7 @@ pub fn run(_args: &[String]) -> i32 {
             peer.rc_bdaddr[2], peer.rc_bdaddr[1], peer.rc_bdaddr[0]
         );
         let priv_info = get_bt_privacy();
-        let auth = priv_info.paired_devices.contains(&mac) || priv_info.pair_remaining_sec > 0;
+        let auth = priv_info.paired_devices.contains(&mac);
         let slot_ok = {
             let mut c = CLIENT_COUNT.lock().unwrap();
             if auth && *c < MAX_CLIENTS {

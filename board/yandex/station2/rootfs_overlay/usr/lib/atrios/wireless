@@ -179,7 +179,28 @@ case "$CMD" in
       fi
     }
 
-    if [ "$SUBCMD" = "init" ]; then
+    if [ "$SUBCMD" = "authorize" ]; then
+      if [ "$(id -u)" -ne 0 ]; then
+        echo "Bluetooth authorization must be run locally as root." >&2
+        exit 1
+      fi
+      MAC="$(printf '%s' "${3:-}" | tr '[:lower:]' '[:upper:]')"
+      if ! printf '%s\n' "$MAC" | grep -Eq '^[[:xdigit:]]{2}(:[[:xdigit:]]{2}){5}$'; then
+        echo "Usage: atrios bt authorize <paired-device-MAC> (run locally as root)" >&2
+        exit 2
+      fi
+      if ! install -d -m 700 /var/lib/atrios || ! touch /var/lib/atrios/bt_paired || ! chmod 600 /var/lib/atrios/bt_paired; then
+        echo "Failed to prepare the Bluetooth allowlist." >&2
+        exit 1
+      fi
+      if ! grep -Fxq "$MAC" /var/lib/atrios/bt_paired; then
+        if ! printf '%s\n' "$MAC" >> /var/lib/atrios/bt_paired; then
+          echo "Failed to update the Bluetooth allowlist." >&2
+          exit 1
+        fi
+      fi
+      echo "Authorized Bluetooth device $MAC for AtriOS control."
+    elif [ "$SUBCMD" = "init" ]; then
       bt_do_init
       if [ -e /sys/class/bluetooth/hci0 ] && command -v hciconfig >/dev/null 2>&1; then
         hciconfig -a hci0 2>/dev/null || true
