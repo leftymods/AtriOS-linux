@@ -121,11 +121,40 @@ mod tests {
         assert!(!atriai::matches_wake_word("отряд пошёл вперёд", "Atri"));
         assert!(!atriai::matches_wake_word("смотри", "Atri"));
         assert!(!atriai::matches_wake_word("atrium hello", "Atri"));
+        assert!(!atriai::matches_wake_word("атриум", "Atri"));
+        assert!(!atriai::matches_wake_word("эй, атриум", "Атри"));
+        assert!(!atriai::matches_wake_word("как найти атриум", "Atri"));
+        assert!(!atriai::matches_wake_word("а три ум", "Atri"));
+        assert!(!atriai::matches_wake_word("натрий", "Atri"));
+        assert!(!atriai::matches_wake_word("астры", "Atri"));
+        assert!(atriai::matches_wake_word("атриум", "атриум"));
         assert!(!atriai::matches_wake_word("patriarch", "Atri"));
         assert_eq!(atriai::strip_wake_word("Эй, Атри, громче", "Atri"), "громче");
         assert_eq!(atriai::strip_wake_word("а три а три", "Atri"), "");
         assert_eq!(atriai::strip_wake_word("атри атри как дела", "Atri"), "как дела");
         assert_eq!(atriai::strip_wake_word("громче атри", "Atri"), "громче");
+    }
+
+    #[test]
+    fn voice_retry_preserves_wake_boundaries_and_command_pauses() {
+        assert!(atriai::should_retry_wake("", true));
+        assert!(atriai::should_retry_wake("три какая погода", false));
+        assert!(atriai::should_retry_wake("поставь таймер", true));
+        assert!(!atriai::should_retry_wake("атриум", true));
+        assert!(!atriai::should_retry_wake("а три ум", true));
+        assert!(!atriai::should_retry_wake("реклама", false));
+        assert_eq!(atriai::voice_endpoint_silence_ms(true, 500.0, false, 420.0), 128.0);
+        assert_eq!(atriai::voice_endpoint_silence_ms(false, 1800.0, false, 550.0), 350.0);
+    }
+
+    #[test]
+    fn immediate_stop_requires_a_command_boundary() {
+        for text in ["стоп", "Стоп!", "с топ", "Атри, стоп", "stop пожалуйста"] {
+            assert!(atriai::is_immediate_stop(text, "Atri"), "{text}");
+        }
+        for text in ["стопка", "скажи слово стоп", "нажми стоп", "стоп музыка играет"] {
+            assert!(!atriai::is_immediate_stop(text, "Atri"), "{text}");
+        }
     }
 
     #[test]

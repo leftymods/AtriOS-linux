@@ -24,7 +24,8 @@ const MODEL_PATHS: &[&str] = &[
 ];
 
 // Fast finite-state grammar for local commands & wake proxies (~5-8x faster than unconstrained decoding,
-// shares the single loaded VoskModel in RAM with zero extra memory).
+// shares the same loaded VoskModel). Keep common near-misses in the
+// vocabulary so they can be decoded as themselves and rejected by the caller.
 const CMD_GRAMMAR: &str = r#"[
   "арти", "атриум", "астры", "натрий", "а три",
   "привет", "слушай", "эй",
@@ -63,6 +64,13 @@ const CMD_GRAMMAR: &str = r#"[
   "[unk]"
 ]"#;
 
+// Keep similar-sounding words distinct so they do not get forced into "стоп".
+const STOP_GRAMMAR: &str = r#"[
+  "стоп", "с топ", "stop", "атри стоп", "а три стоп",
+  "что", "стал", "стол", "стул", "топ", "стопка", "стопор",
+  "атри", "а три", "арти", "астры", "атриум", "[unk]"
+]"#;
+
 #[allow(non_snake_case)]
 struct VoskFns {
     vosk_set_log_level: unsafe extern "C" fn(c_int),
@@ -71,7 +79,7 @@ struct VoskFns {
     vosk_recognizer_new_grm: Option<unsafe extern "C" fn(*mut c_void, c_float, *const c_char) -> *mut c_void>,
     vosk_recognizer_accept_waveform: unsafe extern "C" fn(*mut c_void, *const c_char, c_int) -> c_int,
     vosk_recognizer_final_result: unsafe extern "C" fn(*mut c_void) -> *const c_char,
-    vosk_recognizer_partial_result: Option<unsafe extern "C" fn(*mut c_void) -> *const c_char>,
+    vosk_recognizer_result: Option<unsafe extern "C" fn(*mut c_void) -> *const c_char>,
     vosk_recognizer_reset: unsafe extern "C" fn(*mut c_void),
 }
 
@@ -80,7 +88,9 @@ struct VoskEngine {
     _model: *mut c_void,
     rec: *mut c_void,
     cmd_rec: *mut c_void,
+    stop_rec: *mut c_void,
     cmd_prev_sample: f64,
+    cmd_completed_text: String,
 }
 
 unsafe impl Send for VoskEngine {}
@@ -153,7 +163,7 @@ fn load_engine() -> Option<Mutex<VoskEngine>> {
                 vosk_recognizer_new_grm: sym_opt(handle, "vosk_recognizer_new_grm"),
                 vosk_recognizer_accept_waveform: sym(handle, "vosk_recognizer_accept_waveform")?,
                 vosk_recognizer_final_result: sym(handle, "vosk_recognizer_final_result")?,
-                vosk_recognizer_partial_result: sym_opt(handle, "vosk_recognizer_partial_result"),
+                vosk_recognizer_result: sym_opt(handle, "vosk_recognizer_result"),
                 vosk_recognizer_reset: sym(handle, "vosk_recognizer_reset")?,
             })
         })() {
@@ -175,12 +185,17 @@ fn load_engine() -> Option<Mutex<VoskEngine>> {
             eprintln!("[local-stt] failed creating Vosk recognizer");
             return None;
         }
-        let mut cmd_rec = std::ptr::null_mut();
-        if let Some(new_grm) = fns.vosk_recognizer_new_grm {
-            if let Ok(c_grm) = CString::new(CMD_GRAMMAR) {
-                cmd_rec = new_grm(model, 16000.0, c_grm.as_ptr());
-            }
-        }
+        let grammar_rec = |grammar| {
+            let Some(new_grm) = fns.vosk_recognizer_new_grm else {
+                return std::ptr::null_mut();
+            };
+            let Ok(grammar) = CString::new(grammar) else {
+                return std::ptr::null_mut();
+            };
+            new_grm(model, 16000.0, grammar.as_ptr())
+        };
+        let cmd_rec = grammar_rec(CMD_GRAMMAR);
+        let stop_rec = grammar_rec(STOP_GRAMMAR);
         println!(
             "[local-stt] Vosk Russian offline model loaded ({model_path}, fast_grammar={}, npu_dev={})",
             !cmd_rec.is_null(),
@@ -191,7 +206,9 @@ fn load_engine() -> Option<Mutex<VoskEngine>> {
             _model: model,
             rec,
             cmd_rec,
+            stop_rec,
             cmd_prev_sample: 0.0,
+            cmd_completed_text: String::new(),
         }))
     }
 }
@@ -212,29 +229,51 @@ pub fn reset_command_stream() -> bool {
     let Ok(mut guard) = mtx.lock() else {
         return false;
     };
-    if guard.cmd_rec.is_null() || guard.fns.vosk_recognizer_partial_result.is_none() {
+    if guard.cmd_rec.is_null() || guard.fns.vosk_recognizer_result.is_none() {
         return false;
     }
     unsafe { (guard.fns.vosk_recognizer_reset)(guard.cmd_rec) };
     guard.cmd_prev_sample = 0.0;
+    guard.cmd_completed_text.clear();
     true
 }
 
-/// Feed one live PCM chunk and return Vosk's current partial command transcript.
-pub fn command_stream_partial(pcm: &[u8]) -> Option<String> {
-    let Some(Some(mtx)) = ENGINE.get().map(|o| o.as_ref()) else {
-        return None;
-    };
-    let mut guard = mtx.lock().ok()?;
-    if guard.cmd_rec.is_null() {
+fn result_text(raw_ptr: *const c_char) -> Option<String> {
+    if raw_ptr.is_null() {
         return None;
     }
-    let partial_result = guard.fns.vosk_recognizer_partial_result?;
+    let json = unsafe { CStr::from_ptr(raw_ptr) }.to_string_lossy();
+    Some(Json::parse(&json).ok()?.get_str("text")?.trim().to_string())
+}
+
+fn append_text(out: &mut String, text: &str) {
+    if !text.is_empty() {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(text);
+    }
+}
+
+/// Feed live PCM without treating a provisional transcript as a wake event.
+pub fn feed_command_stream(pcm: &[u8]) -> bool {
+    let Some(Some(mtx)) = ENGINE.get().map(|o| o.as_ref()) else {
+        return false;
+    };
+    let Ok(mut guard) = mtx.lock() else {
+        return false;
+    };
+    let Some(result) = guard.fns.vosk_recognizer_result else {
+        return false;
+    };
+    if guard.cmd_rec.is_null() {
+        return false;
+    }
     let samples = pcm.chunks_exact(2)
         .map(|b| i16::from_le_bytes([b[0], b[1]]) as f64)
         .collect::<Vec<_>>();
     if samples.is_empty() {
-        return None;
+        return false;
     }
     let mean = samples.iter().sum::<f64>() / samples.len() as f64;
     let mut conditioned = Vec::with_capacity(samples.len() * 2);
@@ -265,14 +304,16 @@ pub fn command_stream_partial(pcm: &[u8]) -> Option<String> {
         )
     };
     if accepted < 0 {
-        return None;
+        return false;
     }
-    let raw_ptr = unsafe { partial_result(guard.cmd_rec) };
-    if raw_ptr.is_null() {
-        return Some(String::new());
+    if accepted > 0 {
+        // Keep each Vosk segment before the next chunk starts a new one.
+        let Some(text) = result_text(unsafe { result(guard.cmd_rec) }) else {
+            return false;
+        };
+        append_text(&mut guard.cmd_completed_text, &text);
     }
-    let json = unsafe { CStr::from_ptr(raw_ptr) }.to_string_lossy();
-    Some(Json::parse(&json).ok()?.get_str("partial")?.trim().to_string())
+    true
 }
 
 /// Finish the live constrained-recognizer pass and return its final transcript.
@@ -286,14 +327,11 @@ pub fn finish_command_stream() -> Option<(String, bool)> {
         return None;
     }
     let raw_ptr = unsafe { (guard.fns.vosk_recognizer_final_result)(guard.cmd_rec) };
-    let raw = if raw_ptr.is_null() {
-        String::new()
-    } else {
-        let json = unsafe { CStr::from_ptr(raw_ptr) }.to_string_lossy();
-        Json::parse(&json).ok()?.get_str("text")?.trim().to_string()
-    };
+    let tail = result_text(raw_ptr);
     unsafe { (guard.fns.vosk_recognizer_reset)(guard.cmd_rec) };
     guard.cmd_prev_sample = 0.0;
+    let mut raw = std::mem::take(&mut guard.cmd_completed_text);
+    append_text(&mut raw, &tail?);
     let mut had_unk = false;
     let mut clean = Vec::new();
     for word in raw.split_whitespace() {
@@ -344,6 +382,7 @@ fn condition_pcm16_for_vosk(pcm: &[u8]) -> Vec<u8> {
 
 unsafe fn decode_with_rec(fns: &VoskFns, rec: *mut c_void, conditioned: &[u8]) -> Result<String, String> {
     (fns.vosk_recognizer_reset)(rec);
+    let mut decoded = String::new();
     let mut off = 0usize;
     while off < conditioned.len() {
         let chunk = (conditioned.len() - off).min(6400);
@@ -355,19 +394,33 @@ unsafe fn decode_with_rec(fns: &VoskFns, rec: *mut c_void, conditioned: &[u8]) -
         if rc < 0 {
             return Err("Vosk accept_waveform error".into());
         }
+        if rc > 0 {
+            if let Some(result) = fns.vosk_recognizer_result {
+                if let Some(segment) = result_text(result(rec)) {
+                    append_text(&mut decoded, &segment);
+                }
+            }
+        }
         off += chunk;
     }
-    let raw_ptr = (fns.vosk_recognizer_final_result)(rec);
-    if raw_ptr.is_null() {
-        return Ok(String::new());
+    if let Some(tail) = result_text((fns.vosk_recognizer_final_result)(rec)) {
+        append_text(&mut decoded, &tail);
     }
-    let json_str = CStr::from_ptr(raw_ptr).to_string_lossy().into_owned();
-    if let Ok(j) = Json::parse(&json_str) {
-        if let Some(t) = j.get_str("text") {
-            return Ok(t.trim().to_string());
-        }
+    Ok(decoded)
+}
+
+pub fn detects_stop(pcm: &[u8]) -> bool {
+    if !(3200..=44800).contains(&pcm.len()) {
+        return false;
     }
-    Ok(String::new())
+    let Some(Some(mtx)) = ENGINE.get() else { return false };
+    let Ok(engine) = mtx.lock() else { return false };
+    if engine.stop_rec.is_null() {
+        return false;
+    }
+    let conditioned = condition_pcm16_for_vosk(pcm);
+    let decoded = unsafe { decode_with_rec(&engine.fns, engine.stop_rec, &conditioned) };
+    decoded.is_ok_and(|text| matches!(text.as_str(), "стоп" | "с топ" | "stop" | "атри стоп" | "а три стоп"))
 }
 
 pub fn transcribe_command_pcm16(pcm: &[u8]) -> Result<(String, bool), String> {

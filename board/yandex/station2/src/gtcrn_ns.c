@@ -27,6 +27,8 @@
 #define GTCRN_FFT_N       512
 #define GTCRN_HOP         256
 #define GTCRN_BINS        257
+#define GTCRN_BLOCK       128
+#define GTCRN_DEFAULT_WET 0.72f
 #define GTCRN_HOP_US      16000.0
 #define GTCRN_MIX_LEN     (GTCRN_BINS * 2)
 #define GTCRN_CONV_LEN    (2 * 1 * 16 * 16 * 33)
@@ -64,15 +66,18 @@ static int g_ping = 0;
 static float g_win[GTCRN_FFT_N];
 static float g_in_win[GTCRN_FFT_N];
 static float g_ola_tail[GTCRN_HOP];
+static float g_prev_dry[GTCRN_HOP];
 static float g_in_accum[GTCRN_HOP];
 static float g_out_ready[GTCRN_HOP];
 static int g_in_pos = 0;
 static int g_out_pos = 0;
-static int g_have_output = 0;
+/* Keep the same output timeline after a runtime fallback. */
+static int g_stream_started = 0;
 
 /* Gentle level conditioning so whispered speech stays in GTCRN's trained dynamic range */
 static float g_pre_gain = 1.0f;
-static float g_wet_mix = 1.0f;
+static float g_prev_gain = 1.0f;
+static float g_wet_mix = GTCRN_DEFAULT_WET;
 
 /* Runtime state & metrics */
 static int g_enabled = 0;
@@ -167,13 +172,14 @@ static void reset_streaming_state(void) {
     memset(g_inter_buf, 0, sizeof(g_inter_buf));
     memset(g_in_win, 0, sizeof(g_in_win));
     memset(g_ola_tail, 0, sizeof(g_ola_tail));
+    memset(g_prev_dry, 0, sizeof(g_prev_dry));
     memset(g_in_accum, 0, sizeof(g_in_accum));
     memset(g_out_ready, 0, sizeof(g_out_ready));
     g_ping = 0;
     g_in_pos = 0;
-    g_out_pos = 0;
-    g_have_output = 0;
+    g_out_pos = GTCRN_BLOCK;
     g_pre_gain = 1.0f;
+    g_prev_gain = 1.0f;
 }
 
 int gtcrn_ns_init(void) {
@@ -187,6 +193,8 @@ int gtcrn_ns_init(void) {
     g_consec_misses = 0;
     g_fallback_events = 0;
     g_active = 0;
+    g_stream_started = 0;
+    g_wet_mix = GTCRN_DEFAULT_WET;
 
     const char *disable_env = getenv("ATRIOS_GTCRN_DISABLE");
     if ((disable_env && strcmp(disable_env, "1") == 0) || access(ROLLBACK_FLAG, F_OK) == 0) {
@@ -198,8 +206,9 @@ int gtcrn_ns_init(void) {
 
     const char *wet_env = getenv("ATRIOS_GTCRN_WET");
     if (wet_env && wet_env[0]) {
-        float w = strtof(wet_env, NULL);
-        if (w >= 0.0f && w <= 1.0f) g_wet_mix = w;
+        char *end;
+        float w = strtof(wet_env, &end);
+        if (end != wet_env && *end == '\0' && w >= 0.0f && w <= 1.0f) g_wet_mix = w;
     }
 
     g_enabled = 1;
@@ -291,6 +300,7 @@ int gtcrn_ns_init(void) {
     }
 
     g_active = 1;
+    g_stream_started = 1;
     snprintf(g_mode, sizeof(g_mode), "%s", "active");
     fprintf(stderr, "[gtcrn] streaming GTCRN active (ort=%s model=%s wet=%.2f rss_kb=%ld)\n",
             base->GetVersionString ? base->GetVersionString() : "?",
@@ -298,7 +308,7 @@ int gtcrn_ns_init(void) {
     return 1;
 }
 
-static void gtcrn_run_hop(const float *hop_in_s16, float *hop_out_s16) {
+static int gtcrn_run_hop(const float *hop_in_s16, float *hop_out_s16) {
     /* Compute RMS to gently boost whispered speech into GTCRN's trained level range */
     double sum_sq = 0.0;
     for (int i = 0; i < GTCRN_HOP; i++) {
@@ -313,7 +323,9 @@ static void gtcrn_run_hop(const float *hop_in_s16, float *hop_out_s16) {
     float alpha = (tgt_gain < g_pre_gain) ? 0.35f : 0.08f;
     g_pre_gain += alpha * (tgt_gain - g_pre_gain);
     const float inv_scale = g_pre_gain / 32768.0f;
-    const float out_scale = 32768.0f / g_pre_gain;
+    /* The reconstructed hop belongs to the previous input window. */
+    const float out_scale = 32768.0f / g_prev_gain;
+    g_prev_gain = g_pre_gain;
 
     /* Shift 512-sample analysis window by 256 samples */
     memmove(g_in_win, g_in_win + GTCRN_HOP, GTCRN_HOP * sizeof(float));
@@ -352,8 +364,7 @@ static void gtcrn_run_hop(const float *hop_in_s16, float *hop_out_s16) {
         g_active = 0;
         g_fallback_events++;
         snprintf(g_mode, sizeof(g_mode), "%s", "fallback_runtime_error");
-        memcpy(hop_out_s16, hop_in_s16, GTCRN_HOP * sizeof(float));
-        return;
+        return 0;
     }
     g_ping = nxt;
 
@@ -371,8 +382,7 @@ static void gtcrn_run_hop(const float *hop_in_s16, float *hop_out_s16) {
             snprintf(g_mode, sizeof(g_mode), "%s", "fallback_overrun");
             fprintf(stderr, "[gtcrn] real-time overrun (%llu consecutive hops > 16ms, last=%.2fms); engaging fallback to AEC/BNR\n",
                     (unsigned long long)g_consec_misses, dt / 1000.0);
-            memcpy(hop_out_s16, hop_in_s16, GTCRN_HOP * sizeof(float));
-            return;
+            return 0;
         }
     } else {
         g_consec_misses = 0;
@@ -389,40 +399,49 @@ static void gtcrn_run_hop(const float *hop_in_s16, float *hop_out_s16) {
     }
     fft512(re, im, 1);
 
-    int non_finite = 0;
     for (int i = 0; i < GTCRN_HOP; i++) {
         float y = (g_ola_tail[i] + re[i] * g_win[i]) * out_scale;
-        g_ola_tail[i] = re[i + GTCRN_HOP] * g_win[i + GTCRN_HOP];
         if (!isfinite(y)) {
-            non_finite = 1;
-            y = hop_in_s16[i];
+            g_active = 0;
+            g_fallback_events++;
+            snprintf(g_mode, sizeof(g_mode), "%s", "fallback_runtime_error");
+            fprintf(stderr, "[gtcrn] non-finite output; fallback to AEC/BNR\n");
+            return 0;
         }
-        hop_out_s16[i] = g_wet_mix * y + (1.0f - g_wet_mix) * hop_in_s16[i];
+        g_ola_tail[i] = re[i + GTCRN_HOP] * g_win[i + GTCRN_HOP];
+        hop_out_s16[i] = y;
     }
-    if (non_finite) {
-        reset_streaming_state();
+    return 1;
+}
+
+static void gtcrn_render_hop(const float *in, float *out) {
+    if (g_active && gtcrn_run_hop(in, out)) {
+        for (int i = 0; i < GTCRN_HOP; i++) {
+            out[i] = g_wet_mix * out[i] + (1.0f - g_wet_mix) * g_prev_dry[i];
+        }
+    } else {
+        memcpy(out, g_prev_dry, sizeof(g_prev_dry));
     }
+    memcpy(g_prev_dry, in, sizeof(g_prev_dry));
+}
+
+int gtcrn_ns_is_active(void) {
+    return g_active;
 }
 
 void gtcrn_ns_process_128(float *blk128) {
-    if (!g_active || !blk128) return;
+    if (!g_stream_started || !blk128) return;
 
-    /* Copy incoming 128 samples into 256-sample hop accumulator */
-    memcpy(g_in_accum + g_in_pos, blk128, 128 * sizeof(float));
-    g_in_pos += 128;
-
+    memcpy(g_in_accum + g_in_pos, blk128, GTCRN_BLOCK * sizeof(float));
+    g_in_pos += GTCRN_BLOCK;
     if (g_in_pos == GTCRN_HOP) {
-        gtcrn_run_hop(g_in_accum, g_out_ready);
+        gtcrn_render_hop(g_in_accum, g_out_ready);
         g_in_pos = 0;
         g_out_pos = 0;
-        g_have_output = 1;
     }
 
-    if (g_active && g_have_output) {
-        memcpy(blk128, g_out_ready + g_out_pos, 128 * sizeof(float));
-        g_out_pos += 128;
-        if (g_out_pos >= GTCRN_HOP) g_out_pos = 0;
-    }
+    memcpy(blk128, g_out_ready + g_out_pos, GTCRN_BLOCK * sizeof(float));
+    g_out_pos += GTCRN_BLOCK;
 }
 
 void gtcrn_ns_get_metrics(gtcrn_metrics_t *out) {
@@ -437,7 +456,7 @@ void gtcrn_ns_get_metrics(gtcrn_metrics_t *out) {
     out->infer_ms_max = g_infer_us_max / 1000.0;
     out->rtf_avg = out->infer_ms_avg / 16.0;
     out->rtf_max = out->infer_ms_max / 16.0;
-    out->queue_ms = g_active ? (16.0 + out->infer_ms_last) : 0.0;
+    out->queue_ms = g_stream_started ? (24.0 + (g_active ? out->infer_ms_last : 0.0)) : 0.0;
     out->deadline_misses = g_deadline_misses;
     out->fallback_events = g_fallback_events;
     out->rss_kb = read_rss_kb();
@@ -467,12 +486,16 @@ int gtcrn_ns_process_raw_file(const char *in_path, const char *out_path) {
     struct timespec cpu0, cpu1;
     clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &cpu0);
 
-    size_t nread;
-    while ((nread = fread(s16_in, sizeof(int16_t), GTCRN_HOP, fi)) > 0) {
+    size_t nread, pending = 0;
+    /* Skip the leading STFT delay and flush the last input hop at EOF. */
+    do {
+        nread = fread(s16_in, sizeof(int16_t), GTCRN_HOP, fi);
+        if (!nread && !pending) break;
         for (size_t i = 0; i < nread; i++) f_in[i] = (float)s16_in[i];
         for (size_t i = nread; i < GTCRN_HOP; i++) f_in[i] = 0.0f;
-        gtcrn_run_hop(f_in, f_out);
-        if (hop_ms) {
+        const uint64_t hops_before = g_hops;
+        gtcrn_render_hop(f_in, f_out);
+        if (hop_ms && g_hops != hops_before) {
             if (cnt == cap) {
                 cap *= 2;
                 double *nb = (double *)realloc(hop_ms, cap * sizeof(double));
@@ -480,14 +503,15 @@ int gtcrn_ns_process_raw_file(const char *in_path, const char *out_path) {
             }
             if (cnt < cap) hop_ms[cnt++] = g_infer_us_last / 1000.0;
         }
-        for (size_t i = 0; i < nread; i++) {
+        for (size_t i = 0; i < pending; i++) {
             float v = f_out[i];
             if (v > 32767.0f) v = 32767.0f;
             if (v < -32768.0f) v = -32768.0f;
             s16_out[i] = (int16_t)v;
         }
-        fwrite(s16_out, sizeof(int16_t), nread, fo);
-    }
+        fwrite(s16_out, sizeof(int16_t), pending, fo);
+        pending = nread;
+    } while (nread);
 
     clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &cpu1);
     double cpu_ms = ((double)(cpu1.tv_sec - cpu0.tv_sec) * 1e3) +
@@ -536,4 +560,5 @@ void gtcrn_ns_shutdown(void) {
         g_dl = NULL;
     }
     g_active = 0;
+    g_stream_started = 0;
 }

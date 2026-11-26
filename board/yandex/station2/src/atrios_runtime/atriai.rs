@@ -1,14 +1,15 @@
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, VecDeque};
 use std::fs;
 use std::io::{Read, Write};
 use std::net::UdpSocket;
-use std::os::raw::c_int;
+use std::os::raw::{c_int, c_long};
 use std::os::unix::io::AsRawFd;
 use std::os::unix::net::UnixDatagram;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicUsize, Ordering};
-use std::sync::{mpsc, Mutex, OnceLock};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -39,8 +40,10 @@ const VOLUME_FILE: &str = "/var/lib/atrios/volume";
 
 static BUTTON_TRIGGERED: AtomicBool = AtomicBool::new(false);
 static WAKE_TRIGGERED: AtomicBool = AtomicBool::new(false);
+static VOICE_STOPPED: AtomicBool = AtomicBool::new(false);
 static RESUME_VISUAL: AtomicBool = AtomicBool::new(false);
 static CAPTURE_FD: AtomicI32 = AtomicI32::new(-1);
+static CAPTURE_DRAIN: Mutex<()> = Mutex::new(());
 static CAPTURE_FRAME_BYTES: AtomicUsize = AtomicUsize::new(FRAME_BYTES);
 
 extern "C" fn on_sigusr1(_sig: c_int) {
@@ -117,11 +120,15 @@ pub fn load_config() -> AiConfig {
         eprintln!("[atriai] direct LAN/HTTP server rejected ({}); forcing encrypted gateway https://ai.leftymods.tech", cfg.server);
         cfg.server = "https://ai.leftymods.tech".into();
     }
-    if cfg.vad_threshold >= 600.0 {
-        cfg.vad_threshold = 320.0;
+    let defaults = AiConfig::default();
+    if !(1.0..600.0).contains(&cfg.vad_threshold) {
+        cfg.vad_threshold = defaults.vad_threshold;
     }
-    if cfg.min_speech_ms >= 380.0 {
-        cfg.min_speech_ms = 260.0;
+    if !(1.0..=5000.0).contains(&cfg.silence_ms) {
+        cfg.silence_ms = defaults.silence_ms;
+    }
+    if !(0.0..380.0).contains(&cfg.min_speech_ms) {
+        cfg.min_speech_ms = defaults.min_speech_ms;
     }
     cfg
 }
@@ -195,7 +202,7 @@ fn normalize_text(text: &str) -> Vec<String> {
 
 const ATRI_ALIASES: &[&str] = &[
     "атри", "atri", "atria",
-    "арти", "атриум", "натрий", "астры",
+    "арти",
     "атря", "атрия", "атре", "атрий", "атрии",
     "отри", "этри", "этрий",
     "адри", "антри", "артри", "актри",
@@ -376,6 +383,11 @@ pub fn matches_wake_word(text: &str, wake_word: &str) -> bool {
         return false;
     }
     let lead = words[idx..].join(" ");
+    if cands.iter().any(|c| c == "atri" || c == "атри")
+        && matches!(lead.as_str(), "а три ум" | "атри ум")
+    {
+        return false;
+    }
     let norm = words.join(" ");
     for c in &cands {
         if lead == *c || lead.starts_with(&format!("{c} ")) {
@@ -470,6 +482,50 @@ pub fn strip_wake_word(text: &str, wake_word: &str) -> String {
         rest.pop();
     }
     rest.join(" ")
+}
+
+#[repr(C)]
+struct VoiceTimespec {
+    tv_sec: c_long,
+    tv_nsec: c_long,
+}
+
+extern "C" {
+    fn clock_gettime(clock_id: c_int, ts: *mut VoiceTimespec) -> c_int;
+}
+
+fn voice_timing(event: &str) {
+    const CLOCK_MONOTONIC: c_int = 1;
+    let mut ts = VoiceTimespec { tv_sec: 0, tv_nsec: 0 };
+    if unsafe { clock_gettime(CLOCK_MONOTONIC, &mut ts) } == 0 {
+        println!("[voice-timing] event={event} monotonic={}.{:09}", ts.tv_sec, ts.tv_nsec);
+    }
+}
+
+pub(crate) fn should_retry_wake(text: &str, had_unk: bool) -> bool {
+    let words = normalize_text(text);
+    let lead: Vec<&str> = words.iter().map(String::as_str)
+        .skip_while(|w| FILLERS.contains(w))
+        .collect();
+    match lead.as_slice() {
+        ["атриум" | "atrium" | "натрий" | "астры", ..] => false,
+        ["а", "три", "ум"] | ["атри", "ум"] => false,
+        ["три" | "тре" | "дри" | "а" | "ат", ..] => true,
+        [] => true,
+        _ => had_unk,
+    }
+}
+
+pub(crate) fn voice_endpoint_silence_ms(wake_mode: bool, utterance_ms: f64, music_on: bool, configured: f64) -> f64 {
+    if wake_mode && utterance_ms <= 900.0 {
+        if music_on { 160.0 } else { 128.0 }
+    } else if wake_mode {
+        if music_on { 224.0 } else { 192.0 }
+    } else if utterance_ms <= 960.0 {
+        192.0
+    } else {
+        configured.clamp(240.0, 350.0)
+    }
 }
 
 fn is_wake_word_only(text: &str, wake_word: &str) -> bool {
@@ -1134,6 +1190,9 @@ fn downsample_48k_8ch_s32_to_16k_s16(raw: &[u8]) -> Vec<u8> {
 }
 
 fn read_capture_frames_now() -> Vec<Vec<u8>> {
+    let Ok(_guard) = CAPTURE_DRAIN.try_lock() else {
+        return Vec::new();
+    };
     let mut frames = Vec::new();
     let fd = CAPTURE_FD.load(Ordering::SeqCst);
     if fd < 0 {
@@ -1195,6 +1254,95 @@ pub fn is_barge_in_stop(asr_text: &str, tts_answer: &str) -> bool {
     false
 }
 
+pub(crate) fn is_immediate_stop(text: &str, wake_word: &str) -> bool {
+    let is_stop = |s: &str| matches!(s, "стоп" | "stop" | "с топ");
+    is_stop(&normalize_text(text).join(" ")) || is_stop(&strip_wake_word(text, wake_word))
+}
+
+fn stop_voice_and_playback() {
+    VOICE_STOPPED.store(true, Ordering::SeqCst);
+    WAKE_TRIGGERED.store(false, Ordering::SeqCst);
+    if crate::local_ai::is_ringing() {
+        crate::local_ai::stop_ringing();
+    }
+    send_bt_cmd("stop");
+    if crate::ymusic::is_active() {
+        let _ = crate::ymusic::trigger_control("stop");
+    }
+    voice_timing("stop_accepted");
+    println!("[voice] stop accepted");
+}
+
+/// Listen for a short local stop utterance while the main voice loop is waiting
+/// for a request or streaming audio. The regular VAD owns capture otherwise.
+struct StopListener {
+    pre_roll: VecDeque<Vec<u8>>,
+    phrase: Vec<u8>,
+    quiet_frames: usize,
+    noise: f64,
+    result: Option<mpsc::Receiver<bool>>,
+}
+
+impl StopListener {
+    fn new() -> Self {
+        Self {
+            pre_roll: VecDeque::with_capacity(3),
+            phrase: Vec::new(),
+            quiet_frames: 0,
+            noise: 160.0,
+            result: None,
+        }
+    }
+
+    fn detected(&mut self) -> bool {
+        if is_mic_muted() || !crate::local_stt::is_available() {
+            return false;
+        }
+        if let Some(result) = &self.result {
+            match result.try_recv() {
+                Ok(true) => return true,
+                Ok(false) | Err(mpsc::TryRecvError::Disconnected) => self.result = None,
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
+        for chunk in read_capture_frames_now() {
+            let rms = pcm16_rms(&chunk);
+            let onset = (self.noise * 1.55 + 55.0).clamp(150.0, 1200.0);
+            if self.phrase.is_empty() && rms < onset {
+                self.noise = (self.noise * 0.94 + rms * 0.06).clamp(55.0, 1100.0);
+                if self.pre_roll.len() == 3 {
+                    self.pre_roll.pop_front();
+                }
+                self.pre_roll.push_back(chunk);
+                continue;
+            }
+            if self.phrase.is_empty() {
+                for frame in self.pre_roll.drain(..) {
+                    self.phrase.extend_from_slice(&frame);
+                }
+            }
+            self.phrase.extend_from_slice(&chunk);
+            if rms < onset * 0.75 {
+                self.quiet_frames += 1;
+            } else {
+                self.quiet_frames = 0;
+            }
+            if self.quiet_frames >= 2 || self.phrase.len() >= SR * 2 {
+                let pcm = std::mem::take(&mut self.phrase);
+                self.quiet_frames = 0;
+                if self.result.is_none() {
+                    let (tx, rx) = mpsc::channel();
+                    self.result = Some(rx);
+                    thread::spawn(move || {
+                        let _ = tx.send(crate::local_stt::detects_stop(&pcm));
+                    });
+                }
+            }
+        }
+        false
+    }
+}
+
 fn play_audio_bytes(
     data: &[u8],
     tts_answer: &str,
@@ -1225,6 +1373,7 @@ fn play_audio_bytes(
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
 
+    let barge_available = crate::local_stt::is_available() || !server_base.is_empty();
     let s_base = server_base.to_string();
     let s_tok = token.to_string();
     let s_ca = ca_file.to_string();
@@ -1237,6 +1386,10 @@ fn play_audio_bytes(
         let ans = s_ans.clone();
         thread::spawn(move || {
             let hit = if crate::local_stt::is_available() {
+                if crate::local_stt::detects_stop(&pcm) {
+                    let _ = tx.send(true);
+                    return;
+                }
                 match crate::local_stt::transcribe_pcm16(&pcm) {
                     Ok(txt) => {
                         let t = txt.trim();
@@ -1295,7 +1448,7 @@ fn play_audio_bytes(
         loop {
             match child.try_wait() {
                 Ok(Some(status)) => {
-                    if in_barge && barge_buf.len() >= (SR * 2) * 200 / 1000 && !server_base.is_empty() {
+                    if in_barge && barge_buf.len() >= (SR * 2) * 200 / 1000 && barge_available {
                         let avg_rms = barge_rms_sum / (barge_frames.max(1) as f64);
                         let seg = std::mem::take(&mut barge_buf);
                         if barge_rx.is_none() {
@@ -1306,6 +1459,7 @@ fn play_audio_bytes(
                     }
                     if let Some(rx) = barge_rx.take() {
                         if let Ok(true) = rx.recv_timeout(Duration::from_millis(650)) {
+                            stop_voice_and_playback();
                             println!("[atriai] voice barge-in STOP at end of playback -> clock");
                             set_error("audio", None, "", 120);
                             return Ok(false);
@@ -1313,6 +1467,7 @@ fn play_audio_bytes(
                     }
                     if let Some((pcm, _)) = pending_barge.take() {
                         if let Ok(true) = spawn_barge_asr(pcm).recv_timeout(Duration::from_millis(650)) {
+                            stop_voice_and_playback();
                             println!("[atriai] voice barge-in STOP queued at end of playback -> clock");
                             set_error("audio", None, "", 120);
                             return Ok(false);
@@ -1342,6 +1497,7 @@ fn play_audio_bytes(
                                 println!("[atriai] voice barge-in STOP detected during playback -> silenced -> clock");
                                 let _ = child.kill();
                                 let _ = child.wait();
+                                stop_voice_and_playback();
                                 set_error("audio", None, "", 120);
                                 return Ok(false);
                             }
@@ -1418,8 +1574,8 @@ fn play_audio_bytes(
                                 barge_silence_ms += 32.0;
                             }
                             let dur_ms = (barge_buf.len() * 1000) / (SR * 2);
-                            if barge_silence_ms >= 160.0 || dur_ms >= 850 {
-                                if dur_ms >= 200 && !server_base.is_empty() {
+                            if barge_silence_ms >= 64.0 || dur_ms >= 850 {
+                                if dur_ms >= 200 && barge_available {
                                     let avg_rms = barge_rms_sum / (barge_frames.max(1) as f64);
                                     let seg = std::mem::take(&mut barge_buf);
                                     if barge_rx.is_none() {
@@ -1691,7 +1847,18 @@ fn stream_tts_and_play(
     let mut interrupted = false;
     let mut visual_started = false;
 
-    let cancel_cb = || BUTTON_TRIGGERED.load(Ordering::SeqCst);
+    let stop_listener = RefCell::new(StopListener::new());
+    let voice_stopped = Cell::new(false);
+    let cancel_cb = || {
+        if voice_stopped.get() || BUTTON_TRIGGERED.load(Ordering::SeqCst) {
+            return true;
+        }
+        if stop_listener.borrow_mut().detected() {
+            voice_stopped.set(true);
+            return true;
+        }
+        false
+    };
     let stream_res = request_stream(
         &format!("{base}/tts/stream"),
         Some(payload.as_bytes()),
@@ -1704,7 +1871,7 @@ fn stream_tts_and_play(
             if chunk.is_empty() {
                 return Ok(());
             }
-            if BUTTON_TRIGGERED.load(Ordering::SeqCst) {
+            if cancel_cb() {
                 interrupted = true;
                 return Err("interrupted".into());
             }
@@ -1756,12 +1923,22 @@ fn stream_tts_and_play(
         },
     );
 
+    interrupted |= cancel_cb();
     if let Some(mut ch) = aplay {
         drop(ch.stdin.take());
+        while !interrupted && matches!(ch.try_wait(), Ok(None)) {
+            thread::sleep(Duration::from_millis(20));
+            interrupted = cancel_cb();
+        }
         if interrupted {
             let _ = ch.kill();
         }
         let _ = ch.wait();
+    }
+    if voice_stopped.get() {
+        stop_voice_and_playback();
+    } else if interrupted {
+        let _ = consume_button_trigger();
     }
     if visual_started {
         send_voice_level(None);
@@ -1836,39 +2013,36 @@ pub fn speak_via_remote_tts(text: &str, emotion: &str, keep_visual: bool) -> boo
             }
             Err(_) => {
                 // Only fall back to legacy /tts WAV when server returned 404 (older server)
-                let tok = cfg.token.clone();
-        let ca = cfg.ca_file.clone();
-        let auth = format!("Bearer {tok}");
-        let mut h = vec![("Content-Type", "application/json"), ("Accept", "audio/wav")];
-        if !tok.is_empty() {
-            h.push(("Authorization", auth.as_str()));
-        }
-        let ca_opt = if ca.is_empty() { None } else { Some(ca.as_str()) };
-        let payload = obj(vec![
-            ("text", Json::Str(text.to_string())),
-            ("emotion", Json::Str(emotion.to_string())),
-        ])
-        .to_string_compact();
-        match request_bytes(
-            &format!("{base}/tts"),
-            Some(payload.as_bytes()),
-            &h,
-            ca_opt,
-            8,
-            4 * 1024 * 1024,
-            None,
-        ) {
-            Ok(b) if parse_wav(&b).is_ok() => {
-                println!("[local-ai] GPU TTS speaking ({} bytes): {text:?}", b.len());
-                play_spoken_wav(&b, text, emotion, keep_visual, &base, &cfg.token, &cfg.ca_file);
-                return true;
-            }
-            Ok(_) => {}
-            Err(e) => {
-                REMOTE_DOWN_UNTIL.store(now_unix_i64() + 45, Ordering::Relaxed);
-                println!("[local-ai] GPU TTS unreachable ({e}); offline fallback 45s");
-            }
-        }
+                let url = format!("{base}/tts");
+                let token = cfg.token.clone();
+                let ca = cfg.ca_file.clone();
+                let payload = obj(vec![
+                    ("text", Json::Str(text.to_string())),
+                    ("emotion", Json::Str(emotion.to_string())),
+                ])
+                .to_string_compact();
+                let audio = voice_call(move |cancel| {
+                    let auth = format!("Bearer {token}");
+                    let mut h = vec![("Content-Type", "application/json"), ("Accept", "audio/wav")];
+                    if !token.is_empty() {
+                        h.push(("Authorization", auth.as_str()));
+                    }
+                    let ca_opt = if ca.is_empty() { None } else { Some(ca.as_str()) };
+                    request_bytes(&url, Some(payload.as_bytes()), &h, ca_opt, 8, 4 * 1024 * 1024, Some(cancel))
+                });
+                match audio {
+                    Ok(b) if parse_wav(&b).is_ok() => {
+                        println!("[local-ai] GPU TTS speaking ({} bytes): {text:?}", b.len());
+                        play_spoken_wav(&b, text, emotion, keep_visual, &base, &cfg.token, &cfg.ca_file);
+                        return true;
+                    }
+                    Ok(_) => {}
+                    Err(e) if e.starts_with("InterruptedError") => return true,
+                    Err(e) => {
+                        REMOTE_DOWN_UNTIL.store(now_unix_i64() + 45, Ordering::Relaxed);
+                        println!("[local-ai] GPU TTS unreachable ({e}); offline fallback 45s");
+                    }
+                }
             }
         }
     }
@@ -2076,7 +2250,9 @@ impl Drop for VoiceBusyGuard {
     }
 }
 
-fn voice_call<T: Send + 'static>(f: impl FnOnce() -> Result<T, String> + Send + 'static) -> Result<T, String> {
+fn voice_call<T: Send + 'static>(
+    f: impl FnOnce(&dyn Fn() -> bool) -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
     if VOICE_BUSY
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_err()
@@ -2084,19 +2260,29 @@ fn voice_call<T: Send + 'static>(f: impl FnOnce() -> Result<T, String> + Send + 
         return Err("Previous HTTPS request is still finishing; retry shortly".into());
     }
     let (tx, rx) = mpsc::channel();
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let worker_cancelled = Arc::clone(&cancelled);
     thread::spawn(move || {
         let _g = VoiceBusyGuard;
-        let _ = tx.send(f());
+        let _ = tx.send(f(&|| worker_cancelled.load(Ordering::Relaxed)));
     });
+    let mut stop_listener = StopListener::new();
     let deadline = Instant::now() + Duration::from_secs(26);
     loop {
         if Instant::now() > deadline {
+            cancelled.store(true, Ordering::Relaxed);
             return Err("TimeoutError: HTTPS voice request deadline exceeded".into());
         }
+        if stop_listener.detected() {
+            cancelled.store(true, Ordering::Relaxed);
+            stop_voice_and_playback();
+            return Err("InterruptedError: Voice stop".into());
+        }
         if consume_button_trigger() || is_mic_muted() {
+            cancelled.store(true, Ordering::Relaxed);
             return Err("InterruptedError: Voice request cancelled".into());
         }
-        match rx.recv_timeout(Duration::from_millis(50)) {
+        match rx.recv_timeout(Duration::from_millis(25)) {
             Ok(res) => return res,
             Err(mpsc::RecvTimeoutError::Timeout) => check_resume_visual(),
             Err(mpsc::RecvTimeoutError::Disconnected) => return Err("Voice worker failed".into()),
@@ -2148,6 +2334,7 @@ fn send_phrase_to_server(
     force_active: bool,
     streamed_command: Option<(String, bool)>,
 ) -> Result<(String, String, bool), String> {
+    VOICE_STOPPED.store(false, Ordering::SeqCst);
     if pcm.len() > SR * 2 * 30 || pcm.len() % 2 != 0 {
         return Err("Invalid or oversized PCM16 phrase".into());
     }
@@ -2157,17 +2344,31 @@ fn send_phrase_to_server(
         return Err("No local STT model and no HTTPS server configured".into());
     }
     let cfg = load_config();
+    // The constrained result is ready when VAD ends, even in a follow-up.
+    // Give an isolated STOP priority before running unconstrained decoding.
+    let short_control = pcm.len() <= SR * 2 * 14 / 10
+        && (force_active || crate::local_ai::is_ringing() || playback_running());
+    if streamed_command.as_ref().is_some_and(|(text, unk)| {
+        !unk && is_immediate_stop(text, &cfg.wake_word)
+    }) || (short_control && crate::local_stt::detects_stop(pcm)) {
+        stop_voice_and_playback();
+        send_bt_cmd("unduck");
+        set_vad_visual("idle", false, "default");
+        return Ok((String::new(), String::new(), false));
+    }
     let base = server_url.trim_end_matches('/').to_string();
     let mut keep_listening = false;
     let mut user_addressed = force_active || wake_word.is_empty();
 
     let res: Result<(String, String, bool), String> = (|| {
         let mut had_unk = false;
+        let mut used_full_stt = false;
         let mut text = if use_local_stt {
             let t0 = Instant::now();
             let (t, unk) = if force_active || wake_word.is_empty() {
                 match crate::local_stt::transcribe_pcm16(pcm) {
                     Ok(full) if !full.is_empty() => {
+                        used_full_stt = true;
                         let unk = full.split_whitespace().any(|w| w == "[unk]");
                         println!("[local-stt] full ({}ms) text={full:?}", t0.elapsed().as_millis());
                         (full, unk)
@@ -2183,6 +2384,7 @@ fn send_phrase_to_server(
                 crate::local_stt::transcribe_command_pcm16(pcm)?
             };
             had_unk = unk;
+            voice_timing("stt_final");
             if !(force_active || wake_word.is_empty()) {
                 println!("[local-stt] fast/streamed ({}ms, unk={unk}) text={t:?}", t0.elapsed().as_millis());
             }
@@ -2192,14 +2394,14 @@ fn send_phrase_to_server(
             let base1 = base.clone();
             let tok1 = cfg.token.clone();
             let ca1 = cfg.ca_file.clone();
-            let raw_asr = voice_call(move || {
+            let raw_asr = voice_call(move |cancel| {
                 let auth = format!("Bearer {tok1}");
                 let mut h = vec![("Content-Type", "audio/wav"), ("Accept", "application/json")];
                 if !tok1.is_empty() {
                     h.push(("Authorization", &auth));
                 }
                 let ca = if ca1.is_empty() { None } else { Some(ca1.as_str()) };
-                request_bytes(&format!("{base1}/asr"), Some(&wav), &h, ca, 25, 65536, None)
+                request_bytes(&format!("{base1}/asr"), Some(&wav), &h, ca, 25, 65536, Some(cancel))
             })?;
             let rec_txt = String::from_utf8(raw_asr).map_err(|_| "Invalid UTF-8 ASR response")?;
             let rec = Json::parse(&rec_txt)?;
@@ -2207,6 +2409,15 @@ fn send_phrase_to_server(
             println!("[stt] text={t:?}");
             t
         };
+
+        if is_immediate_stop(&text, &cfg.wake_word)
+            && (!had_unk || crate::local_stt::transcribe_pcm16(pcm)
+                .is_ok_and(|full| is_immediate_stop(&full, &cfg.wake_word)))
+        {
+            stop_voice_and_playback();
+            set_error("voice", None, "", 15);
+            return Ok((text, String::new(), false));
+        }
 
         if crate::local_ai::is_ringing()
             && (is_cancel_phrase(&text)
@@ -2236,7 +2447,7 @@ fn send_phrase_to_server(
             return Ok((text, String::new(), false));
         }
 
-        if text.is_empty() {
+        if text.is_empty() && !(use_local_stt && !wake_word.is_empty()) {
             set_error("voice", None, "", 15);
             if force_active {
                 keep_listening = true;
@@ -2245,42 +2456,48 @@ fn send_phrase_to_server(
             }
             return Ok((text, String::new(), false));
         }
-        if !wake_word.is_empty() && !matches_wake_word(&text, wake_word) {
-            println!("[wake] ignored background speech ({wake_word:?}): {text:?}");
-            set_error("voice", None, "", 15);
-            return Ok((text, String::new(), false));
-        }
-        // Two-stage offline wake verification: constrained grammar (cmd_rec) can hallucinate
-        // wake proxies ("а три", "арти") on casual out-of-vocabulary speech. Verify with the
-        // unconstrained Russian Vosk model before lighting up the LED ring or acting.
-        let mut verified_wake_only = is_wake_word_only(&text, wake_word);
-        if use_local_stt && !wake_word.is_empty() {
-            if let Ok(full_text) = crate::local_stt::transcribe_pcm16(pcm) {
+        if !wake_word.is_empty() {
+            let fast_match = matches_wake_word(&text, wake_word);
+            let pcm_ms = (pcm.len() * 1000) / (SR * 2);
+            let retry = if pcm_ms <= 1600 {
+                should_retry_wake(&text, had_unk)
+            } else {
+                // Recover a clipped or missed wake followed by a command, but
+                // avoid re-decoding every unknown word in a long background clip.
+                !text.is_empty() && should_retry_wake(&text, false)
+            };
+            if !fast_match && !(use_local_stt && retry) {
+                println!("[wake] ignored background speech ({wake_word:?}): {text:?}");
+                set_error("voice", None, "", 15);
+                return Ok((text, String::new(), false));
+            }
+            if use_local_stt {
+                let full_text = crate::local_stt::transcribe_pcm16(pcm)?;
+                used_full_stt = true;
+                voice_timing("stt_verification_final");
                 if !matches_wake_word(&full_text, wake_word) {
-                    println!(
-                        "[wake] rejected false-positive offline match (fast={text:?}, unk={had_unk}, full={full_text:?})"
-                    );
+                    println!("[wake] rejected offline match (fast={text:?}, full={full_text:?})");
                     set_error("voice", None, "", 15);
                     return Ok((String::new(), String::new(), false));
                 }
-                if verified_wake_only {
-                    let pcm_ms = (pcm.len() * 1000) / (SR * 2);
-                    if had_unk || pcm_ms > 2400 || !is_wake_word_only(&full_text, wake_word) {
-                        verified_wake_only = false;
-                    }
+                if !fast_match {
+                    println!("[wake] recovered by full recognizer ({full_text:?})");
                 }
                 had_unk = full_text.split_whitespace().any(|w| w == "[unk]");
                 text = full_text;
             }
         }
+        let verified_wake_only = pcm.len() <= SR * 2 * 24 / 10 && is_wake_word_only(&text, wake_word);
         user_addressed = true;
         if verified_wake_only {
             WAKE_TRIGGERED.store(true, Ordering::SeqCst);
             keep_listening = true;
+            voice_timing("wake_accepted");
             println!("[wake] activated ({text:?}) -> ActiveCommand (7s)");
             send_bt_cmd("duck");
             set_vad_visual("vad", false, "default");
             play_command_chime("wake");
+            voice_timing("wake_chime_finished");
             drain_capture_fd_now();
             set_error("voice", None, "", 15);
             return Ok((text, String::new(), true));
@@ -2317,7 +2534,7 @@ fn send_phrase_to_server(
             return Ok((text, String::new(), false));
         }
         // If user said "поставь <song>" and constrained grammar hit [unk], re-transcribe unconstrained for song title
-        let ym_text = if use_local_stt && had_unk && (clean_query.starts_with("поставь") || clean_query.starts_with("включи песню") || clean_query.starts_with("включи трек")) {
+        let ym_text = if use_local_stt && had_unk && !used_full_stt && (clean_query.starts_with("поставь") || clean_query.starts_with("включи песню") || clean_query.starts_with("включи трек")) {
             crate::local_stt::transcribe_pcm16(pcm).unwrap_or_else(|_| text.clone())
         } else {
             text.clone()
@@ -2373,7 +2590,7 @@ fn send_phrase_to_server(
         } else {
             clean_query.clone()
         };
-        if use_local_stt && had_unk {
+        if use_local_stt && had_unk && !used_full_stt {
             if let Ok(full_text) = crate::local_stt::transcribe_pcm16(pcm) {
                 let (full_clean, _) = split_trailing_stop(&full_text, wake_word);
                 if !full_clean.is_empty() {
@@ -2387,7 +2604,7 @@ fn send_phrase_to_server(
         let base2 = base.clone();
         let tok2 = cfg.token.clone();
         let ca2 = cfg.ca_file.clone();
-        let chat = voice_call(move || {
+        let chat = voice_call(move |cancel| {
             let auth = format!("Bearer {tok2}");
             let mut h = Vec::new();
             if !tok2.is_empty() {
@@ -2395,7 +2612,7 @@ fn send_phrase_to_server(
             }
             let ca = if ca2.is_empty() { None } else { Some(ca2.as_str()) };
             let payload = obj(vec![("text", Json::Str(q_text))]);
-            request_json(&format!("{base2}/chat"), Some(&payload), &h, ca, 25, 1024 * 1024, None)
+            request_json(&format!("{base2}/chat"), Some(&payload), &h, ca, 25, 1024 * 1024, Some(cancel))
         })?;
         let answer = chat
             .get_str("text")
@@ -2415,7 +2632,7 @@ fn send_phrase_to_server(
                 let ca3 = cfg.ca_file.clone();
                 let ans_c = answer.clone();
                 let emo_c = emotion.clone();
-                let audio = voice_call(move || {
+                let audio = voice_call(move |cancel| {
                     let auth = format!("Bearer {tok3}");
                     let mut h = vec![("Content-Type", "application/json"), ("Accept", "audio/wav")];
                     if !tok3.is_empty() {
@@ -2434,7 +2651,7 @@ fn send_phrase_to_server(
                         ca,
                         25,
                         8 * 1024 * 1024,
-                        None,
+                        Some(cancel),
                     )
                 })?;
                 parse_wav(&audio)?;
@@ -2445,7 +2662,10 @@ fn send_phrase_to_server(
             }
         };
         set_error("voice", None, "", 120);
-        if completed && !has_trailing_stop {
+        if !completed {
+            return Ok((text, String::new(), false));
+        }
+        if !has_trailing_stop {
             keep_listening = true;
             set_vad_visual("vad", false, "default");
             Ok((text, answer, true))
@@ -2458,6 +2678,11 @@ fn send_phrase_to_server(
         }
     })();
 
+    if VOICE_STOPPED.load(Ordering::SeqCst) {
+        send_bt_cmd("unduck");
+        set_vad_visual("idle", false, "default");
+        return Ok((String::new(), String::new(), false));
+    }
     if let Err(ref e) = res {
         if user_addressed && !e.starts_with("InterruptedError") {
             if use_local_stt {
@@ -2635,8 +2860,9 @@ impl VadProcessor {
                 let keep_floor = vad_thr * 0.45;
                 let start = (self.noise_rms * start_gain + start_offset)
                     .clamp(start_floor, start_ceiling);
+                let keep_ceiling = start * 0.80;
                 let keep = (self.noise_rms * keep_gain + keep_offset)
-                    .clamp(keep_floor, start * 0.80);
+                    .clamp(keep_floor.min(keep_ceiling), keep_ceiling);
                 (start, keep, 3200.0, 420.0)
             }
             PipelineMode::ActiveCommand => {
@@ -2650,9 +2876,28 @@ impl VadProcessor {
                 let keep_floor = vad_thr * 0.35;
                 let start = (self.noise_rms * start_gain + start_offset)
                     .clamp(start_floor, start_ceiling);
+                let keep_ceiling = start * 0.78;
                 let keep = (self.noise_rms * keep_gain + keep_offset)
-                    .clamp(keep_floor, start * 0.78);
+                    .clamp(keep_floor.min(keep_ceiling), keep_ceiling);
                 (start, keep, 8000.0, silence_cfg)
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn vad_thresholds_stay_ordered_in_a_quiet_room() {
+    let mut vad = VadProcessor::new();
+    for noise in [60.0, 160.0, 1800.0] {
+        vad.noise_rms = noise;
+        for music in [false, true] {
+            for mode in [PipelineMode::WakeSpotter, PipelineMode::ActiveCommand] {
+                for threshold in [1.0, 300.0, 320.0, 599.9] {
+                    let (start, keep, _, _) = vad.thresholds(mode, threshold, 550.0, music);
+                    assert!(keep.is_finite() && start.is_finite());
+                    assert!(keep > 0.0 && keep < start, "keep={keep}, start={start}");
+                }
             }
         }
     }
@@ -2807,11 +3052,9 @@ fn run_daemon() -> i32 {
         };
         let ww_cfg = cfg.wake_word.trim().to_string();
         let wake_required = !ww_cfg.is_empty() && !matches!(ww_cfg.to_ascii_lowercase().as_str(), "off" | "none" | "false");
-        // Stream the fast constrained Vosk recognizer alongside VAD so the
-        // wake animation can react before the utterance-end/final STT pass.
-        let wake_partial_enabled = wake_required && !force_active && crate::local_stt::is_available();
+        // Decode during capture, including follow-ups so STOP can be handled
+        // before the slower command recognition. Only a confirmed wake lights up.
         let mut wake_stream_started = false;
-        let mut wake_visual_lit = false;
         let mut wait_speech_ms = 0.0f64;
         let mut silence_ms = 0.0f64;
         let frame_ms = (FRAME_SAMPLES as f64 / SR as f64) * 1000.0;
@@ -2848,6 +3091,7 @@ fn run_daemon() -> i32 {
                     break;
                 }
                 force_active = true;
+                wake_stream_started = false;
                 mode = PipelineMode::ActiveCommand;
                 vad.wait_quiet_frames = 0;
                 empty_followups = 0;
@@ -2896,7 +3140,9 @@ fn run_daemon() -> i32 {
             if !speaking {
                 if vad.wait_quiet_frames > 0 && !force_active {
                     vad.update_noise(rms);
-                    if rms < keep_thr {
+                    // A continuous music bed may never drop below keep_thr.
+                    // During playback use a bounded cooldown instead.
+                    if music_on || rms < keep_thr {
                         vad.wait_quiet_frames -= 1;
                     } else {
                         vad.wait_quiet_frames = 10;
@@ -2920,18 +3166,9 @@ fn run_daemon() -> i32 {
                         buf.extend_from_slice(&chunk);
                         utt_rms.push(rms);
                         silence_ms = 0.0;
-                        if wake_partial_enabled {
-                            wake_stream_started = crate::local_stt::reset_command_stream();
-                            if wake_stream_started {
-                              if let Some(partial) = crate::local_stt::command_stream_partial(&buf) {
-                                if matches_wake_word(&partial, &ww_cfg) {
-                                    wake_visual_lit = true;
-                                    set_vad_visual("vad", false, "default");
-                                    println!("[wake] partial activation detected ({partial:?}) -> listening visual");
-                                }
-                              }
-                            }
-                        }
+                        voice_timing("vad_start");
+                        wake_stream_started = crate::local_stt::reset_command_stream()
+                            && crate::local_stt::feed_command_stream(&buf);
                         if force_active || !wake_required {
                             set_vad_visual("vad", false, "default");
                         }
@@ -2956,33 +3193,31 @@ fn run_daemon() -> i32 {
                 speech_hits = 0;
                 buf.extend_from_slice(&chunk);
                 utt_rms.push(rms);
-                if wake_partial_enabled && wake_stream_started && !wake_visual_lit {
-                    if let Some(partial) = crate::local_stt::command_stream_partial(&chunk) {
-                        if matches_wake_word(&partial, &ww_cfg) {
-                            wake_visual_lit = true;
-                            set_vad_visual("vad", false, "default");
-                            println!("[wake] partial activation detected ({partial:?}) -> listening visual");
-                        }
+                if wake_stream_started {
+                    // The stop command fits in a short segment. Longer follow-ups
+                    // go straight to the full recognizer.
+                    if mode == PipelineMode::ActiveCommand && buf.len() > SR * 2 * 14 / 10 {
+                        wake_stream_started = false;
+                    } else {
+                        wake_stream_started = crate::local_stt::feed_command_stream(&chunk);
                     }
                 }
                 if rms > utt_peak {
                     utt_peak = rms;
                 }
-                let eff_keep_thr = keep_thr.max((utt_peak * 0.18).min(680.0));
+                // A loud first syllable must not set a floor that cuts a
+                // quieter word later in the same utterance.
+                let eff_keep_thr = keep_thr.max((utt_peak * 0.10).min(keep_thr * 1.45));
                 if rms >= eff_keep_thr {
                     silence_ms = 0.0;
                 } else {
                     silence_ms += frame_ms;
                 }
                 let utt_ms = (buf.len() as f64) / ((SR * 2) as f64) * 1000.0;
-                let eff_end_silence_ms = match mode {
-                    PipelineMode::WakeSpotter => {
-                        if utt_ms <= 1100.0 { 100.0 } else { 145.0 }
-                    }
-                    PipelineMode::ActiveCommand => {
-                        if utt_ms <= 950.0 { 100.0 } else { end_silence_ms.min(200.0).max(140.0) }
-                    }
-                };
+                let eff_end_silence_ms = voice_endpoint_silence_ms(
+                    wake_required && mode == PipelineMode::WakeSpotter,
+                    utt_ms - silence_ms, music_on, end_silence_ms,
+                );
                 if silence_ms >= eff_end_silence_ms {
                     if buf.len() >= min_bytes {
                         break;
@@ -2993,10 +3228,6 @@ fn run_daemon() -> i32 {
                     utt_rms.clear();
                     silence_ms = 0.0;
                     wake_stream_started = false;
-                    if wake_visual_lit {
-                        wake_visual_lit = false;
-                        set_vad_visual("idle", false, "default");
-                    }
                 } else if utt_ms >= max_utt_ms {
                     hit_max_utt = true;
                     break;
@@ -3009,6 +3240,7 @@ fn run_daemon() -> i32 {
             continue;
         }
         if speaking && buf.len() >= min_bytes && !is_mic_muted() {
+            voice_timing("vad_end");
             let peak_rms = utt_rms.iter().copied().fold(0.0f64, f64::max);
             let mean_rms = utt_rms.iter().sum::<f64>() / (utt_rms.len().max(1) as f64);
             if !is_valid_speech(&utt_rms, vad.noise_rms, last_start_thr, music_on, mode) {
@@ -3024,10 +3256,6 @@ fn run_daemon() -> i32 {
                     set_vad_visual("idle", false, "default");
                     empty_followups = 0;
                 }
-                if wake_visual_lit {
-                    wake_visual_lit = false;
-                    set_vad_visual("idle", false, "default");
-                }
                 println!(
                     "[vad] rejected flat/noise: peak={peak_rms:.0} mean={mean_rms:.0} noise={:.0} thr={last_start_thr:.0}",
                     vad.noise_rms
@@ -3041,7 +3269,9 @@ fn run_daemon() -> i32 {
                 mode.as_str()
             );
             let streamed_command = if wake_stream_started {
-                crate::local_stt::finish_command_stream()
+                let result = crate::local_stt::finish_command_stream();
+                voice_timing("stt_stream_final");
+                result
             } else {
                 None
             };

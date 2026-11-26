@@ -7,7 +7,7 @@
  *     -> 4th-order 192 Hz Butterworth HPF per mic (kills DC/hum/rumble)
  *     -> per-channel VQE MicChooser; single best-SNR capsule during speech
  *     -> NLMS echo cancellation with double-talk protection
- *     -> 480 ms stationary background noise reducer + smooth speech AGC + soft limiter
+ *     -> STFT-Kalman echo suppression -> GTCRN (or fallback spectral BNR) -> AGC/limiter
  *     -> 16 kHz mono S16_LE on stdout
  */
 #define _GNU_SOURCE
@@ -119,7 +119,7 @@ static void fft256(float *re, float *im, int inv) {
     }
 }
 
-static void stft_kalman_process_block(float *e_blk, const float *r_blk, int ref_active) {
+static void stft_kalman_process_block(float *e_blk, const float *r_blk, int ref_active, int apply_bnr) {
     memmove(g_e_win, g_e_win + BLK, BLK * sizeof(float));
     memcpy(g_e_win + BLK, e_blk, BLK * sizeof(float));
     memmove(g_r_win, g_r_win + BLK, BLK * sizeof(float));
@@ -139,6 +139,7 @@ static void stft_kalman_process_block(float *e_blk, const float *r_blk, int ref_
     for (int i = 0; i < BLK; i++) block_power += (double)e_blk[i] * e_blk[i];
     float block_rms = sqrtf((float)(block_power / BLK));
     int speech_active = block_rms > fmaxf(g_noise_env * 1.45f + 15.0f, 55.0f);
+    /* Keep the fallback noise estimate warm even while GTCRN owns BNR. */
     if (!speech_active && !g_noise_psd_ready) {
         for (int k = 0; k < FFT_HALF; k++) {
             g_noise_psd[k] = ere[k] * ere[k] + eim[k] * eim[k];
@@ -179,7 +180,7 @@ static void stft_kalman_process_block(float *e_blk, const float *r_blk, int ref_
             g_noise_psd[k] += alpha * (clean_power - g_noise_psd[k]);
         }
         float noise_gain = 1.0f;
-        if (g_noise_psd_ready && clean_power > 1.0f) {
+        if (apply_bnr && g_noise_psd_ready && clean_power > 1.0f) {
             /* Conservative spectral BNR: reduce the stationary noise floor
              * while keeping a nonzero floor for low-level speech components. */
             float subtraction = speech_active ? 0.70f : 1.10f;
@@ -642,25 +643,33 @@ int main(int argc, char **argv) {
             mp++;
         }
 
-        /* Apply Frequency-Domain STFT-Kalman Residual Echo Suppressor + Barge-In VAD */
-        stft_kalman_process_block(blk_e, blk_r, blk_ref_active);
+        /* Preserve STFT-Kalman echo suppression while disabling its duplicate
+         * spectral BNR whenever GTCRN is healthy. Restore BNR on GTCRN fallback. */
+        int gtcrn_active = gtcrn_ns_is_active();
+        stft_kalman_process_block(blk_e, blk_r, blk_ref_active, !gtcrn_active);
 
         /* Apply local streaming GTCRN neural noise suppressor (16 kHz, 16 ms hop).
-         * Fail-safe: no-op if disabled, unavailable, or real-time deadline overrun occurs. */
+         * On runtime fallback the aligned dry stream continues. */
         gtcrn_ns_process_128(blk_e);
+        gtcrn_active = gtcrn_ns_is_active();
 
         for (int i = 0; i < BLK; i++) {
             float e = blk_e[i];
             float ae = fabsf(e);
             g_sig_env = (ae > g_sig_env) ? (g_sig_env * 0.85f + ae * 0.15f) : (g_sig_env * 0.992f + ae * 0.008f);
-            float nr_tgt = 1.0f;
-            if (g_sig_env < g_noise_env * 1.85f) {
-                nr_tgt = 0.80f;
-            } else if (g_sig_env < g_noise_env * 2.50f) {
-                float frac = (g_sig_env - g_noise_env * 1.85f) / (g_noise_env * 0.65f + 1.0f);
-                nr_tgt = 0.80f + 0.20f * frac;
+            if (gtcrn_active) {
+                /* GTCRN is the only background noise reducer while active. */
+                g_nr_gain = 1.0f;
+            } else {
+                float nr_tgt = 1.0f;
+                if (g_sig_env < g_noise_env * 1.85f) {
+                    nr_tgt = 0.80f;
+                } else if (g_sig_env < g_noise_env * 2.50f) {
+                    float frac = (g_sig_env - g_noise_env * 1.85f) / (g_noise_env * 0.65f + 1.0f);
+                    nr_tgt = 0.80f + 0.20f * frac;
+                }
+                g_nr_gain += ((nr_tgt > g_nr_gain) ? 0.15f : 0.01f) * (nr_tgt - g_nr_gain);
             }
-            g_nr_gain += ((nr_tgt > g_nr_gain) ? 0.15f : 0.01f) * (nr_tgt - g_nr_gain);
 
             /* Keep whispered speech above the quantization/noise floor after
              * AEC. A lower noise-relative gate and extra headroom help VAD/STT
