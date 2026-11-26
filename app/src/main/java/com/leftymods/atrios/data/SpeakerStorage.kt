@@ -95,4 +95,17 @@ class SpeakerStorage(context: Context) {
     fun saveYMusicToken(token: String) {
         prefs.edit().putString("ymusic_token_v1", token.trim()).apply()
     }
+
+    fun loadPinnedStationKey(deviceId: String): String {
+        val did = deviceId.trim()
+        if (did.isEmpty()) return ""
+        return prefs.getString("e2ee_pin_$did", "")?.trim().orEmpty()
+    }
+
+    fun savePinnedStationKey(deviceId: String, identityPubB64: String) {
+        val did = deviceId.trim()
+        val pub = identityPubB64.trim()
+        if (did.isEmpty() || pub.isEmpty()) return
+        prefs.edit().putString("e2ee_pin_$did", pub).apply()
+    }
 }

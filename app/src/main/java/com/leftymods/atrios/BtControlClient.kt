@@ -123,6 +123,8 @@ class BtControlClient(
     private val onRelayInfo: (String, String, String) -> Unit = { _, _, _ -> },
     private val onTermE2eeState: (Boolean, String) -> Unit = { _, _ -> },
     private val onTermE2eeOutput: (String) -> Unit = {},
+    private val onLoadPinnedStationKey: (String) -> String = { "" },
+    private val onPinStationKey: (String, String) -> Unit = { _, _ -> },
     private val onMessage: (String, Boolean) -> Unit = { _, _ -> },
     private val onConnectionState: (Boolean, String, BluetoothDevice?) -> Unit
 ) {
@@ -149,6 +151,7 @@ class BtControlClient(
     @Volatile private var termSid: String = ""
     @Volatile private var termSharedKey: ByteArray? = null
     @Volatile private var termPhonePubHex: String = ""
+    @Volatile private var termClientNonceHex: String = ""
     @Volatile private var termPhonePriv: ByteArray? = null
     @Volatile private var termInitInFlight: Boolean = false
     @Volatile private var pendingTermCommand: String? = null
@@ -163,11 +166,18 @@ class BtControlClient(
         termInitInFlight = true
         val priv = E2eeCrypto.randomBytes(32)
         val pub = E2eeCrypto.x25519PublicKey(priv)
+        val nonce = E2eeCrypto.randomBytes(16)
         termPhonePriv = priv
         termPhonePubHex = E2eeCrypto.hexEncode(pub)
+        termClientNonceHex = E2eeCrypto.hexEncode(nonce)
         termSid = ""
         termSharedKey = null
-        sendCommand(JSONObject().put("cmd", "term_e2ee_init"))
+        sendCommand(
+            JSONObject()
+                .put("cmd", "term_e2ee_init")
+                .put("client_pub", termPhonePubHex)
+                .put("client_nonce", termClientNonceHex)
+        )
     }
 
     fun termE2eeExec(command: String) {
@@ -866,25 +876,63 @@ class BtControlClient(
                 termInitInFlight = false
                 val sid = json.optString("sid", "").trim()
                 val spkPubHex = json.optString("pub", "").trim()
+                val did = json.optString("device_id", "").trim()
+                val idPubB64 = json.optString("identity_pub", "").trim()
+                val sigB64 = json.optString("sig", "").trim()
                 val priv = termPhonePriv
+                val clientPub = termPhonePubHex
+                val clientNonce = termClientNonceHex
                 if (sid.isNotEmpty() && spkPubHex.length == 64 && priv != null) {
                     try {
+                        // 1. Fail-closed: require signed station identity (prevents active relay MITM!)
+                        if (did.isEmpty() || idPubB64.isEmpty() || sigB64.isEmpty()) {
+                            throw SecurityException("Станция не прислала подпись (обновите прошивку до v1.16+)")
+                        }
+                        val transcript = "atrios-term-e2ee-v2|$did|$sid|$clientPub|$clientNonce|$spkPubHex"
+                        if (!E2eeCrypto.verifyEcdsaP256(idPubB64, transcript.toByteArray(Charsets.UTF_8), sigB64)) {
+                            throw SecurityException("Неверная ECDSA-подпись станции (возможна атака MITM)")
+                        }
+                        // 2. Identity pinning: pin ONLY over trusted local Bluetooth; fail-closed over Internet Relay!
+                        val pinned = onLoadPinnedStationKey(did)
+                        if (isRelayActive()) {
+                            if (pinned.isBlank()) {
+                                throw SecurityException("Ключ станции не подтверждён — подключитесь 1 раз по Bluetooth для привязки ключа")
+                            }
+                            if (pinned != idPubB64) {
+                                throw SecurityException("КРИТИЧНО: ключ станции не совпадает с закреплённым (MITM)!")
+                            }
+                        } else {
+                            if (pinned.isBlank()) {
+                                onPinStationKey(did, idPubB64)
+                                DebugLogStore.log("OK", "E2EE", "Pinned station ECDSA P-256 identity key over trusted local BT ($did)")
+                            } else if (pinned != idPubB64) {
+                                throw SecurityException("Ключ станции изменился — проверьте устройство!")
+                            }
+                        }
+                        // 3. X25519 key agreement + reject all-zero low-order shared secret
                         val spkPub = E2eeCrypto.hexDecode(spkPubHex)
-                        termSharedKey = E2eeCrypto.x25519(priv, spkPub)
+                        val shared = E2eeCrypto.x25519(priv, spkPub)
+                        if (E2eeCrypto.isAllZero(shared)) {
+                            throw SecurityException("Отклонён небезопасный X25519 ключ (all-zero)")
+                        }
+                        termSharedKey = shared
                         termSid = sid
-                        DebugLogStore.log("OK", "E2EE", "X25519 handshake complete (sid=${sid.take(8)}…)")
+                        DebugLogStore.log("OK", "E2EE", "Authenticated ECDSA+X25519 handshake complete (sid=${sid.take(8)}…)")
                         val queued = pendingTermCommand
                         pendingTermCommand = null
                         withContext(Dispatchers.Main) {
-                            onTermE2eeState(true, "E2EE активен (X25519 + ChaCha20, sid=${sid.take(6)})")
+                            onTermE2eeState(true, "E2EE подтверждён (ECDSA P-256 + X25519, sid=${sid.take(6)})")
                         }
                         if (!queued.isNullOrBlank()) {
                             termE2eeExec(queued)
                         }
                     } catch (e: Exception) {
                         pendingTermCommand = null
+                        termSharedKey = null
+                        termSid = ""
+                        DebugLogStore.log("ERR", "E2EE", "Handshake rejected: ${e.message}")
                         withContext(Dispatchers.Main) {
-                            onTermE2eeState(false, "Ошибка E2EE handshake: ${e.message}")
+                            onTermE2eeState(false, "Ошибка E2EE: ${e.message}")
                         }
                     }
                 }
@@ -915,6 +963,13 @@ class BtControlClient(
                 val did = json.optString("device_id", "").trim()
                 val gw = json.optString("gateway", "").trim().trimEnd('/')
                 val tok = json.optString("token", "").trim()
+                val idPub = json.optString("e2ee_identity_pub", "").trim()
+                if (!isRelayActive() && did.isNotEmpty() && idPub.isNotEmpty()) {
+                    if (onLoadPinnedStationKey(did).isBlank()) {
+                        onPinStationKey(did, idPub)
+                        DebugLogStore.log("OK", "E2EE", "Auto-pinned station ECDSA key over local BT ($did)")
+                    }
+                }
                 if (did.isNotEmpty()) {
                     if (gw.startsWith("https://")) relayGateway = gw
                     relayDeviceId = did

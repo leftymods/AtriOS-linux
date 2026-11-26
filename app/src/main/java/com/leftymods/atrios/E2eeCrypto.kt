@@ -1,7 +1,11 @@
 package com.leftymods.atrios
 
+import android.util.Base64
+import java.security.KeyFactory
 import java.security.MessageDigest
 import java.security.SecureRandom
+import java.security.Signature
+import java.security.spec.X509EncodedKeySpec
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 
@@ -216,6 +220,32 @@ object E2eeCrypto {
         val ct = chacha20Xor(encKey, nonce, plaintext)
         val mac = hmacSha256(macKey, nonce + ct)
         return ct to mac
+    }
+
+    fun isAllZero(bytes: ByteArray): Boolean {
+        var acc = 0
+        for (b in bytes) acc = acc or (b.toInt() and 0xFF)
+        return acc == 0
+    }
+
+    /**
+     * Verify station's ECDSA P-256 (SHA256withECDSA) signature over the canonical E2EE handshake transcript.
+     * Prevents an active relay from substituting station_pub or client_pub (MITM).
+     */
+    fun verifyEcdsaP256(spkiDerB64: String, transcript: ByteArray, sigDerB64: String): Boolean {
+        return try {
+            val spki = Base64.decode(spkiDerB64.trim(), Base64.DEFAULT)
+            val sigBytes = Base64.decode(sigDerB64.trim(), Base64.DEFAULT)
+            if (spki.size < 64 || sigBytes.isEmpty()) return false
+            val kf = KeyFactory.getInstance("EC")
+            val pubKey = kf.generatePublic(X509EncodedKeySpec(spki))
+            val verifier = Signature.getInstance("SHA256withECDSA")
+            verifier.initVerify(pubKey)
+            verifier.update(transcript)
+            verifier.verify(sigBytes)
+        } catch (_: Exception) {
+            false
+        }
     }
 
     fun decrypt(shared: ByteArray, nonce: ByteArray, ct: ByteArray, mac: ByteArray): ByteArray {

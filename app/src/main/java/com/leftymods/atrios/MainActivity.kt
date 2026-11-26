@@ -428,6 +428,8 @@ fun AtriOSApp(
                 val combined = (termOutputLog + "\n" + out).trim()
                 termOutputLog = if (combined.length > 6000) combined.takeLast(6000) else combined
             },
+            onLoadPinnedStationKey = { did -> storage.loadPinnedStationKey(did) },
+            onPinStationKey = { did, pub -> storage.savePinnedStationKey(did, pub) },
             onMessage = { msg, isError ->
                 if (isError && msg.isNotBlank()) {
                     scope.launch {
