@@ -1,6 +1,6 @@
 use std::fs;
 use std::os::unix::net::UnixDatagram;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -13,9 +13,11 @@ const YNISON_REDIRECT_URL: &str =
 const YNISON_STATE_PATH: &str = "/ynison_state.YnisonStateService/PutYnisonState";
 const YNISON_ORIGIN: &str = "https://music.yandex.ru";
 const YNISON_APP_NAME: &str = "AtriStation";
-const YNISON_APP_VERSION: &str = "1.15.0";
+const YNISON_APP_VERSION: &str = "1.15.2";
 const YNISON_DEVICE_ID_FILE: &str = "/var/lib/atrios/ynison_device_id";
 pub const YNISON_ENABLED_FILE: &str = "/var/lib/atrios/ynison_enabled";
+
+static PENDING_REMOTE_VOL: AtomicI32 = AtomicI32::new(-1);
 
 pub fn is_ynison_enabled() -> bool {
     match fs::read_to_string(YNISON_ENABLED_FILE) {
@@ -576,7 +578,7 @@ fn run_ynison_session(token: &str, device_id: &str, stop_flag: &'static AtomicBo
             last_status_push = Instant::now();
         }
 
-        let Some(frame) = ws.recv_frame(80)? else {
+        let Some(frame) = ws.recv_frame(25)? else {
             continue;
         };
         let txt = match frame {
@@ -617,7 +619,8 @@ fn run_ynison_session(token: &str, device_id: &str, stop_flag: &'static AtomicBo
                         let pct = (v.clamp(0.0, 1.0) * 100.0).round() as i32;
                         if now_active && (pct - last_remote_vol_pct).abs() >= 1 {
                             last_remote_vol_pct = pct;
-                            crate::bt_control::set_system_volume(pct);
+                            // Non-blocking coalesced apply so rapid phone volume steps never stall WS frames!
+                            PENDING_REMOTE_VOL.store(pct, Ordering::SeqCst);
                         }
                     }
                 }
@@ -710,6 +713,17 @@ fn run_ynison_session(token: &str, device_id: &str, stop_flag: &'static AtomicBo
 }
 
 pub fn spawn_ynison_thread(stop_flag: &'static AtomicBool) {
+    // Dedicated coalescing volume worker so amixer never stalls Ynison WebSocket frames
+    thread::spawn(move || {
+        while !stop_flag.load(Ordering::SeqCst) {
+            let pct = PENDING_REMOTE_VOL.swap(-1, Ordering::SeqCst);
+            if pct >= 0 {
+                crate::bt_control::set_system_volume(pct);
+            } else {
+                thread::sleep(Duration::from_millis(15));
+            }
+        }
+    });
     thread::spawn(move || {
         let device_id = ynison_device_id();
         let mut backoff_sec = 2u64;
