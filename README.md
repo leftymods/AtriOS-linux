@@ -1,5 +1,20 @@
 <div align="center">
 
+# ⚠️ РЕПОЗИТОРИЙ ПЕРЕЕХАЛ / REPOSITORY MOVED ⚠️
+
+## 🚀 Актуальный репозиторий AtriOS теперь находится здесь:
+
+# 👉 [https://github.com/leftymods/AtriOS](https://github.com/leftymods/AtriOS) 👈
+
+> **Этот репозиторий (`leftymods/AtriOS-linux`) больше не обновляется.**
+> Вся дальнейшая разработка, релизы, OTA и исходный код перенесены в **[leftymods/AtriOS](https://github.com/leftymods/AtriOS)**.
+
+</div>
+
+---
+
+<div align="center">
+
 # AtriOS
 
 **Фреймворк для сборки Linux-прошивок умных колонок**
