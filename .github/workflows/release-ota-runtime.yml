@@ -33,7 +33,7 @@ jobs:
           /tmp/atrios_runtime_test
           rustc --edition=2021 -C opt-level=2 --target aarch64-unknown-linux-gnu -C linker=aarch64-linux-gnu-gcc atrios_runtime.rs -o "$RUNNER_TEMP/atrios-runtime"
           aarch64-linux-gnu-gcc -O2 atri_mp3dec.c -lm -o "$RUNNER_TEMP/atri-mp3dec"
-          aarch64-linux-gnu-gcc -O3 atri_aec.c gtcrn_ns.c -lm -ldl -o "$RUNNER_TEMP/atri-aec"
+          aarch64-linux-gnu-gcc -O3 atri_aec.c pbfdaf_aec.c gtcrn_ns.c -lm -ldl -o "$RUNNER_TEMP/atri-aec"
       - name: Build RSA-signed OTA bundle for yndxsttion53
         env:
           OTA_SIGNING_KEY: ${{ secrets.OTA_SIGNING_KEY }}

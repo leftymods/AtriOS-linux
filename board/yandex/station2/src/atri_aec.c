@@ -27,6 +27,7 @@
 #include <time.h>
 #include <unistd.h>
 #include "gtcrn_ns.h"
+#include "pbfdaf_aec.h"
 
 #define SR        16000
 #define CAP_CH    8
@@ -287,6 +288,7 @@ static long now_pos(void) {
 /* ---- reference timeline ---- */
 static int16_t g_ring[RING];
 static long g_wp = 0;               /* next write position (absolute samples) */
+static long g_ref_last_pos = -1;    /* monotonic pos of last received ref packet */
 static float g_racc = 0.f;
 static int g_rcnt = 0;
 
@@ -296,7 +298,9 @@ static void ref_drain(int fd) {
         ssize_t n = recv(fd, buf, sizeof(buf), MSG_DONTWAIT);
         if (n <= 0) break;
         long np = now_pos();
-        if (g_wp < np - 8000 || g_wp > np + 8000) {
+        /* Only resync g_wp after a genuine silence gap (> 1.5s) or huge overflow (> 3s).
+         * Never wipe buffered playback bursts (ALSA/pipe pre-fill is normally 100..600 ms). */
+        if (g_ref_last_pos < 0 || np - g_ref_last_pos > 24000 || g_wp < np - 16000 || g_wp > np + 48000) {
             long from = g_wp, to = np;
             if (to - from > RING) from = to - RING;
             if (from < 0) from = 0;
@@ -305,6 +309,7 @@ static void ref_drain(int fd) {
             g_racc = 0.f;
             g_rcnt = 0;
         }
+        g_ref_last_pos = np;
         const int16_t *s = (const int16_t *)buf;
         size_t frames = (size_t)n / 4;
         for (size_t i = 0; i < frames; i++) {
@@ -345,7 +350,7 @@ static int g_ecnt = 0;
 
 static void estimate_delay(void) {
     int n = g_ecount < ENV_N ? g_ecount : ENV_N;
-    if (n < 200) return;
+    if (n < 100) return;
     static float m[ENV_N], r[ENV_N];
     for (int i = 0; i < n; i++) {
         int idx = (g_ei - n + i + ENV_N * 2) % ENV_N;
@@ -386,6 +391,7 @@ static void estimate_delay(void) {
     if (labs(nd - g_delay) > 480) {
         g_delay = nd;
         memset(g_w, 0, sizeof(g_w));
+        pbfdaf_reset_weights();
     }
 }
 
@@ -451,8 +457,22 @@ int main(int argc, char **argv) {
     if (argc == 4 && strcmp(argv[1], "--gtcrn-file") == 0) {
         return gtcrn_ns_process_raw_file(argv[2], argv[3]);
     }
+    int live_test_sec = 0;
+    FILE *lt_raw = NULL, *lt_clean = NULL, *lt_ref = NULL;
+    if (argc >= 5 && strcmp(argv[1], "--live-test") == 0) {
+        live_test_sec = atoi(argv[2]);
+        if (live_test_sec < 1 || live_test_sec > 60) live_test_sec = 10;
+        lt_raw = fopen(argv[3], "wb");
+        lt_clean = fopen(argv[4], "wb");
+        if (argc >= 6) lt_ref = fopen(argv[5], "wb");
+        if (!lt_raw || !lt_clean) {
+            perror("fopen --live-test");
+            return 1;
+        }
+    }
     int use_stdin = (argc > 1 && strcmp(argv[1], "--stdin") == 0);
     init_stft();
+    pbfdaf_init();
     gtcrn_ns_init();
     signal(SIGTERM, on_sig);
     signal(SIGINT, on_sig);
@@ -493,8 +513,11 @@ int main(int argc, char **argv) {
     int outn = 0;
     double pw_in = 0, pw_out = 0;
     int stat_cnt = 0, ref_active_cnt = 0;
+    long live_test_samples = (long)live_test_sec * SR;
+    long live_done = 0;
 
     while (!g_stop) {
+        if (live_test_sec > 0 && live_done >= live_test_samples) break;
         size_t got = 0;
         while (got < IN_BYTES) {
             ssize_t n = read(afd, inbuf + got, IN_BYTES - got);
@@ -548,20 +571,12 @@ int main(int argc, char **argv) {
             g_h[g_p++] = r;
             g_en += (double)r * r - (double)old * old;
             if (g_en < 0) g_en = 0;
-            const float *x = g_h + g_p - TAPS;
-            float y = dotp(g_w, x, TAPS);
-            float e = mic - y;
-
-            int active = g_en > (double)TAPS * 40.0;
+            int active = g_en > (double)TAPS * 25.0;
             if (active) {
-                float ref_rms = sqrtf((float)(g_en / TAPS) + 1.0f);
-                float mu = (fabsf(e) > 2.2f * ref_rms) ? 0.08f : 0.45f;
-                float g = mu * e / (float)(g_en + (double)TAPS * 20.0);
-                for (int t = 0; t < TAPS; t++) g_w[t] += g * x[t];
                 ref_active_cnt++;
                 blk_ref_active = 1;
             }
-            blk_e[i] = e;
+            blk_e[i] = mic;
             blk_r[i] = r;
             blk_mic[i] = mic;
 
@@ -594,7 +609,9 @@ int main(int argc, char **argv) {
                         }
                     }
                 }
-                int speech_now = (best_snr >= 2.2f && g_m_ema[cand1] >= 45.0f);
+                /* Keep microphone weights fixed while speaker playback is active so
+                 * the acoustic transfer function stays stationary for PBFDAF AEC. */
+                int speech_now = (!blk_ref_active && best_snr >= 2.2f && g_m_ema[cand1] >= 45.0f);
                 if (speech_now) {
                     if (g_m_ema[g_best_mic] < 1.0f || g_m_ema[cand1] > g_m_ema[g_best_mic] * 1.15f) {
                         g_best_mic = cand1;
@@ -638,10 +655,13 @@ int main(int argc, char **argv) {
                 g_ecount++;
                 g_macc = g_racc_env = 0;
                 g_ecnt = 0;
-                if (g_ecount % 100 == 0) estimate_delay();
+                if (g_ecount % 50 == 0) estimate_delay();
             }
             mp++;
         }
+
+        /* Dual-Filter Partitioned-Block Frequency-Domain AEC (192 ms tail) + Nonlinear RES */
+        pbfdaf_process_block(blk_mic, blk_r, blk_ref_active, blk_e);
 
         /* Preserve STFT-Kalman echo suppression while disabling its duplicate
          * spectral BNR whenever GTCRN is healthy. Restore BNR on GTCRN fallback. */
@@ -672,17 +692,16 @@ int main(int argc, char **argv) {
             }
 
             /* Keep whispered speech above the quantization/noise floor after
-             * AEC. A lower noise-relative gate and extra headroom help VAD/STT
-             * without applying gain to near-silence. */
+             * AEC, but NEVER boost residual speaker music when ref_active is on! */
             float agc_gate = fmaxf(g_noise_env * 1.55f, 70.0f);
-            if (g_sig_env > agc_gate) {
+            if (!blk_ref_active && g_sig_env > agc_gate) {
                 float agc_tgt = 2800.0f / g_sig_env;
                 if (agc_tgt < 1.0f) agc_tgt = 1.0f;
                 if (agc_tgt > 4.0f) agc_tgt = 4.0f;
                 float rate = (agc_tgt < g_agc_gain) ? 0.04f : 0.008f;
                 g_agc_gain += rate * (agc_tgt - g_agc_gain);
             } else {
-                g_agc_gain += 0.01f * (1.0f - g_agc_gain);
+                g_agc_gain += 0.04f * (1.0f - g_agc_gain);
             }
 
             float o = e * g_nr_gain * g_agc_gain;
@@ -690,9 +709,30 @@ int main(int argc, char **argv) {
             if (o > 32767.f) o = 32767.f;
             if (o < -32768.f) o = -32768.f;
             outbuf[outn++] = (int16_t)o;
+            if (lt_raw) {
+                float rm = blk_mic[i];
+                if (rm > 32767.f) rm = 32767.f;
+                if (rm < -32768.f) rm = -32768.f;
+                int16_t rs16 = (int16_t)rm;
+                fwrite(&rs16, 2, 1, lt_raw);
+            }
+            if (lt_clean) {
+                int16_t cs16 = (int16_t)o;
+                fwrite(&cs16, 2, 1, lt_clean);
+            }
+            if (lt_ref) {
+                float rr = blk_r[i];
+                if (rr > 32767.f) rr = 32767.f;
+                if (rr < -32768.f) rr = -32768.f;
+                int16_t rf16 = (int16_t)rr;
+                fwrite(&rf16, 2, 1, lt_ref);
+            }
+            live_done++;
             if (outn == OUT_BLK) {
-                fwrite(outbuf, 2, OUT_BLK, stdout);
-                fflush(stdout);
+                if (!lt_clean) {
+                    fwrite(outbuf, 2, OUT_BLK, stdout);
+                    fflush(stdout);
+                }
                 outn = 0;
             }
             pw_in += (double)blk_mic[i] * blk_mic[i];
@@ -711,10 +751,13 @@ int main(int argc, char **argv) {
         }
     }
 
-    if (outn > 0) {
+    if (outn > 0 && !lt_clean) {
         fwrite(outbuf, 2, (size_t)outn, stdout);
         fflush(stdout);
     }
+    if (lt_raw) fclose(lt_raw);
+    if (lt_clean) fclose(lt_clean);
+    if (lt_ref) fclose(lt_ref);
     if (g_child > 0) {
         kill(g_child, SIGTERM);
         waitpid(g_child, NULL, 0);
