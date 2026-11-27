@@ -22,9 +22,12 @@ export PROJECT_ROOT
 # Source library modules
 source "$PROJECT_ROOT/lib/general.sh"
 source "$PROJECT_ROOT/lib/config.sh"
+source "$PROJECT_ROOT/lib/modules.sh"
 source "$PROJECT_ROOT/lib/compilation-kernel.sh"
 source "$PROJECT_ROOT/lib/packages.sh"
 source "$PROJECT_ROOT/lib/rootfs-debian.sh"
+source "$PROJECT_ROOT/lib/rootfs-alpine.sh"
+source "$PROJECT_ROOT/lib/rootfs.sh"
 source "$PROJECT_ROOT/lib/image-emmc.sh"
 
 # Default parameters
@@ -123,7 +126,7 @@ case "$TARGET" in
     image|emmc)
         # Rebuild dependencies together: existence alone does not prove freshness.
         build_all_packages
-        build_debian_micro_rootfs
+        build_rootfs
 
         build_emmc_image
         ;;
@@ -132,7 +135,7 @@ case "$TARGET" in
         ;;
     rootfs)
         build_all_packages
-        build_debian_micro_rootfs
+        build_rootfs
         ;;
     kernel)
         build_kernel
@@ -151,6 +154,11 @@ case "$TARGET" in
         echo "SoC:             ${SOC_NAME:-$SOC}"
         echo "Arch:            $ARCH"
         echo "DTS:             $DTS_NAME"
+        echo "System Profile:  ${ATRIOS_PROFILE:-full}"
+        echo "RootFS Distro:   ${ROOTFS_DISTRO:-debian} (${ROOTFS_SUITE:-bookworm}, shell=${ROOTFS_SHELL:-fish})"
+        echo "AtriOS Flavor:   ${ATRIOS_APP_FLAVOR:-full}"
+        echo "Audio DSP:       aec=${AUDIO_AEC_ENGINE:-pbfdaf}, ns=${AUDIO_NS_ENGINE:-gtcrn}, kalman=${AUDIO_ENABLE_STFT_KALMAN:-true}, mics=${AUDIO_VQE_MICS:-7}/${HW_MIC_CHANNELS:-8} (${HW_CAPTURE_DEVICE:-hw:0,3})"
+        echo "Modules:         atriai=${MOD_ATRIAI:-true} ymusic=${MOD_YMUSIC:-true} bt=${MOD_BLUETOOTH:-true} pipewire=${MOD_PIPEWIRE:-true} display=${MOD_DISPLAY:-true} rotary=${MOD_ROTARY:-true} light=${MOD_LIGHT:-true} zigbee=${MOD_ZIGBEE:-true} ota=${MOD_OTA:-true}"
         echo "U-Boot Config:   $UBOOT_DEFCONFIG"
         echo "Kernel Config:   $KERNEL_DEFCONFIG"
         echo "Bootloader:      $BOOTLOADER_BIN"

@@ -33,7 +33,8 @@ jobs:
           /tmp/atrios_runtime_test
           rustc --edition=2021 -C opt-level=2 --target aarch64-unknown-linux-gnu -C linker=aarch64-linux-gnu-gcc atrios_runtime.rs -o "$RUNNER_TEMP/atrios-runtime"
           aarch64-linux-gnu-gcc -O2 atri_mp3dec.c -lm -o "$RUNNER_TEMP/atri-mp3dec"
-          aarch64-linux-gnu-gcc -O3 atri_aec.c pbfdaf_aec.c gtcrn_ns.c -lm -ldl -o "$RUNNER_TEMP/atri-aec"
+          cd "$GITHUB_WORKSPACE"
+          bash scripts/build_audio_dsp.sh --board yndxsttion53 --output "$RUNNER_TEMP/atri-aec" --stage-dir "$RUNNER_TEMP/stage"
       - name: Build RSA-signed OTA bundle for yndxsttion53
         env:
           OTA_SIGNING_KEY: ${{ secrets.OTA_SIGNING_KEY }}
@@ -45,14 +46,9 @@ jobs:
           printf '%s\n' "$OTA_SIGNING_KEY" > "$RUNNER_TEMP/ota-signing.pem"
           trap 'rm -f -- "$RUNNER_TEMP/ota-signing.pem"' EXIT
           openssl rsa -in "$RUNNER_TEMP/ota-signing.pem" -check -noout >/dev/null
-          mkdir -p "$RUNNER_TEMP/stage/usr/lib/atrios" "$RUNNER_TEMP/stage/usr/bin" "$RUNNER_TEMP/stage/usr/share/atrios/models/gtcrn" "$RUNNER_TEMP/ota_out"
+          mkdir -p "$RUNNER_TEMP/stage/usr/lib/atrios" "$RUNNER_TEMP/stage/usr/bin" "$RUNNER_TEMP/ota_out"
           install -m 755 "$RUNNER_TEMP/atrios-runtime" "$RUNNER_TEMP/stage/usr/lib/atrios/atrios-runtime"
-          install -m 755 "$RUNNER_TEMP/atri-aec" "$RUNNER_TEMP/stage/usr/lib/atrios/atri-aec"
           install -m 755 "$RUNNER_TEMP/atri-mp3dec" "$RUNNER_TEMP/stage/usr/bin/atri-mp3dec"
-          install -m 755 board/yandex/station2/rootfs_overlay/usr/lib/atrios/libonnxruntime.so "$RUNNER_TEMP/stage/usr/lib/atrios/libonnxruntime.so"
-          install -m 644 board/yandex/station2/rootfs_overlay/usr/lib/atrios/LICENSE.onnxruntime "$RUNNER_TEMP/stage/usr/lib/atrios/LICENSE.onnxruntime"
-          install -m 644 board/yandex/station2/rootfs_overlay/usr/share/atrios/models/gtcrn/gtcrn_simple.onnx "$RUNNER_TEMP/stage/usr/share/atrios/models/gtcrn/gtcrn_simple.onnx"
-          install -m 644 board/yandex/station2/rootfs_overlay/usr/share/atrios/models/gtcrn/LICENSE "$RUNNER_TEMP/stage/usr/share/atrios/models/gtcrn/LICENSE"
 
           python3 - "$VER" "$RUNNER_TEMP/stage" "$RUNNER_TEMP/ota-signing.pem" "$RUNNER_TEMP/ota_out" <<'PY'
           import hashlib, json, os, subprocess, sys, tarfile

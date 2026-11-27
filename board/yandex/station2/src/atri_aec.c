@@ -26,12 +26,84 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
-#include "gtcrn_ns.h"
+
+/* ---- Compile-time modular Audio/DSP feature switches (set by scripts/build_audio_dsp.sh) ---- */
+#ifndef ATRIOS_CAP_DEV
+#define ATRIOS_CAP_DEV "hw:0,3"
+#endif
+#ifndef ATRIOS_CAP_CH
+#define ATRIOS_CAP_CH 8
+#endif
+#ifndef ATRIOS_VQE_MICS
+#define ATRIOS_VQE_MICS 7
+#endif
+#ifndef ATRIOS_AEC_PBFDAF
+#define ATRIOS_AEC_PBFDAF 1
+#endif
+#ifndef ATRIOS_AEC_NLMS
+#define ATRIOS_AEC_NLMS 0
+#endif
+#ifndef ATRIOS_NS_GTCRN
+#define ATRIOS_NS_GTCRN 1
+#endif
+#ifndef ATRIOS_NS_BNR
+#define ATRIOS_NS_BNR 1
+#endif
+#ifndef ATRIOS_ENABLE_STFT_KALMAN
+#define ATRIOS_ENABLE_STFT_KALMAN 1
+#endif
+
+#if ATRIOS_AEC_PBFDAF
 #include "pbfdaf_aec.h"
+#define ATRIOS_AEC_NAME "pbfdaf"
+#elif ATRIOS_AEC_NLMS
+#define ATRIOS_AEC_NAME "nlms"
+#else
+#define ATRIOS_AEC_NAME "none"
+#endif
+
+#if ATRIOS_NS_GTCRN
+#include "gtcrn_ns.h"
+#define ATRIOS_NS_NAME "gtcrn"
+#else
+#if ATRIOS_NS_BNR
+#define ATRIOS_NS_NAME "bnr"
+#else
+#define ATRIOS_NS_NAME "none"
+#endif
+typedef struct {
+    int enabled;
+    int active;
+    char mode[32];
+    uint64_t hops;
+    double infer_ms_last;
+    double infer_ms_avg;
+    double infer_ms_max;
+    double rtf_avg;
+    double rtf_max;
+    double queue_ms;
+    uint64_t deadline_misses;
+    uint64_t fallback_events;
+    long rss_kb;
+} gtcrn_metrics_t;
+static inline int gtcrn_ns_init(void) { return 0; }
+static inline int gtcrn_ns_is_active(void) { return 0; }
+static inline void gtcrn_ns_process_128(float *blk128) { (void)blk128; }
+static inline void gtcrn_ns_get_metrics(gtcrn_metrics_t *out) {
+    memset(out, 0, sizeof(*out));
+    snprintf(out->mode, sizeof(out->mode), "%s", "disabled_compile_time");
+}
+static inline int gtcrn_ns_process_raw_file(const char *a, const char *b) {
+    (void)a; (void)b;
+    fprintf(stderr, "[gtcrn] not compiled into this board profile (ATRIOS_NS_GTCRN=0)\n");
+    return 1;
+}
+static inline void gtcrn_ns_shutdown(void) {}
+#endif
 
 #define SR        16000
-#define CAP_CH    8
-#define VQE_MICS  7
+#define CAP_CH    ATRIOS_CAP_CH
+#define VQE_MICS  ATRIOS_VQE_MICS
 #define DECIM     3
 #define BLK       128                       /* mic samples (16 kHz) per iteration */
 #define IN_BYTES  (BLK * DECIM * CAP_CH * 4)
@@ -53,6 +125,10 @@
 
 /* ---- Frequency-Domain STFT-Kalman Residual Echo Suppressor (256-pt FFT, 50% OLA) ---- */
 static float g_noise_env = 40.0f;
+static float g_snr_speech_db = 0.0f;
+static int g_barge_active = 0;
+
+#if ATRIOS_ENABLE_STFT_KALMAN
 static float g_hann[FFT_N];
 static float g_e_win[FFT_N];
 static float g_r_win[FFT_N];
@@ -64,9 +140,7 @@ static float g_see[FFT_HALF];
 static float g_noise_psd[FFT_HALF];
 static float g_nr_bin_gain[FFT_HALF];
 static int g_noise_psd_ready = 0;
-static float g_snr_speech_db = 0.0f;
 static int g_barge_streak = 0;
-static int g_barge_active = 0;
 
 static void init_stft(void) {
     for (int i = 0; i < FFT_N; i++) {
@@ -81,7 +155,11 @@ static void init_stft(void) {
         g_nr_bin_gain[k] = 1.0f;
     }
 }
+#else
+static void init_stft(void) {}
+#endif
 
+#if ATRIOS_ENABLE_STFT_KALMAN
 static void fft256(float *re, float *im, int inv) {
     int j = 0;
     for (int i = 1; i < FFT_N; i++) {
@@ -232,6 +310,7 @@ static void stft_kalman_process_block(float *e_blk, const float *r_blk, int ref_
         if (g_barge_streak == 0) g_barge_active = 0;
     }
 }
+#endif
 
 /* ---- VQE mic array state (CIRC_6_PLUS_1_R425) ---- */
 typedef struct {
@@ -254,10 +333,7 @@ static float g_lp34[VQE_MICS];
 static double g_msq_acc[VQE_MICS];
 static float g_m_ema[VQE_MICS];
 static float g_m_noise[VQE_MICS];
-static float g_m_weight[VQE_MICS] = {
-    1.0f / VQE_MICS, 1.0f / VQE_MICS, 1.0f / VQE_MICS, 1.0f / VQE_MICS,
-    1.0f / VQE_MICS, 1.0f / VQE_MICS, 1.0f / VQE_MICS
-};
+static float g_m_weight[VQE_MICS];
 static int g_best_mic = 0;
 
 /* ---- BNR + speech AGC state ---- */
@@ -331,6 +407,7 @@ static int g_p = TAPS;
 static double g_en = 0.0;
 static long g_delay = 0;            /* bulk delay in samples */
 
+#if ATRIOS_AEC_NLMS
 static inline float dotp(const float *a, const float *b, int n) {
     float s0 = 0.f, s1 = 0.f, s2 = 0.f, s3 = 0.f;
     for (int i = 0; i < n; i += 4) {
@@ -341,6 +418,7 @@ static inline float dotp(const float *a, const float *b, int n) {
     }
     return (s0 + s1) + (s2 + s3);
 }
+#endif
 
 /* ---- bulk delay estimation from envelopes ---- */
 static float g_menv[ENV_N], g_renv[ENV_N];
@@ -391,7 +469,9 @@ static void estimate_delay(void) {
     if (labs(nd - g_delay) > 480) {
         g_delay = nd;
         memset(g_w, 0, sizeof(g_w));
+#if ATRIOS_AEC_PBFDAF
         pbfdaf_reset_weights();
+#endif
     }
 }
 
@@ -417,12 +497,15 @@ static void write_stat(double ratio_db, int active) {
     if (jf) {
         fprintf(jf,
                 "{\"erle_db\":%.1f,\"snr_db\":%.1f,\"lag_ms\":%ld,\"best_mic\":%d,\"barge_in\":%s,\"ref_active\":%s,"
+                "\"modules\":{\"dev\":\"%s\",\"ch\":%d,\"mics\":%d,\"aec\":\"%s\",\"ns\":\"%s\",\"kalman\":%s},"
                 "\"gtcrn\":{\"enabled\":%s,\"active\":%s,\"mode\":\"%s\",\"hops\":%llu,"
                 "\"infer_ms_last\":%.3f,\"infer_ms_avg\":%.3f,\"infer_ms_max\":%.3f,"
                 "\"rtf_avg\":%.4f,\"rtf_max\":%.4f,\"queue_ms\":%.2f,\"deadline_misses\":%llu,\"rss_kb\":%ld}}\n",
                 ratio_db, g_snr_speech_db, lag_ms, g_best_mic,
                 g_barge_active ? "true" : "false",
                 active ? "true" : "false",
+                ATRIOS_CAP_DEV, CAP_CH, VQE_MICS, ATRIOS_AEC_NAME, ATRIOS_NS_NAME,
+                ATRIOS_ENABLE_STFT_KALMAN ? "true" : "false",
                 gm.enabled ? "true" : "false",
                 gm.active ? "true" : "false",
                 gm.mode,
@@ -444,8 +527,10 @@ static int spawn_arecord(void) {
         dup2(pfd[1], 1);
         close(pfd[0]);
         close(pfd[1]);
-        execlp("arecord", "arecord", "-q", "-D", "hw:0,3", "-t", "raw", "-f", "S32_LE",
-               "-r", "48000", "-c", "8", (char *)NULL);
+        char ch_str[8];
+        snprintf(ch_str, sizeof(ch_str), "%d", CAP_CH);
+        execlp("arecord", "arecord", "-q", "-D", ATRIOS_CAP_DEV, "-t", "raw", "-f", "S32_LE",
+               "-r", "48000", "-c", ch_str, (char *)NULL);
         _exit(127);
     }
     close(pfd[1]);
@@ -454,6 +539,12 @@ static int spawn_arecord(void) {
 }
 
 int main(int argc, char **argv) {
+    if (argc == 2 && strcmp(argv[1], "--modules") == 0) {
+        printf("{\"dev\":\"%s\",\"ch\":%d,\"mics\":%d,\"aec\":\"%s\",\"ns\":\"%s\",\"kalman\":%s}\n",
+               ATRIOS_CAP_DEV, CAP_CH, VQE_MICS, ATRIOS_AEC_NAME, ATRIOS_NS_NAME,
+               ATRIOS_ENABLE_STFT_KALMAN ? "true" : "false");
+        return 0;
+    }
     if (argc == 4 && strcmp(argv[1], "--gtcrn-file") == 0) {
         return gtcrn_ns_process_raw_file(argv[2], argv[3]);
     }
@@ -472,14 +563,19 @@ int main(int argc, char **argv) {
     }
     int use_stdin = (argc > 1 && strcmp(argv[1], "--stdin") == 0);
     init_stft();
+#if ATRIOS_AEC_PBFDAF
     pbfdaf_init();
+#endif
     gtcrn_ns_init();
     signal(SIGTERM, on_sig);
     signal(SIGINT, on_sig);
     signal(SIGPIPE, SIG_DFL);
     clock_gettime(CLOCK_MONOTONIC, &g_t0);
 
-    for (int m = 0; m < VQE_MICS; m++) g_m_noise[m] = 30.0f;
+    for (int m = 0; m < VQE_MICS; m++) {
+        g_m_noise[m] = 30.0f;
+        g_m_weight[m] = 1.0f / (float)VQE_MICS;
+    }
     for (int i = 0; i < NR_HOPS; i++) g_nr_hist[i] = 40.0f;
 
     int rs = -1;
@@ -572,11 +668,26 @@ int main(int argc, char **argv) {
             g_en += (double)r * r - (double)old * old;
             if (g_en < 0) g_en = 0;
             int active = g_en > (double)TAPS * 25.0;
+#if ATRIOS_AEC_NLMS
+            const float *x = g_h + g_p - TAPS;
+            float y = dotp(g_w, x, TAPS);
+            float e_nlms = mic - y;
+            if (active) {
+                float ref_rms = sqrtf((float)(g_en / TAPS) + 1.0f);
+                float mu = (fabsf(e_nlms) > 2.2f * ref_rms) ? 0.08f : 0.45f;
+                float g = mu * e_nlms / (float)(g_en + (double)TAPS * 20.0);
+                for (int t = 0; t < TAPS; t++) g_w[t] += g * x[t];
+                ref_active_cnt++;
+                blk_ref_active = 1;
+            }
+            blk_e[i] = e_nlms;
+#else
             if (active) {
                 ref_active_cnt++;
                 blk_ref_active = 1;
             }
             blk_e[i] = mic;
+#endif
             blk_r[i] = r;
             blk_mic[i] = mic;
 
@@ -660,16 +771,19 @@ int main(int argc, char **argv) {
             mp++;
         }
 
+#if ATRIOS_AEC_PBFDAF
         /* Dual-Filter Partitioned-Block Frequency-Domain AEC (192 ms tail) + Nonlinear RES */
         pbfdaf_process_block(blk_mic, blk_r, blk_ref_active, blk_e);
+#endif
 
-        /* Preserve STFT-Kalman echo suppression while disabling its duplicate
-         * spectral BNR whenever GTCRN is healthy. Restore BNR on GTCRN fallback. */
         int gtcrn_active = gtcrn_ns_is_active();
-        stft_kalman_process_block(blk_e, blk_r, blk_ref_active, !gtcrn_active);
+#if ATRIOS_ENABLE_STFT_KALMAN
+        /* Preserve STFT-Kalman echo suppression while disabling its duplicate
+         * spectral BNR whenever GTCRN is healthy (or when BNR is disabled). */
+        stft_kalman_process_block(blk_e, blk_r, blk_ref_active, (ATRIOS_NS_BNR && !gtcrn_active));
+#endif
 
-        /* Apply local streaming GTCRN neural noise suppressor (16 kHz, 16 ms hop).
-         * On runtime fallback the aligned dry stream continues. */
+        /* Apply local streaming GTCRN neural noise suppressor (when compiled in). */
         gtcrn_ns_process_128(blk_e);
         gtcrn_active = gtcrn_ns_is_active();
 
@@ -677,8 +791,8 @@ int main(int argc, char **argv) {
             float e = blk_e[i];
             float ae = fabsf(e);
             g_sig_env = (ae > g_sig_env) ? (g_sig_env * 0.85f + ae * 0.15f) : (g_sig_env * 0.992f + ae * 0.008f);
-            if (gtcrn_active) {
-                /* GTCRN is the only background noise reducer while active. */
+            if (gtcrn_active || !ATRIOS_NS_BNR) {
+                /* GTCRN owns BNR while active, or BNR is compiled out. */
                 g_nr_gain = 1.0f;
             } else {
                 float nr_tgt = 1.0f;

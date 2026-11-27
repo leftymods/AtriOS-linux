@@ -22,8 +22,8 @@ build_debian_micro_rootfs() {
     local stage_dir="$PROJECT_ROOT/output/rootfs_debian_staging"
     local rootfs_img="$ROOTFS_IMAGE"
     local debian_mirror="${DEBIAN_MIRROR:-https://deb.debian.org/debian}"
-    local suite="bookworm"
-    local base_packages="ca-certificates,openssl,fish,kmod,util-linux,coreutils,passwd,wireless-regdb,iw,hostname,ncurses-base,ncurses-bin"
+    local suite="${ROOTFS_SUITE:-bookworm}"
+    local base_packages="${ROOTFS_BASE_PACKAGES:-ca-certificates,openssl,fish,kmod,util-linux,coreutils,passwd,wireless-regdb,iw,hostname,ncurses-base,ncurses-bin}"
     local archive_keyring base_profile
     archive_keyring=$(debian_archive_keyring)
     base_profile=$(debian_base_profile "$suite" "$ARCH" "$debian_mirror" "$base_packages" "$archive_keyring" "$qemu_binary")
@@ -59,6 +59,12 @@ build_debian_micro_rootfs() {
     fi
 
     install_common_rootfs_services "$stage_dir"
+    if declare -F prune_disabled_rootfs_modules >/dev/null 2>&1; then
+        prune_disabled_rootfs_modules "$stage_dir"
+    fi
+    if declare -F write_modules_manifest >/dev/null 2>&1; then
+        write_modules_manifest "$stage_dir"
+    fi
 
     # Ensure standard Debian UsrMerge symlinks are preserved (lib -> usr/lib, etc.)
     for d in bin sbin lib; do

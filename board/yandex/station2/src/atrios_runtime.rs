@@ -9,6 +9,7 @@ mod status;
 mod https;
 #[path = "atrios_runtime/light.rs"]
 mod light;
+#[cfg(not(atrios_no_display))]
 #[path = "atrios_runtime/screend.rs"]
 mod screend;
 #[path = "atrios_runtime/rotaryd.rs"]
@@ -50,6 +51,31 @@ fn applet_name(argv0: &str) -> &str {
         .unwrap_or(argv0)
 }
 
+fn runtime_flavor() -> &'static str {
+    if cfg!(atrios_flavor_minimal) {
+        "minimal"
+    } else if cfg!(atrios_flavor_lite) {
+        "lite"
+    } else {
+        "full"
+    }
+}
+
+fn print_modules_json() {
+    let mut applets: Vec<&'static str> = vec!["ntp", "micprobe", "wifi-scan", "hardware", "supervise"];
+    if !cfg!(atrios_no_light) { applets.push("light"); }
+    if !cfg!(atrios_no_display) { applets.push("screend"); }
+    if !cfg!(atrios_no_rotary) { applets.push("rotaryd"); }
+    if !cfg!(atrios_no_atriai) { applets.push("atriai"); }
+    if !cfg!(atrios_no_bluetooth) {
+        applets.extend_from_slice(&["bt-control", "bt-agent", "bt-volume-sync", "rtk-bt-bridge", "rtk-bt-init"]);
+    }
+    if !cfg!(atrios_no_ota) { applets.push("ota"); }
+    if !cfg!(atrios_no_ymusic) { applets.push("ymusic"); }
+    let list: Vec<String> = applets.iter().map(|a| format!("\"{}\"", a)).collect();
+    println!("{{\"flavor\":\"{}\",\"applets\":[{}]}}", runtime_flavor(), list.join(","));
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mut applet = args.first().map(|s| applet_name(s)).unwrap_or("atrios-runtime");
@@ -57,33 +83,52 @@ fn main() {
 
     if matches!(applet, "atrios-runtime" | "atrios_runtime") {
         if let Some(first) = rest.first() {
+            if matches!(first.as_str(), "--modules" | "modules") {
+                print_modules_json();
+                std::process::exit(0);
+            }
             applet = first.as_str();
             rest = &rest[1..];
         } else {
-            eprintln!("Usage: atrios-runtime <light|screend|rotaryd|atriai|bt-control|ota|ntp|micprobe|bt-agent|bt-volume-sync|rtk-bt-bridge|rtk-bt-init|wifi-scan> [args]");
+            eprintln!("Usage: atrios-runtime <modules|light|screend|rotaryd|atriai|bt-control|ota|ymusic|ntp|micprobe|bt-agent|bt-volume-sync|rtk-bt-bridge|rtk-bt-init|wifi-scan> [args]");
             std::process::exit(1);
         }
     }
 
     let code = match applet {
+        #[cfg(not(atrios_no_light))]
         "light" => light::run(rest),
+        #[cfg(not(atrios_no_display))]
         "screend" => screend::run(rest),
+        #[cfg(not(atrios_no_rotary))]
         "rotaryd" => rotaryd::run(rest),
+        #[cfg(not(atrios_no_atriai))]
         "atriai" => atriai::run(rest),
+        #[cfg(not(atrios_no_bluetooth))]
         "bt-control" => bt_control::run(rest),
+        #[cfg(not(atrios_no_ota))]
         "ota" => ota::run(rest),
+        #[cfg(not(atrios_no_ymusic))]
         "ymusic" => ymusic::run(rest),
         "ntp" => tools::run_ntp(rest),
         "micprobe" => tools::run_micprobe(rest),
+        #[cfg(not(atrios_no_bluetooth))]
         "bt-agent" => tools::run_bt_agent(rest),
+        #[cfg(not(atrios_no_bluetooth))]
         "bt-volume-sync" => tools::run_bt_volume_sync(rest),
+        #[cfg(not(atrios_no_bluetooth))]
         "rtk-bt-bridge" => tools::run_rtk_bt_bridge(rest),
+        #[cfg(not(atrios_no_bluetooth))]
         "rtk-bt-init" => tools::run_rtk_bt_init(rest),
         "wifi-scan" | "wifi_scan" => tools::run_wifi_scan(rest),
         "hardware" => hardware::run(rest),
         "supervise" => supervise::run(rest),
+        "modules" | "--modules" => {
+            print_modules_json();
+            0
+        }
         _ => {
-            eprintln!("Unknown applet: {applet}");
+            eprintln!("Applet disabled or unknown in flavor '{}': {applet}", runtime_flavor());
             1
         }
     };
